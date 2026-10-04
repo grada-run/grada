@@ -12,16 +12,16 @@ To deploy Astro as a containerized application on standard AWS infrastructure, y
 ### 1. Install the Node adapter
 Run the following command in your terminal to swap out the Vercel adapter for the Node adapter:
 
-\`\`\`bash
+```bash
 npm install @astrojs/node
 npm uninstall @astrojs/vercel
-\`\`\`
+```
 
 ### 2. Update `astro.config.mjs`
 Open your Astro configuration file and replace the Vercel import with the Node import.
 
 **Before (Vercel Lock-in):**
-\`\`\`javascript
+```javascript
 import { defineConfig } from 'astro/config';
 import vercel from '@astrojs/vercel/serverless';
 
@@ -29,10 +29,10 @@ export default defineConfig({
   output: 'server',
   adapter: vercel(),
 });
-\`\`\`
+```
 
 **After (AWS Ready):**
-\`\`\`javascript
+```javascript
 import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
 
@@ -42,7 +42,7 @@ export default defineConfig({
     mode: 'standalone'
   }),
 });
-\`\`\`
+```
 
 ### 3. Deploy
 That's it! Your Astro app is now decoupled from Vercel. 

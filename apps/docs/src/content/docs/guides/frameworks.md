@@ -11,7 +11,7 @@ sidebar:
 
 We handle framework requirements using a 3-tier strategy so you are never left guessing why a deployment failed:
 
-1. **Zero-touch plugins (Tier 1):** If you use one of our ecosystem plugins (e.g., `nest add nest-grada` or `cookiecutter-django-grada`), your code is automatically patched and configured. Zero manual intervention required.
+1. **Zero-touch plugins (Tier 1):** If you scaffold through one of our ecosystem plugins (e.g., `nest add nest-grada` or `cookiecutter-django-grada`), your project is generated pre-configured for grada deployment. Zero manual intervention required.
 2. **Intelligent CLI pre-flight (Tier 2):** If you run the standalone `grada` CLI against a raw repository, the CLI statically analyzes your code. If it detects a missing production requirement (like a localhost binding), it will flag it inline in your terminal with the exact copy-paste fix.
 3. **In-repo docs (Tier 3):** The generated `DEPLOYMENT.md` file always contains a framework-specific checklist before you push to CI/CD.
 
@@ -43,6 +43,8 @@ Notes from the actual code:
 
 The interactive picker and the headless `--framework` flag accept: `node`, `nestjs`, `nextjs`, `nuxt`, `svelte`, `python`, `django`, `rails`, `go`, `static`. In headless mode with no `--framework`, detection applies and anything unmatched falls back to `static`.
 
+Framework and `--target` are independent choices with one guardrail: `--target static` requires the `static` preset and rejects anything else with a validation error. Every other framework runs on `ecs` and `lambda` — Lambda via the Web Adapter, with workers, ALB listener rules, and the migration gate skipped.
+
 ## Per-framework defaults
 
 - **Static build directory** (`buildDir`): SvelteKit `build`, Gatsby `public`, everything else (`astro`, `vite`, Vue, Angular) `dist`. This selects the folder the generated `Dockerfile` serves.
@@ -57,7 +59,7 @@ The interactive picker and the headless `--framework` flag accept: `node`, `nest
 | **NestJS** | Multi-stage TypeScript build (`dist/`), unprivileged Node runtime | `await app.listen(port, '0.0.0.0')` in `src/main.ts` | `nest-grada` (`nest add`) |
 | **FastAPI** | Alpine Python container, Uvicorn CLI args, unprivileged port mapping | None (0.0.0.0 set via Docker CMD) | `cookiecutter-fastapi-grada` |
 | **Django** | Gunicorn WSGI adapter, Celery worker topologies, RDS bindings | None (0.0.0.0 set via Docker CMD) | `cookiecutter-django-grada` |
-| **Ruby on Rails** | Puma adapter, `RAILS_MASTER_KEY` injection into Secrets Manager placeholder, Kamal Dockerfile replaced with 0-CVE Alpine build | None (0.0.0.0 set via Docker CMD) | `rails-template-grada` |
+| **Ruby on Rails** | Puma adapter, `RAILS_MASTER_KEY` injection into Secrets Manager placeholder, Kamal Dockerfile replaced with a minimal multi-stage Alpine build | None (0.0.0.0 set via Docker CMD) | `rails-template-grada` |
 | **Nuxt 3** | Nitro-optimized Node output | None (`NITRO_HOST=0.0.0.0` injected automatically) | `nuxt-grada` |
 | **SvelteKit** | Node adapter conversion | None (`HOST=0.0.0.0` injected automatically) | `svelte-adapter-grada` |
 | **Static Sites** *(Vite, Astro, React)* | Output folder detection (`dist/`, `build/`), Nginx routing | None | `vite-plugin-grada` |

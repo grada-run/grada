@@ -413,6 +413,22 @@ describe('Command: apply on --target lambda projects', () => {
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
+  it('prints the Site URL when the stack outputs site_url (static target)', async () => {
+    mockOutputs({
+      site_url: { value: 'https://d456.cloudfront.net' },
+    });
+    const runTerraformImpl = vi.fn(async () => { });
+    const spawnSyncImpl = mockAws({ imageExists: true });
+
+    await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+
+    const outroText = stripVTControlCharacters(clack.mockOutro.mock.calls.map((call) => call[0]).join('\n'));
+    expect(outroText).toContain('Site URL: https://d456.cloudfront.net (global CDN — share this link)');
+    expect(outroText).not.toContain('Direct URL:');
+    expect(outroText).not.toContain('API URL:');
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
   it('skips seeding when :latest already exists', async () => {
     mockOutputs({ cloudfront_url: { value: 'https://d123.cloudfront.net' } });
     const runTerraformImpl = vi.fn(async () => { });

@@ -30,7 +30,7 @@ We needed an authentication mechanism with no long-lived credential to store, ro
 
 ### Positive Consequences
 * No AWS keys exist anywhere in CI: nothing to rotate, nothing durable to leak.
-* The weekly drift-convergence cron reuses the same mechanism with no extra setup.
+* The daily drift-detection workflow reuses the same mechanism with no extra setup.
 
 ### Negative Consequences
 * First `apply` must create the OIDC provider, adding one IAM dependency to the happy path.

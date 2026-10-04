@@ -18,6 +18,8 @@ npx grada-run db import --file <dump.sql> # Import a SQL dump
 
 All commands work across engines: RDS PostgreSQL, RDS MySQL 8.0, and Aurora PostgreSQL Serverless v2 (see `--db-engine` in [init](/grada/cli/init/)). `db connect` prints `mysql://` URIs and tunnels to port `3306` for MySQL, and discovers Aurora clusters via `<project-name>-db-cluster` automatically.
 
+Compute-target notes: on `--target lambda` projects, `backup` and `restore` work unchanged (pure RDS APIs), but `connect` and `import` need a running ECS container as a jump host and `migrate` and `enable-vector` run one-off ECS tasks — with no cluster to run in, they fail instead. Run migrations from CI against your database endpoint on Lambda projects. On `--target static` projects no database can exist, so every `db` command reports that none is provisioned.
+
 ## db connect
 
 Connect your local tools (psql, DBeaver, DataGrip) or a local `.env` file directly to your isolated RDS instance. The command tunnels through a running ECS container as a jump host.

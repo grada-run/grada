@@ -3,7 +3,7 @@ title: "ECS Fargate and ALB as the Single Runtime Target"
 description: "Run every supported framework on ECS Fargate behind an application load balancer."
 ---
 
-* **Status:** Accepted
+* **Status:** Superseded by [ADR-0014](/grada/adrs/0014-multiple-compute-targets/) — Lambda and static targets added; ECS Fargate + ALB remains the default.
 * **Date:** 2026-09-24 (Retroactive)
 
 ## Context and Problem Statement

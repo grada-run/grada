@@ -1,7 +1,7 @@
 import { intro, outro, spinner } from '@clack/prompts';
 import color from 'picocolors';
 import { checkDependency } from '../utils/system.js';
-import { trackEvent, flushTelemetry, detectCiProvider } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, detectCiProvider, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 
 // Stable snake_case identifiers for the binary presence checks below.
 // Only these static IDs ever reach telemetry — never paths or error text.
@@ -72,7 +72,18 @@ function dedupedCheckDependency(binary) {
     return inFlightChecks.get(binary);
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDoctor() {
+    setActiveCommandName('doctor');
+    try {
+        return await runDoctorMain();
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDoctorMain() {
     intro(color.bgCyan(color.black(' grada ☁️  ')));
 
     const s = spinner();

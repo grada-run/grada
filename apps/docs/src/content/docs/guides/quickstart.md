@@ -18,7 +18,7 @@ Deploy your first app to AWS in about five minutes. This is the fastest path; fo
 npx grada-run
 ```
 
-The wizard auto-detects your framework, `Procfile`, `vercel.json`, and Compose files, then writes Terraform, a `Dockerfile`, and `.github/workflows/deploy.yml`. Not sure your stack is supported? Check [Supported Frameworks](/grada/guides/frameworks/).
+The wizard auto-detects your framework, `Procfile`, `vercel.json`, and Compose files, then writes Terraform, a `Dockerfile`, and `.github/workflows/deploy.yml`. It also asks which compute target to generate (`ecs`, `lambda`, or `static`) — pick `static` for static-site frameworks; the default is `ecs`. Not sure your stack is supported? Check [Supported Frameworks](/grada/guides/frameworks/).
 
 ## Step 2 — Provision
 

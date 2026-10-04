@@ -3,10 +3,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import color from 'picocolors';
 import { intro, outro, confirm, cancel, isCancel } from '@clack/prompts';
-import { trackSuccess } from '../core/telemetry.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { resolveProjectName, resolveHeadless, resolveCwd } from '../utils/resolvers.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { getTerraformOutputs } from '../utils/terraform.js';
 import {
     findResourceBlock,
@@ -346,8 +346,20 @@ function printDnsTable(rows) {
     }
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDomain(input = {}) {
+    setActiveCommandName('domain');
+    try {
+        return await runDomainMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDomainMain(input = {}) {
     const options = normalizeOptions(input);
+    const noExit = isProgrammaticCall(options);
     const subcommand = typeof options.subcommand === 'string' ? options.subcommand.trim().toLowerCase() : undefined;
 
     intro(color.bgCyan(color.black(' grada domain 🌐 ')));
@@ -358,6 +370,7 @@ export async function runDomain(input = {}) {
             ? 'unknown'
             : 'none';
         return failCommand({
+            noExit,
             print: () => {
                 if (subcommand === undefined) {
                     console.log(color.yellow('\n⚠ Missing domain subcommand.'));
@@ -382,6 +395,7 @@ export async function runDomain(input = {}) {
         domain = normalizeDomain(options.domain);
         if (!domain || !isValidDomain(domain)) {
             return failCommand({
+                noExit,
                 message: `\n✖ Invalid domain "${options.domain ?? ''}".`,
                 hint: '  Use a fully qualified domain name (e.g. grada domain add example.com).\n',
                 event: 'domain_run',
@@ -394,6 +408,7 @@ export async function runDomain(input = {}) {
             zoneId = normalizeZoneId(options.zoneId);
             if (zoneId === null) {
                 return failCommand({
+                    noExit,
                     message: `\n✖ Invalid Route 53 zone ID "${options.zoneId}".`,
                     hint: '  Zone IDs look like Z1234567890ABC (find yours with: aws route53 list-hosted-zones).\n',
                     event: 'domain_run',
@@ -411,7 +426,7 @@ export async function runDomain(input = {}) {
         cwd = resolveCwd(options);
         projectName = resolveProjectName(options, cwd);
     } catch {
-        return failProjectNotInitialized({ event: 'domain_run' });
+        return failProjectNotInitialized({ event: 'domain_run', noExit });
     }
 
     const terraformDir = path.join(cwd, 'terraform');
@@ -422,6 +437,7 @@ export async function runDomain(input = {}) {
     // unpatch); every other subcommand needs the scaffolded file.
     if (subcommand !== 'remove' && !fsSync.existsSync(cloudfrontTfPath)) {
         return failCommand({
+            noExit,
             message: '\n✖ No terraform/cloudfront.tf found. Run "grada" first before managing custom domains.\n',
             event: 'domain_run',
             telemetry: { subcommand, error_code: 'TERRAFORM_NOT_INITIALIZED' },
@@ -439,12 +455,14 @@ export async function runDomain(input = {}) {
 }
 
 async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath, cloudfrontTfPath }) {
+    const noExit = isProgrammaticCall(options);
     const force = options.force === true;
     const activate = options.activate === true;
     let previousDomain = null;
     if (fsSync.existsSync(domainTfPath)) {
         if (!force) {
             return failCommand({
+                noExit,
                 message: '\n⚠ A custom domain is already configured (terraform/domain.tf exists).',
                 hint: '  Pass --force to replace it, or run "grada domain verify" to activate.\n',
                 tone: 'yellow',
@@ -477,7 +495,7 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
 
     let cloudfrontPatched = false;
     if (mode !== 'external-pending') {
-        const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, 'add');
+        const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, 'add', noExit);
         if (!patched.ok) return patched.failure;
         cloudfrontPatched = patched.changed;
     }
@@ -502,7 +520,7 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
 
 // Patches `cloudfront.tf`, replacing a previous managed domain on --force.
 // Returns `{ ok: true, changed }` or `{ ok: false, failure }`.
-async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, subcommand) {
+async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, subcommand, noExit = false) {
     let content;
     try {
         content = await fs.readFile(cloudfrontTfPath, 'utf-8');
@@ -513,6 +531,7 @@ async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, sub
         return {
             ok: false,
             failure: failCommand({
+                noExit,
                 message: '\n✖ terraform/cloudfront.tf does not contain aws_cloudfront_distribution "cdn". The domain file was written but CloudFront could not be wired.\n',
                 event: 'domain_run',
                 telemetry: { subcommand, error_code: 'CLOUDFRONT_RESOURCE_NOT_FOUND' },
@@ -531,9 +550,11 @@ async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, sub
     return { ok: true, changed };
 }
 
-async function runDomainVerify({ projectName, domainTfPath, cloudfrontTfPath }) {
+async function runDomainVerify({ options, projectName, domainTfPath, cloudfrontTfPath }) {
+    const noExit = isProgrammaticCall(options);
     if (!fsSync.existsSync(domainTfPath)) {
         return failCommand({
+            noExit,
             message: '\n✖ No custom domain configured. Run "grada domain add <domain>" first.\n',
             event: 'domain_run',
             telemetry: { projectName, subcommand: 'verify', error_code: 'DOMAIN_NOT_CONFIGURED' },
@@ -546,6 +567,7 @@ async function runDomainVerify({ projectName, domainTfPath, cloudfrontTfPath }) 
     const domain = parsed?.domain;
     if (!domain) {
         return failCommand({
+            noExit,
             message: '\n✖ terraform/domain.tf exists but no domain_name could be parsed from it.\n',
             event: 'domain_run',
             telemetry: { projectName, subcommand: 'verify', error_code: 'DOMAIN_NOT_CONFIGURED' },
@@ -555,7 +577,7 @@ async function runDomainVerify({ projectName, domainTfPath, cloudfrontTfPath }) 
     }
     const mode = parsed?.mode;
     if (mode === 'route53' || mode === 'external-active') {
-        const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, null, 'verify');
+        const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, null, 'verify', noExit);
         if (!patched.ok) return patched.failure;
         console.log(color.green(`\n✅ Custom domain ${domain} is already active (${mode}).`));
         outro(color.green('Nothing to do.'));
@@ -563,7 +585,7 @@ async function runDomainVerify({ projectName, domainTfPath, cloudfrontTfPath }) 
         return { ok: true, subcommand: 'verify', mode, domain, alreadyActive: true };
     }
     await fs.writeFile(domainTfPath, appendValidationResource(content));
-    const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, null, 'verify');
+    const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, null, 'verify', noExit);
     if (!patched.ok) return patched.failure;
     console.log(color.green(`\n✅ Custom domain ${domain} activated.`));
     console.log('  Ensure your external DNS validation CNAMEs are in place before running');
@@ -574,6 +596,7 @@ async function runDomainVerify({ projectName, domainTfPath, cloudfrontTfPath }) 
 }
 
 async function runDomainStatus({ options, cwd, projectName, domainTfPath, cloudfrontTfPath }) {
+    const noExit = isProgrammaticCall(options);
     if (!fsSync.existsSync(domainTfPath)) {
         console.log('\nNo custom domain configured. Run npx grada-run domain add <domain> to get started.');
         outro(color.green('No custom domain configured.'));
@@ -630,8 +653,10 @@ async function runDomainStatus({ options, cwd, projectName, domainTfPath, cloudf
 }
 
 async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontTfPath }) {
+    const noExit = isProgrammaticCall(options);
     if (!fsSync.existsSync(domainTfPath)) {
         return failCommand({
+            noExit,
             message: '\n✖ No custom domain configured. Nothing to remove.\n',
             event: 'domain_run',
             telemetry: { projectName, subcommand: 'remove', error_code: 'DOMAIN_NOT_CONFIGURED' },
@@ -645,6 +670,7 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
     const yes = options.yes === true;
     if (!yes && resolveHeadless(options)) {
         return failCommand({
+            noExit,
             message: '\n✖ Refusing to remove the custom domain without confirmation. Re-run with --yes.\n',
             event: 'domain_run',
             telemetry: { projectName, subcommand: 'remove', error_code: 'CONFIRMATION_REQUIRED' },
@@ -656,6 +682,7 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
         const answer = await confirm({ message: `Remove custom domain ${domain || '(unparseable)'} and restore the default CloudFront certificate?` });
         if (isCancel(answer) || !answer) {
             return failCommand({
+                noExit,
                 print: () => cancel('Domain removal cancelled.'),
                 event: 'domain_run',
                 telemetry: { projectName, subcommand: 'remove', reason: 'cancelled' },

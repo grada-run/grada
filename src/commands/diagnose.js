@@ -3,8 +3,8 @@ import { ECSClient, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/clie
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { normalizeOptions } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
@@ -81,6 +81,7 @@ function isLogGroupNotFoundError(error) {
 // SDK client the ECS path already uses.
 export async function runLambdaDiagnose(input = {}) {
     const options = normalizeOptions(input);
+    const noExit = isProgrammaticCall(options);
     const projectName = options.projectName;
     const region = options.region;
     const logGroup = options.logGroup;
@@ -107,6 +108,7 @@ export async function runLambdaDiagnose(input = {}) {
         s.stop(color.red('❌ Diagnose failed.'));
         await trackFailure('diagnose_run', { error_code: 'AWS_CLI_MISSING', log_source: 'none' });
         return failCommand({
+            noExit,
             message: '✖ The AWS CLI is required for Lambda diagnosis.',
             hint: 'Install it from https://aws.amazon.com/cli/, then try again.',
             reason: 'aws-cli-missing',
@@ -126,6 +128,7 @@ export async function runLambdaDiagnose(input = {}) {
         s.stop(color.red('❌ Diagnose failed.'));
         await trackFailure('diagnose_run', { error_code: 'GET_FUNCTION_FAILED', log_source: 'none' });
         return failCommand({
+            noExit,
             message: `✖ ${detail || 'aws lambda get-function failed.'}`,
             hint: 'Check your AWS credentials and region, then try again.',
             resultExtra: { functionName, region },
@@ -139,6 +142,7 @@ export async function runLambdaDiagnose(input = {}) {
         s.stop(color.red('❌ Diagnose failed.'));
         await trackFailure('diagnose_run', { error_code: 'BAD_RESPONSE', log_source: 'none' });
         return failCommand({
+            noExit,
             message: '✖ Could not parse the Lambda get-function response.',
             hint: 'Check your AWS CLI version, then try again.',
             resultExtra: { functionName, region },
@@ -204,8 +208,20 @@ export async function runLambdaDiagnose(input = {}) {
     return { healthy: false, functionName, state, lastUpdateStatus, logs };
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDiagnose(input = {}) {
+    setActiveCommandName('diagnose');
+    try {
+        return await runDiagnoseMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDiagnoseMain(input = {}) {
     const options = normalizeOptions(input);
+    const noExit = isProgrammaticCall(options);
     let cwd;
     let projectName;
     let region;
@@ -218,7 +234,7 @@ export async function runDiagnose(input = {}) {
         cluster = resolveCluster(options, cwd);
         logGroup = resolveLogGroup(options, cwd);
     } catch {
-        return failProjectNotInitialized({ event: 'diagnose_run' });
+        return failProjectNotInitialized({ event: 'diagnose_run', noExit });
     }
 
     if (readTerraformComputeTarget(cwd) === 'lambda') {
@@ -443,6 +459,7 @@ export async function runDiagnose(input = {}) {
         }
         s.stop(color.red('❌ Diagnose failed.'));
         return failCommand({
+            noExit,
             message: `✖ ${error.message || error}`,
             hint: 'Check your AWS credentials and region, then try again.',
         });

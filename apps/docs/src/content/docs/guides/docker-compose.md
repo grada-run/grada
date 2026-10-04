@@ -28,6 +28,7 @@ The container port is taken from the **last segment of the first port entry** â€
 ## What this means in practice
 
 - Sidecars (Redis, Memcached, background helpers) run **in the same task** as the web container and share its lifecycle â€” this is co-location, not separate services.
+- The mapping is ECS-shaped on other targets too: on `--target lambda` the web service's environment still injects into the function (and the port override applies), but the command override and sidecars are skipped; on `--target static` there is no container or function to inject into, so Compose services are ignored.
 - Compose `build:` contexts are not used in AWS; the image is built from the generated `Dockerfile` by the [CI/CD pipeline](/grada/guides/cicd-pipeline/).
 - Runtime secrets still belong in AWS Secrets Manager, not in Compose `environment:`. See [Secrets Management](/grada/guides/secrets-management/).
 

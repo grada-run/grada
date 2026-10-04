@@ -19,7 +19,7 @@ If the CLI detects a `web:` declaration:
 
 ### The `worker` Process
 If the CLI detects a `worker:` declaration:
-1. It generates a completely separate ECS Fargate task definition and private service (`worker.tf`) running the same image with your worker command.
+1. It generates a completely separate ECS Fargate task definition and internal service (`worker.tf`, no load balancer — though it still runs in the public subnets) running the same image with your worker command.
 2. The service gets **no load balancer**, so nothing routes internet traffic to it — it still reaches your database, caches, and queues over the VPC network.
 3. It shares the web container's secrets, database variables, and log group (worker entries carry the `worker` stream prefix), scaling independently of the web service.
 

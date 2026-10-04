@@ -3,6 +3,7 @@ import pc from 'picocolors';
 import fs from 'fs';
 import path from 'path';
 import { ADDON_REGISTRY } from './addons.js';
+import { detectComputeTargetFromMainTf } from './resolvers.js';
 import { trackEvent, flushTelemetry, trackFailure } from '../core/telemetry.js';
 
 export const COST_ESTIMATE_MARKER = 'Estimated Fixed Monthly Baseline:';
@@ -44,8 +45,7 @@ export function parseTerraformConfig(tfDir) {
         if (renderedCpu) cpu = parseInt(renderedCpu[1], 10);
         const renderedMemory = mainTf.match(/memory\s*=\s*"(\d+)"/);
         if (renderedMemory) memory = parseInt(renderedMemory[1], 10);
-        // Lambda projects provision the serverless function instead of ECS.
-        if (mainTf.includes('resource "aws_lambda_function"')) computeTarget = 'lambda';
+        computeTarget = detectComputeTargetFromMainTf(mainTf);
     }
 
     // terraform.tfvars overrides rendered values when present; hard defaults
@@ -103,13 +103,15 @@ export function estimateMonthlyCost({ cpu = 256, memory = 512, hasDb = false, db
     // If a worker service exists, we are running a second identical Fargate task.
     // Lambda web functions are scale-to-zero (usage-based, $0 fixed); only a
     // hand-attached Fargate worker would still bill.
-    const taskMultiplier = computeTarget === 'lambda' ? (hasWorker ? 1 : 0) : (hasWorker ? 2 : 1);
+    const taskMultiplier = computeTarget === 'static'
+        ? 0 // S3 + CloudFront: no containers, no fixed compute baseline.
+        : computeTarget === 'lambda' ? (hasWorker ? 1 : 0) : (hasWorker ? 2 : 1);
 
     const fargateCost = ((vCpu * PRICING_TABLE.fargate.cpuPerHour) +
         (memGb * PRICING_TABLE.fargate.memoryPerHour)) * hoursInMonth * taskMultiplier;
     // API Gateway HTTP API v2 is usage-based ($1.00 per million requests)
     // with no fixed hourly baseline.
-    const albCost = computeTarget === 'lambda'
+    const albCost = computeTarget === 'lambda' || computeTarget === 'static'
         ? 0
         : (PRICING_TABLE.alb.basePerHour + PRICING_TABLE.alb.lcuPerHour) * hoursInMonth;
     // Aurora Serverless v2 idles at 0 ACU: $0/mo idle compute baseline
@@ -212,6 +214,7 @@ function dbTopologyLabel(dbEngine) {
 export async function renderDryRunPreview(config, isDryRunFlag = false) {
     const { framework = 'Node.js', region = 'us-east-2', cpu = 256, memory = 512, hasDb = false, dbEngine = 'postgres', hasWorker = false, hasSecrets = false, addons = [], computeTarget = 'ecs' } = config;
     const isLambda = computeTarget === 'lambda';
+    const isStatic = computeTarget === 'static';
 
     // Fixed the duplicate hasWorker argument
     const cost = estimateMonthlyCost({ cpu, memory, hasDb, dbEngine, hasWorker, hasSecrets, addons, computeTarget });
@@ -227,8 +230,9 @@ export async function renderDryRunPreview(config, isDryRunFlag = false) {
     }
 
     // Lambda compute and API Gateway are usage-based with no fixed
-    // baseline, so the Lambda breakdown starts at the database.
-    const costParts = isLambda
+    // baseline, so the Lambda breakdown starts at the database. Static has
+    // no fixed-cost parts at all — its baseline line is built separately.
+    const costParts = (isLambda || isStatic)
         ? []
         : [`Fargate: $${cost.fargateMonthly}`, `ALB: $${cost.albMonthly}`];
     if (hasDb) costParts.push(`RDS: $${cost.dbMonthly}`);
@@ -250,22 +254,32 @@ export async function renderDryRunPreview(config, isDryRunFlag = false) {
         ? `  + Usage-based (${usageBasedCount} addon${usageBasedCount === 1 ? '' : 's'}): $0/mo fixed · per request, storage & egress`
         : '';
 
-    const baselineLine = buildBaselineLine(cost.totalMonthly, costParts, secretsMonthly, addonsMonthly, isLambda ? '+ API GW & Lambda usage' : '');
+    // Static hosting is exactly $0.00 fixed (no approximation tilde) with
+    // all spend usage-based through S3 and CloudFront.
+    const baselineLine = isStatic
+        ? `${pc.bold('Fixed Baseline:')} ${pc.green(pc.bold(`$${cost.totalMonthly}/mo`))} ${pc.dim('(Usage-based only via S3/CloudFront)')}`
+        : buildBaselineLine(cost.totalMonthly, costParts, secretsMonthly, addonsMonthly, isLambda ? '+ API GW & Lambda usage' : '');
 
     // Flattened the tree to eliminate nesting and vertical bloat
     const treeOutput = [
         `${pc.bold('Topology')} (${pc.cyan(region)}):`,
-        isLambda
-            ? `  ${pc.gray('├──')} 🌐 ${pc.bold('API Gateway HTTP API v2')} (Scale-to-zero HTTPS entry)`
-            : `  ${pc.gray('├──')} 🌐 ${pc.bold('ALB')} (Public Entry & Health: ${pc.green('200 OK')})`,
-        `  ${pc.gray('├──')} 🔒 ${pc.bold('IAM OIDC')} (GitHub Auth) & 🐳 ${pc.bold('ECR')} (Registry)`,
+        isStatic
+            ? `  ${pc.gray('├──')} 🌐 ${pc.bold('CloudFront')} (Global CDN)`
+            : isLambda
+                ? `  ${pc.gray('├──')} 🌐 ${pc.bold('API Gateway HTTP API v2')} (Scale-to-zero HTTPS entry)`
+                : `  ${pc.gray('├──')} 🌐 ${pc.bold('ALB')} (Public Entry & Health: ${pc.green('200 OK')})`,
+        isStatic
+            ? `  ${pc.gray('├──')} 🔒 ${pc.bold('IAM OIDC')} (GitHub Auth)`
+            : `  ${pc.gray('├──')} 🔒 ${pc.bold('IAM OIDC')} (GitHub Auth) & 🐳 ${pc.bold('ECR')} (Registry)`,
         hasDb ? `  ${pc.gray('├──')} ${dbTopologyLabel(dbEngine)}` : '',
         secretCount > 0 ? `  ${pc.gray('├──')} 🔑 [${pc.bold('Secrets Manager')} (${secretCount === 1 ? '1 secret' : `${secretCount} secrets`})]` : '',
         ...addonNodes,
-        isLambda
-            ? `  ${pc.gray('└──')} ⚡ ${pc.bold('AWS Lambda Web Service')} 🟢 ${pc.green(framework)} [512 MB · Scale-to-zero]`
-            : `  ${pc.gray(hasWorker ? '├──' : '└──')} 📦 ${pc.bold('ECS Web Service')} 🟢 ${pc.green(framework)} [${cpu} CPU / ${memory} MB]`,
-        !isLambda && hasWorker ? `  ${pc.gray('└──')} 📦 ${pc.bold('ECS Worker Service')} 🔄 Background Tasks [${cpu} CPU / ${memory} MB]` : '',
+        isStatic
+            ? `  ${pc.gray('└──')} 📦 ${pc.bold('S3 Private Origin')} (Static Assets)`
+            : isLambda
+                ? `  ${pc.gray('└──')} ⚡ ${pc.bold('AWS Lambda Web Service')} 🟢 ${pc.green(framework)} [512 MB · Scale-to-zero]`
+                : `  ${pc.gray(hasWorker ? '├──' : '└──')} 📦 ${pc.bold('ECS Web Service')} 🟢 ${pc.green(framework)} [${cpu} CPU / ${memory} MB]`,
+        !isLambda && !isStatic && hasWorker ? `  ${pc.gray('└──')} 📦 ${pc.bold('ECS Worker Service')} 🔄 Background Tasks [${cpu} CPU / ${memory} MB]` : '',
         '',
         baselineLine,
         usageLine,

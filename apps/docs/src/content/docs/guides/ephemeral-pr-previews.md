@@ -13,7 +13,7 @@ A bot will comment on the PR with a live URL (e.g., `http://pr-123-your-app...`)
 
 Under the hood, `grada` utilizes **Terraform Workspaces**. 
 
-When a PR is opened, Terraform creates a new workspace (e.g., `pr-12`). It provisions a completely isolated Application Load Balancer and ECS Fargate Task using the exact same infrastructure definitions as your production environment, ensuring 100% parity. On `--target lambda` projects the same workspace model provisions an isolated function and API Gateway per PR instead, deploys the PR-tagged image to it, and comments the preview API Gateway URL — same open-and-teardown lifecycle, no ALB per PR.
+When a PR is opened, Terraform creates a new workspace (e.g., `pr-12`). It provisions a completely isolated Application Load Balancer and ECS Fargate Task using the exact same infrastructure definitions as your production environment, ensuring 100% parity. On `--target lambda` projects the same workspace model provisions an isolated function and API Gateway per PR instead, deploys the PR-tagged image to it, and comments the preview API Gateway URL — same open-and-teardown lifecycle, no ALB per PR. Static targets (`--target static`) skip preview workflows entirely — there is no compute to preview against.
 
 To save time and simplify architecture, PR environments **share** your production AWS Secrets Manager vault and ECR Image Repository.
 

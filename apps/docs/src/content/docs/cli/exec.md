@@ -14,6 +14,7 @@ Drop into a secure shell inside your live Fargate container to inspect files, ch
 - When no containers are running (e.g. scaled to zero or still booting), explains that a running container is required, points you to `status` and `apply`, and exits 1.
 - On expired AWS credentials, points you to `aws sso login` / `aws configure` and exits 1 instead of throwing.
 - ECS only: on `--target lambda` projects the command exits with an error (functions have no shell to attach to) and points you to `logs` instead.
+- On `--target static` projects there are no containers to attach to: the lookup ends in the same no-running-container guidance described above (exit 1).
 - Emits an `exec_run` telemetry event recording success and outcome.
 
 ## Usage

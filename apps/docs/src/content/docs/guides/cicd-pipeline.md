@@ -40,6 +40,10 @@ and assumes the `{{PROJECT_NAME}}-github-actions-role` IAM role created by `terr
 
 On `--target lambda` projects the same `deploy.yml` shape applies, but the Deploy stage pushes the SHA-tagged image to ECR and calls `aws lambda update-function-code` (then `aws lambda wait function-updated`) instead of registering a task definition — Terraform ignores the function's `image_uri` (mirroring the ECS `task_definition` rule) so code deploys and `apply` never fight. There is no task-revision history, so `rollback` is ECS-only; redeploy a previous SHA tag to revert.
 
+## Static target pipeline
+
+On `--target static` projects the workflow has no build-and-push stages: after the IaC scan and infrastructure sync it runs `npm ci` and `npm run build` on Node.js 22, `aws s3 sync`s the build folder (`BUILD_DIR`, auto-detected) with `--delete`, and issues a `/*` CloudFront invalidation. There is no `503` window and no image history — the first push publishes the site, and every push republishes it. `rollback` is ECS-only here too.
+
 ## Optional pre-deploy migration gate
 
 `db migrate --cmd "<command>" --setup-ci` adds a migration step to the Deploy stage: after the new task definition is registered and before the service updates, it runs your migration command as a one-off ECS task against the newly built image — a failing migration halts the release automatically. Re-running the command updates the wired step in place. `init` can wire the same gate at scaffold time with `--setup-ci-migrate` (or the interactive prompt when a database and migration command are detected). ECS targets only — Lambda projects skip the gate (run migrations from CI against your database endpoint instead). See [`db migrate`](/grada/cli/db/).

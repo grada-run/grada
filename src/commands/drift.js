@@ -4,8 +4,8 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe } from '../utils/resolvers.js';
 
@@ -22,7 +22,7 @@ export function parseDriftArgs(argv = []) {
     if (args[0] === 'drift') args.shift();
     const { options, rest } = parseFlags(args, {
         string: ['region', 'project-name'],
-        boolean: ['setup', 'force', 'headless'],
+        boolean: ['setup', 'force'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     // `drift init` is an alias for `drift --setup`.
@@ -71,8 +71,20 @@ function tailLines(output, count = 15) {
     return String(output ?? '').split('\n').slice(-count).join('\n').trim();
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDrift(input = {}) {
+    setActiveCommandName('drift');
+    try {
+        return await runDriftMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDriftMain(input = {}) {
     const options = normalizeOptions(input);
+    const noExit = isProgrammaticCall(options);
     let cwd;
     let region;
     let projectName;
@@ -81,7 +93,7 @@ export async function runDrift(input = {}) {
         region = resolveRegion(options, cwd);
         projectName = resolveProjectName(options, cwd);
     } catch {
-        return failProjectNotInitialized({ event: 'drift_run' });
+        return failProjectNotInitialized({ event: 'drift_run', noExit });
     }
     const setup = options.setup === true || options.setup === 'true';
     const force = options.force === true || options.force === 'true';
@@ -90,6 +102,7 @@ export async function runDrift(input = {}) {
 
     if (Array.isArray(options.unexpectedPositionals) && options.unexpectedPositionals.length > 0) {
         return failCommand({
+            noExit,
             message: `\n✖ Unexpected argument "${options.unexpectedPositionals[0]}". Run "grada drift" to check, or "grada drift --setup" to scaffold scheduled checks.\n`,
             event: 'drift_run',
             telemetry: { projectName },
@@ -103,6 +116,7 @@ export async function runDrift(input = {}) {
         const deployYml = readFileSafe(path.join(cwd, '.github', 'workflows', 'deploy.yml'));
         if (!deployYml) {
             return failCommand({
+                noExit,
                 message: `\n✖ Workflow not found at ${color.cyan('.github/workflows/deploy.yml')}. Run ${color.green('npx grada-run')} first.\n`,
                 event: 'drift_run',
                 telemetry: { projectName },
@@ -114,6 +128,7 @@ export async function runDrift(input = {}) {
         const roleArn = extractRoleArn(deployYml);
         if (!roleArn) {
             return failCommand({
+                noExit,
                 message: '\n✖ Could not find the OIDC role ARN (role-to-assume) in .github/workflows/deploy.yml.\n',
                 event: 'drift_run',
                 telemetry: { projectName },
@@ -125,6 +140,7 @@ export async function runDrift(input = {}) {
         const scaffolded = scaffoldDriftWorkflow(cwd, { region, roleArn, force });
         if (!scaffolded.ok) {
             return failCommand({
+                noExit,
                 message: `\n⚠ ${DRIFT_WORKFLOW_FILE} already exists. Pass --force to overwrite.\n`,
                 tone: 'yellow',
                 event: 'drift_run',
@@ -144,6 +160,7 @@ export async function runDrift(input = {}) {
     const tfDir = path.join(cwd, 'terraform');
     if (!fsSync.existsSync(path.join(tfDir, 'main.tf'))) {
         return failCommand({
+            noExit,
             message: '\n✖ No terraform/main.tf found. Run "grada" first before checking drift.\n',
             event: 'drift_run',
             telemetry: { projectName, error_code: 'TERRAFORM_NOT_INITIALIZED' },
@@ -161,6 +178,7 @@ export async function runDrift(input = {}) {
         if (initResult?.error?.code === 'ENOENT') {
             s.stop(color.red('Terraform not found.'));
             return failCommand({
+                noExit,
                 message: '\n✖ Terraform is not installed.',
                 hint: '  Please run "npx grada-run doctor" to check your environment.\n',
                 event: 'drift_run',
@@ -173,6 +191,7 @@ export async function runDrift(input = {}) {
         if (initResult?.status !== 0) {
             s.stop(color.red('Terraform init failed.'));
             return failCommand({
+                noExit,
                 message: `\n✖ terraform init failed:\n${tailLines(initResult?.stderr || initResult?.stdout)}\n`,
                 event: 'drift_run',
                 telemetry: { projectName },
@@ -199,6 +218,7 @@ export async function runDrift(input = {}) {
             s.stop(color.yellow('Drift detected.'));
             const summary = extractPlanSummary(planResult?.stdout);
             return failCommand({
+                noExit,
                 print: () => {
                     console.log(color.yellow('\n⚠ Infrastructure drift detected!'));
                     if (summary) console.log(color.dim(`\n${summary}\n`));
@@ -214,6 +234,7 @@ export async function runDrift(input = {}) {
         }
         s.stop(color.red('Terraform plan failed.'));
         return failCommand({
+            noExit,
             message: `\n✖ terraform plan failed:\n${tailLines(planResult?.stderr || planResult?.stdout)}\n`,
             event: 'drift_run',
             telemetry: { projectName, action: 'check' },
@@ -230,6 +251,7 @@ export async function runDrift(input = {}) {
         });
         try { s.stop(color.red('❌ Drift check failed.')); } catch { /* spinner already stopped */ }
         return failCommand({
+            noExit,
             message: `✖ ${error?.message || error}`,
             hint: 'Check your AWS credentials and region, then try again.',
             reason: 'error',

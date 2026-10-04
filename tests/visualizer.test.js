@@ -443,6 +443,19 @@ describe('lambda compute target', () => {
         expect(parseTerraformConfig(path.join(makeTmp(), 'terraform')).computeTarget).toBe('ecs');
     });
 
+    it('prices static targets at a $0 fixed baseline', () => {
+        const bare = estimateMonthlyCost({ hasSecrets: false, computeTarget: 'static' });
+        expect(bare.fargateMonthly).toBe('0.00');
+        expect(bare.albMonthly).toBe('0.00');
+        expect(bare.totalMonthly).toBe('0.00');
+    });
+
+    it('detects the static target from a CloudFront distribution in main.tf', () => {
+        const staticDir = makeTmp();
+        writeTf(staticDir, { 'main.tf': 'resource "aws_cloudfront_distribution" "site" {\n}\n' });
+        expect(parseTerraformConfig(path.join(staticDir, 'terraform')).computeTarget).toBe('static');
+    });
+
     it('prices lambda compute and API Gateway at $0 fixed baseline', () => {
         const bare = estimateMonthlyCost({ hasSecrets: true, computeTarget: 'lambda' });
         expect(bare.fargateMonthly).toBe('0.00');
@@ -476,5 +489,20 @@ describe('lambda compute target', () => {
     it('reports compute_target in cost telemetry', () => {
         const props = buildCostTelemetryProps({ projectName: 'myapp', computeTarget: 'lambda' }, { totalMonthly: '0.40' });
         expect(props.compute_target).toBe('lambda');
+    });
+
+    it('renders the static topology and usage-only baseline', async () => {
+        await renderDryRunPreview(
+            { framework: 'static', computeTarget: 'static' },
+            true
+        );
+        const output = stripAnsi(mockNote.mock.calls[0][0]);
+        expect(output).toContain('🌐 CloudFront (Global CDN)');
+        expect(output).toContain('🔒 IAM OIDC (GitHub Auth)');
+        expect(output).toContain('📦 S3 Private Origin (Static Assets)');
+        expect(output).not.toContain('ALB');
+        expect(output).not.toContain('ECR');
+        expect(output).not.toContain('ECS Web Service');
+        expect(output).toContain('Fixed Baseline: $0.00/mo (Usage-based only via S3/CloudFront)');
     });
 });

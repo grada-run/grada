@@ -39,16 +39,17 @@ You retain complete ownership of your infrastructure code without relying on bla
 **🛡️ DevSecOps & Security**
 * **Automated Trivy Scanning:** Integrated IaC and container vulnerability scanning on every GitHub Actions run.
 * **Continuous IaC Validation:** Matrix pipeline scaffolds all 10 supported frameworks headlessly and gates every commit on `terraform validate`, `tflint`, and Trivy (HIGH/CRITICAL).
-* **Hardened Containers:** Explicitly drops root privileges using `nginx-unprivileged` and distroless bases for strict Fargate security compliance.
+* **Hardened Containers:** Multi-stage Alpine builds that drop root privileges (including `nginx-unprivileged` for static sites) and strip package managers from the final image. Distroless runners were evaluated and rejected to preserve shell access via ECS Exec (see ADR-0012).
 * **Zero-Secret CI/CD:** Utilizes AWS IAM OpenID Connect (OIDC) for automated deployments—no long-lived AWS keys in GitHub.
 * **Built-in Secrets Manager:** Push local `.env` variables into encrypted AWS Secrets Manager vaults, pull them back onto a new machine, and audit local-vs-remote drift — with one-prompt rolling ECS restarts for value-only rotations.
 
 **☁️ AWS Native Architecture**
 * **Production Defaults:** Provisions an Amazon ECS Fargate cluster fronted by an Application Load Balancer across multiple availability zones.
 * **Serverless Target:** Prefer scale-to-zero? `--target lambda` (or the interactive prompt) generates a Lambda + API Gateway HTTP API v2 topology running the same container via the Lambda Web Adapter — $0/mo idle compute, with day-2 commands adapted and a Fargate-vs-Lambda tradeoff guide in the docs.
+* **Zero-Compute Static Target:** `--target static` hosts static-site frameworks (Vite, Astro, SPA exports) on a private S3 bucket behind CloudFront with Origin Access Control — no VPC, no containers, no Dockerfile, $0.00/mo idle baseline. Non-static frameworks are rejected with a validation error, and the pipeline builds, syncs, and invalidates on every push.
 * **Global Edge Acceleration:** Integrated AWS CloudFront CDN distribution with SSL termination and edge caching.
 * **Modular Day-2 Addons:** Attach private S3 storage (`add storage:s3`), serverless DynamoDB (`add db:dynamodb`), Valkey caching (`add db:redis`), SQS queues (`add queue:sqs`), Bedrock AI access (`add ai:bedrock`), or SES transactional email (`add email:ses`) anytime after init — no Terraform hand-writing, with container env wiring included — plus scheduled cron jobs (`add cron`) that run one-off Fargate tasks on an EventBridge schedule.
-* **Cost & Observability:** Keeps AWS spend visible with fixed-baseline cost previews before every provision, explicit 14-day CloudWatch log retention, and auto-generated 5XX error alerting. Pause idle environments with one command (`sleep`/`wake`) and see the exact hourly savings, and catch out-of-band console changes with scheduled IaC drift detection (`drift`).
+* **Cost & Observability:** Keeps AWS spend visible with fixed-baseline cost previews before every provision, explicit 14-day CloudWatch log retention, and auto-generated 5XX error alerting. `status` renders live Golden Signals (`--watch` repaints), `alerts` scaffolds SNS email notifications, pause idle environments with one command (`sleep`/`wake`) and see the exact hourly savings, and catch out-of-band console changes with scheduled IaC drift detection (`drift`).
 
 **🛠️ Developer Experience**
 * **Zero Vendor Lock-In:** Generates standard, readable Terraform (`.tf`) files. You own the infrastructure.
@@ -94,10 +95,10 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | ------- | ------------ |
 | [`apply`](./apps/docs/src/content/docs/cli/apply.md) | Provisions your AWS infrastructure and prints the live URLs (`--dry-run` previews topology and cost). |
 | [`secrets push` / `pull` / `audit`](./apps/docs/src/content/docs/cli/secrets.md) | Encrypts `.env` files into Secrets Manager, syncs them back, and diffs drift. |
-| [`doctor`](./apps/docs/src/content/docs/cli/doctor.md) | Verifies Docker, Terraform, the AWS CLI, and your generated files. |
+| [`doctor`](./apps/docs/src/content/docs/cli/doctor.md) | Verifies Docker, Terraform, the AWS CLI, and git are installed. |
 | [`diagnose`](./apps/docs/src/content/docs/cli/diagnose.md) (`wtf`) | Explains a failing ECS deployment from the stopped task and its logs. |
 | [`logs`](./apps/docs/src/content/docs/cli/logs.md) | Streams CloudWatch logs (`--tail`, `-f`, `--error`, `--since`). |
-| [`status`](./apps/docs/src/content/docs/cli/status.md) | Health dashboard with auto-`diagnose` on degradation and `--json` for scripts. |
+| [`status`](./apps/docs/src/content/docs/cli/status.md) | Health dashboard with live Golden Signals, auto-`diagnose` on degradation, `--json` for scripts, and `--watch` for live repaint. |
 | [`rollback`](./apps/docs/src/content/docs/cli/rollback.md) | Returns the live service to a previous task revision, with live progress (ECS only). |
 | [`exec`](./apps/docs/src/content/docs/cli/exec.md) | Opens a shell in a running container via Session Manager (ECS only). |
 | [`db connect`](./apps/docs/src/content/docs/cli/db.md) | Opens a `localhost` tunnel to your private database (PostgreSQL, MySQL, or Aurora). |
@@ -108,6 +109,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`gc`](./apps/docs/src/content/docs/cli/gc.md) | Deletes orphaned ECR images, log groups, and EIPs — dry-run first, explicit confirmation only. |
 | [`sleep` / `wake`](./apps/docs/src/content/docs/cli/sleep.md) | Pauses an environment to $0 compute and restores exact replica counts (`--skip-db`, `--no-wait`). |
 | [`drift`](./apps/docs/src/content/docs/cli/drift.md) | Flags out-of-band AWS changes locally or daily in CI (`--setup`). |
+| [`alerts`](./apps/docs/src/content/docs/cli/alerts.md) | Scaffolds an SNS topic + 5xx alarm for email notifications (ECS only). |
 | [`add`](./apps/docs/src/content/docs/cli/add.md) | Attaches S3, DynamoDB, Redis, SQS, Bedrock, SES, or scheduled cron jobs without writing Terraform. |
 | [`domain`](./apps/docs/src/content/docs/cli/domain.md) | Attaches a custom domain with automated ACM TLS (Route 53 or external DNS). |
 | [`destroy`](./apps/docs/src/content/docs/cli/destroy.md) | Tears down AWS resources to stop billing (state bucket optionally retained). |
@@ -132,7 +134,7 @@ your-project/
 │       ├── deploy.yml          # Keyless OIDC CI/CD deployment pipeline
 │       └── drift.yml           # Scheduled IaC drift detection (opt-in via `--setup-ci-drift` or `drift --setup`)
 └── terraform/
-    ├── main.tf                 # ECR repository + compute (ECS Cluster/Fargate Task, or Lambda + API Gateway with `--target lambda`)
+    ├── main.tf                 # ECR repository + compute (ECS Cluster/Fargate Task, Lambda + API Gateway with `--target lambda`, or S3 + CloudFront with `--target static`)
     ├── network.tf              # VPC, Public Subnets, ALB, and Security Groups
     ├── cloudfront.tf           # CloudFront CDN edge distribution
     ├── domain.tf               # Custom domain + ACM certificate (via `domain add`, when configured)
@@ -167,7 +169,7 @@ AI coding assistants are incredible, but they often hallucinate custom Terraform
 * **Advanced Flow:** You are explicitly prompted to choose which AI assistants your team uses.
 * **Standalone Command:** You can run `npx grada-run sync-ai` at any time to selectively generate these rules later.
 
-**Safe & Non-Destructive:** We use isolated rule files (like `.cursor/rules/grada.mdc`) or strictly delimited blocks (``) to ensure your team's existing agent instructions, coding standards, and project prompts are **never overwritten**.
+**Safe & Non-Destructive:** We use isolated rule files (like `.cursor/rules/grada.mdc`) or strictly delimited blocks (`<!-- BEGIN GRADA CONTEXT -->` … `<!-- END GRADA CONTEXT -->`) to ensure your team's existing agent instructions, coding standards, and project prompts are **never overwritten**.
 
 ## 🔌 AI Agent MCP Server
 
@@ -194,7 +196,7 @@ npx grada-run mcp --install gemini-cli    # → ~/.muse/settings.json
 }
 ```
 
-MCP registry listings (Smithery, mcp.so, Glama, Anthropic directory) are in progress; the Custom GPT path works through the user-hosted HTTP bridge (`--transport http`).
+MCP registry listings (Smithery, mcp.so, Glama, Anthropic directory) are in progress; the Custom GPT path works through the self-hosted HTTP transport (`--transport http`) behind your own tunnel.
 
 ---
 

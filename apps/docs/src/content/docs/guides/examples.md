@@ -29,11 +29,11 @@ These repositories demonstrate how `grada` handles various frameworks and archit
 ## Backend APIs & monoliths
 
 * **[Express.js API](https://github.com/anton-codes-iac/deploy-stack-express-example):** A standard Node.js backend setup.
-* **[NestJS API](https://github.com/anton-codes-iac/deploy-stack-nest-example):** A robust NestJS architecture utilizing AST code-patching and highly optimized multi-stage TypeScript builds.
+* **[NestJS API](https://github.com/anton-codes-iac/deploy-stack-nest-example):** A robust NestJS architecture utilizing highly optimized multi-stage TypeScript builds.
 * **[Python FastAPI](https://github.com/anton-codes-iac/deploy-stack-fastapi-example):** A Python API demonstrating unprivileged port mapping.
 * **[Ruby on Rails](https://github.com/anton-codes-iac/deploy-stack-rails-example):** A production Rails 7+ setup featuring an auto-provisioned PostgreSQL database and secure `RAILS_MASTER_KEY` string-literal injection into the initial Secrets Manager placeholder.
 * **[Django / Python](https://github.com/anton-codes-iac/deploy-stack-django-example):** A secure Gunicorn/WSGI implementation with PostgreSQL and unprivileged container adapters.
-* **[Go / Fiber](https://github.com/anton-codes-iac/deploy-stack-go-example):** A distroless, compiled Go binary deployment demonstrating ultra-low memory footprints and instant boot times.
+* **[Go / Fiber](https://github.com/anton-codes-iac/deploy-stack-go-example):** A compiled Go binary deployment on a minimal Alpine runner demonstrating ultra-low memory footprints and instant boot times.
 
 ---
 

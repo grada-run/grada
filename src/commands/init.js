@@ -91,15 +91,15 @@ export async function mainStack(input = {}) {
             reason: 'invalid-db-engine',
         });
     }
-    const VALID_COMPUTE_TARGETS = ['ecs', 'lambda'];
+    const VALID_COMPUTE_TARGETS = ['ecs', 'lambda', 'static'];
     const explicitTarget = typeof initOptions.target === 'string' && initOptions.target.trim() !== ''
         ? initOptions.target.trim()
         : null;
     const normalizedExplicitTarget = explicitTarget === 'fargate' ? 'ecs' : explicitTarget;
     if (explicitTarget !== null && !VALID_COMPUTE_TARGETS.includes(normalizedExplicitTarget)) {
         return failCommand({
-            message: `\n✖ Invalid compute target "${explicitTarget}". Supported targets: ecs, lambda.`,
-            hint: '  Use --target ecs (or fargate) for always-on containers, or --target lambda for scale-to-zero serverless.\n',
+            message: `\n✖ Invalid compute target "${explicitTarget}". Supported targets: ecs, lambda, static.`,
+            hint: '  Use --target ecs (or fargate) for always-on containers, --target lambda for scale-to-zero serverless, or --target static for zero-compute S3 + CloudFront hosting.\n',
             event: 'cli-error',
             telemetry: { step: 'init_validation', error_code: 'INVALID_COMPUTE_TARGET' },
             reason: 'invalid-compute-target',
@@ -153,6 +153,7 @@ export async function mainStack(input = {}) {
             options: [
                 { value: 'ecs', label: 'ECS Fargate + ALB', hint: 'Always-on, persistent DB connections, zero cold starts (Starts at ~$31/mo)' },
                 { value: 'lambda', label: 'AWS Lambda + API Gateway v2', hint: 'Scale-to-zero, usage-based compute, 3-5s VPC cold starts ($0/mo idle)' },
+                { value: 'static', label: 'Static site (S3 + CloudFront)', hint: 'Zero-compute hosting for SPAs/SSGs ($0/mo idle)' },
             ],
         });
         if (typeof targetAnswer === 'symbol') process.exit(0);
@@ -190,6 +191,23 @@ export async function mainStack(input = {}) {
     // 3b. Dependency-aware composition (worker, migration gate, addons).
     // Everything here resolves before backups, AWS calls, or file writes.
     const isStaticSite = config.framework === 'static';
+    if (target === 'static' && !isStaticSite) {
+        return failCommand({
+            message: `\n✖ --target static only supports static-site frameworks (detected: ${config.framework}).\n`,
+            hint: '  Use --target ecs for containerized apps or --target lambda for scale-to-zero serverless.\n',
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'STATIC_TARGET_FRAMEWORK_MISMATCH' },
+            reason: 'static-target-framework-mismatch',
+            resultExtra: { framework: config.framework },
+        });
+    }
+    if (target === 'static' && (procfile?.worker || capabilities.worker.detected)) {
+        log.warn(color.yellow('⚠️  Skipping the background worker: static targets serve files from S3 + CloudFront with no compute to run it on.'));
+    }
+    if (target === 'static' && config.needsDatabase) {
+        log.warn(color.yellow('⚠️  Skipping the database: static targets have no compute to connect from. Provision data separately if the site needs an API.'));
+        config.needsDatabase = false;
+    }
     const failAddonResolution = (cap, resolved) => {
         if (!resolved.ok && resolved.cancelled) {
             return failCommand({
@@ -214,7 +232,7 @@ export async function mainStack(input = {}) {
     // Lambda targets have no ECS worker service, so the prompt is skipped
     // and any Procfile worker process is left out of the generated stack.
     let workerCommandHcl = '';
-    if (isInteractive && !isStaticSite && target !== 'lambda' && (procfile?.worker || capabilities.worker.detected)) {
+    if (isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && (procfile?.worker || capabilities.worker.detected)) {
         const workerAnswer = await promptWorkerCommand(procfile, capabilities);
         if (workerAnswer.trim() !== '') {
             workerCommandHcl = `command = ${JSON.stringify(splitProcfileCommand(workerAnswer.trim()))}`;
@@ -226,14 +244,14 @@ export async function mainStack(input = {}) {
     if (target === 'lambda' && config.needsDatabase) {
         log.warn(color.yellow('⚠️  Lambda opens a database connection per concurrent execution with no proxy in between — bursts can exhaust RDS limits. Keep pools tiny (tradeoffs: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/architecture.md#fargate-vs-lambda-tradeoffs).'));
     }
-    const willHaveWorker = target !== 'lambda' && (Boolean(procfile?.worker) || workerCommandHcl !== '');
+    const willHaveWorker = target !== 'lambda' && target !== 'static' && (Boolean(procfile?.worker) || workerCommandHcl !== '');
 
     // Pre-deploy migration gate: explicit flag wins, else prompt.
     const migrationCmd = capabilities.migration.command;
     const setupCiMigrateFlag = initOptions.setupCiMigrate === true;
     let migrationGateEnabled = false;
-    if (target === 'lambda' && (setupCiMigrateFlag || (config.needsDatabase && migrationCmd))) {
-        log.warn(color.yellow('⚠️  Skipping the pre-deploy migration gate: it runs migrations as an ephemeral ECS task, which Lambda targets don\'t provision. Run migrations from CI against your database endpoint instead.'));
+    if ((target === 'lambda' || target === 'static') && (setupCiMigrateFlag || (config.needsDatabase && migrationCmd))) {
+        log.warn(color.yellow(`⚠️  Skipping the pre-deploy migration gate: it runs migrations as an ephemeral ECS task, which ${target === 'static' ? 'static' : 'Lambda'} targets don't provision. Run migrations from CI against your database endpoint instead.`));
     } else if (config.needsDatabase && migrationCmd) {
         if (setupCiMigrateFlag) {
             migrationGateEnabled = true;
@@ -345,8 +363,11 @@ export async function mainStack(input = {}) {
     }
 
     // 4. Framework Migration Checks (Vercel Escape Hatch)
-    if (target === 'lambda' && vercelRules?.redirects?.length > 0) {
-        log.warn(color.yellow('⚠️  vercel.json redirects were detected, but Lambda targets have no ALB listener rules to translate them into. Recreate them as API Gateway routes after provisioning.'));
+    if ((target === 'lambda' || target === 'static') && vercelRules?.redirects?.length > 0) {
+        const remedy = target === 'static'
+            ? 'Recreate them as CloudFront Functions after provisioning.'
+            : 'Recreate them as API Gateway routes after provisioning.';
+        log.warn(color.yellow(`⚠️  vercel.json redirects were detected, but ${target === 'static' ? 'static' : 'Lambda'} targets have no ALB listener rules to translate them into. ${remedy}`));
     }
 
     if (config.framework === 'nestjs') {
@@ -387,7 +408,7 @@ export async function mainStack(input = {}) {
         hasDb: config.needsDatabase,
         dbEngine: config.dbEngine,
         hasWorker: willHaveWorker,
-        hasSecrets: true,
+        hasSecrets: target !== 'static',
         addons: selectedAddons,
         computeTarget: target,
     });

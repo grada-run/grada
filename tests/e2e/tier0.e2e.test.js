@@ -53,6 +53,35 @@ describe('Tier 0: scaffold (Lambda)', () => {
     });
 });
 
+describe('Tier 0: scaffold (Static)', () => {
+    it('inits a static project with valid Terraform and no Dockerfile', async () => {
+        await withTmpDir('tier0-static', async (dir) => {
+            const init = runCli(['init', '--target', 'static', '--headless'], { cwd: dir, env });
+            expect(init.status).toBe(0);
+
+            const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+            expect(mainTf).toContain('resource "aws_cloudfront_distribution" "site"');
+            expect(fs.existsSync(path.join(dir, 'Dockerfile'))).toBe(false);
+
+            const deployYml = fs.readFileSync(path.join(dir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+            expect(deployYml).toContain('aws s3 sync');
+
+            runTerraform(['init', '-backend=false'], { cwd: path.join(dir, 'terraform'), env });
+            runTerraform(['validate'], { cwd: path.join(dir, 'terraform'), env });
+        });
+    });
+
+    it('rejects --target static for container frameworks', async () => {
+        await withTmpDir('tier0-static-mismatch', async (dir) => {
+            fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', dependencies: { express: '1.0.0' } }));
+            const result = runCli(['init', '--target', 'static', '--headless'], { cwd: dir, env, capture: true });
+            expect(result.status).toBe(1);
+            expect(result.output).toContain('--target static only supports static-site frameworks');
+            expect(result.output).not.toMatch(/^\s+at\s/m);
+        });
+    });
+});
+
 describe('Tier 0: addon matrix', () => {
     // queue:sqs is covered by the ECS scaffold test above (including the
     // SQS_QUEUE_URL env-injection assertion); the rest get one
@@ -136,6 +165,17 @@ describe('Tier 0: failure paths', () => {
             const result = runCli(['init', '--target', 'fake-target', '--headless'], { cwd: dir, env, capture: true });
             expect(result.status).toBe(1);
             expect(result.output).toContain('Invalid compute target');
+            expect(result.output).not.toMatch(/^\s+at\s/m);
+        });
+    });
+
+    it('headless command failures restore exit 1 at the CLI layer', async () => {
+        await withTmpDir('tier0-fail-headless', async (dir) => {
+            // drift --headless suppresses process.exit internally and stamps
+            // the code; bin/cli.js restores it so the terminal sees 1.
+            const result = runCli(['drift', '--headless'], { cwd: dir, env, capture: true });
+            expect(result.status).toBe(1);
+            expect(result.output).toContain('No terraform/main.tf found');
             expect(result.output).not.toMatch(/^\s+at\s/m);
         });
     });

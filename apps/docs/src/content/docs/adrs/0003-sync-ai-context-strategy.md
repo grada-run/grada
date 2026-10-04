@@ -38,7 +38,7 @@ The engine intelligently maps instructions to the following environments:
 * **GitHub Copilot:** `.github/copilot-instructions.md` (managed block injection)
 * **Claude Code:** `CLAUDE.md` (managed block injection)
 * **Goose:** `.goosehints`
-* **Aider:** `.aider.conf.yml` / `.aider.model.settings.yml`
+* **Aider:** `.aider.conf.yml` (managed block injection, `#` comments)
 
 ### Positive Consequences
 * Dramatically reduces AI-induced infrastructure errors and dangerous AWS CLI recommendations.

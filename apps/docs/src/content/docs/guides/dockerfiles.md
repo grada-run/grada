@@ -7,6 +7,8 @@ sidebar:
 
 Setup generates a framework-specific Alpine multi-stage `Dockerfile` engineered for zero Critical/High CVEs. All ten presets — including the generic Node.js, Python, and Django images — build dependencies in an isolated `builder` stage and ship only production artifacts in a minimal `runner` stage with no package managers. Your app only needs to honor a small runtime contract — plus a few per-framework prerequisites printed as warnings (`src/utils/warnings.js`) at the end of setup.
 
+Two target notes: on `--target lambda` the generated `Dockerfile` additionally embeds the AWS Lambda Web Adapter extension (inserted after the last `FROM`) so standard HTTP servers handle API Gateway events with zero code changes; on `--target static` no `Dockerfile` is generated at all — deploys sync the build folder to S3 instead.
+
 ## The container contract
 
 Every generated image assumes three things. Violating any of them is the most common cause of failing ALB health checks after an otherwise successful `apply`:

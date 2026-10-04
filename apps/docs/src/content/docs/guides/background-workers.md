@@ -7,7 +7,7 @@ Long-running jobs (Celery, Sidekiq, BullMQ workers, queue pollers) run on a seco
 
 ## What the worker service is
 
-`terraform/worker.tf` defines a private `aws_ecs_service.worker`: same ECR image and cluster as the web service, same Secrets Manager payload and database variables, and its own task definition whose container runs your worker command instead of the web server. There is deliberately **no load balancer block**, so nothing routes internet traffic to it. Logs go to the shared `/ecs/<project>` group with the `worker` stream prefix, keeping them separable from web logs.
+`terraform/worker.tf` defines an internal `aws_ecs_service.worker`: same ECR image and cluster as the web service, same Secrets Manager payload and database variables, and its own task definition whose container runs your worker command instead of the web server. There is deliberately **no load balancer block**, so nothing routes internet traffic to it — though like the web service it still runs in the public subnets. Logs go to the shared `/ecs/<project>` group with the `worker` stream prefix, keeping them separable from web logs.
 
 New services start with `desired_count = 1`, but the service ignores `desired_count` changes in Terraform so queue-depth auto-scaling can manage the count without apply-time drift.
 

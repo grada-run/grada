@@ -65,8 +65,10 @@ export async function getProjectConfig(isHeadless, headlessOptions, targetDir, d
         ? hints.dbEngine
         : null;
     // Lambda functions are fixed at 512 MB with no ALB health checks or
-    // replica counts, so the ECS sizing prompts are skipped for that target.
-    const isLambda = hints && typeof hints === 'object' && hints.target === 'lambda';
+    // replica counts, and static targets have no containers at all, so the
+    // ECS sizing prompts are skipped for both targets.
+    const skipsContainerSizing = hints && typeof hints === 'object'
+        && (hints.target === 'lambda' || hints.target === 'static');
     if (isHeadless) {
         return {
             framework: headlessOptions.framework || (detectedFramework ? detectedFramework.id : 'static'),
@@ -187,19 +189,19 @@ export async function getProjectConfig(isHeadless, headlessOptions, targetDir, d
             placeholder: defaultPort,
             defaultValue: defaultPort,
         }),
-        size: () => isLambda ? undefined : select({
+        size: () => skipsContainerSizing ? undefined : select({
             message: 'Select your Fargate compute size:',
             options: [
                 { value: 'micro', label: 'Micro (0.25 vCPU, 512MB RAM) - Best for POCs' },
                 { value: 'small', label: 'Small (0.5 vCPU, 1GB RAM) - Best for small Projects' },
             ],
         }),
-        healthCheckPath: () => (setupType === 'quick' || isLambda) ? undefined : text({
+        healthCheckPath: () => (setupType === 'quick' || skipsContainerSizing) ? undefined : text({
             message: 'ALB Health Check Path:',
             placeholder: '/',
             defaultValue: '/',
         }),
-        desiredCount: () => (setupType === 'quick' || isLambda) ? undefined : select({
+        desiredCount: () => (setupType === 'quick' || skipsContainerSizing) ? undefined : select({
             message: 'How many container replicas (tasks) should run?',
             options: [
                 { value: '1', label: '1 Task (Single instance - lowest cost)' },

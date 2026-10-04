@@ -29,6 +29,8 @@ So a typical full stack (web + database + Valkey) lands around **~$55.55/mo**, a
 
 On the Lambda target (`--target lambda`) there is no Fargate or ALB baseline at all: compute and the API Gateway HTTP API bill purely on use, so a no-database project idles at **~$0.40/mo** (one Secrets Manager secret) and an Aurora-backed one at **~$0.80/mo**. The pre-flight estimate shows this as `Fixed Baseline: ~$0.80/mo (RDS: $0.00, Secrets: $0.80 + API GW & Lambda usage)` — the trailing caveat is the reminder that requests, not hours, are the real bill.
 
+On the static target (`--target static`) the fixed baseline is **$0.00/mo**: no Fargate, no ALB, no secrets vault. The pre-flight preview shows `Fixed Baseline: $0.00/mo (Usage-based only via S3/CloudFront)` — S3 storage and requests plus CloudFront requests and egress are the entire bill, all usage-metered.
+
 ## What the Estimate Leaves Out (Usage Billing)
 
 Anything that scales with traffic is billed on use and intentionally excluded from the fixed number:
@@ -46,6 +48,7 @@ Rule of thumb: the fixed baseline is your floor; side projects with modest traff
 - **Side project / internal tool** (dozens to hundreds of requests a day): Lambda, by a mile — pennies a month against ~$31+ of idle ECS baseline.
 - **Steady product API** (sustained traffic around the clock): Fargate — the flat baseline undercuts per-request billing once concurrency stops dropping to zero.
 - **Spiky or unpredictable traffic** (launches, webhooks, batch-driven): Lambda absorbs bursts with no capacity planning; just mind the database-connection note in [Fargate vs Lambda tradeoffs](/grada/guides/architecture/#fargate-vs-lambda-tradeoffs).
+- **Static site** (docs, marketing pages, SPA exports): the static target — $0.00/mo baseline with pennies of S3/CloudFront usage.
 
 ## Cost Savers Built Into the Stack
 

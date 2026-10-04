@@ -113,11 +113,13 @@ export async function applyStack(input = {}) {
         const cfUrl = outputs.cloudfront_url?.value;
         const albUrl = outputs.alb_direct_url?.value;
         const apiUrl = outputs.api_gateway_url?.value;
+        const siteUrl = outputs.site_url?.value;
 
         let finalMessage = color.green('✅ Infrastructure is live!');
         if (cfUrl) finalMessage += `\n  🌍 App URL: ${color.cyan(cfUrl)} ${color.dim('(global CDN — share this link)')}`;
         if (albUrl) finalMessage += `\n  🚦 Direct URL: ${color.gray(albUrl)} ${color.dim('(bypasses the CDN — for debugging)')}`;
         if (apiUrl) finalMessage += `\n  🔌 API URL: ${color.gray(apiUrl)} ${color.dim('(bypasses the CDN — for debugging)')}`;
+        if (siteUrl) finalMessage += `\n  🌍 Site URL: ${color.cyan(siteUrl)} ${color.dim('(global CDN — share this link)')}`;
 
         outro(`${finalMessage}\n\n  ${color.yellow('Push code to deploy your app and clear the 503 error:')}\n  ${color.cyan('git add . && git commit -m "ci: infra" && git push origin main')}`);
 

@@ -1,0 +1,90 @@
+name: Deploy static site to S3 + CloudFront
+
+on:
+  push:
+    branches:
+      - {{DEPLOY_BRANCH}}
+    schedule:
+    - cron: '0 0 * * 0'
+
+env:
+  AWS_REGION: {{REGION}}
+  S3_BUCKET: {{PROJECT_NAME}}-site-{{AWS_ACCOUNT_ID}}
+  BUILD_DIR: {{BUILD_DIR}}
+  CF_COMMENT: {{PROJECT_NAME}}-cdn
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- 1. IaC SECURITY SCAN ---
+      - name: Scan Terraform for Misconfigurations
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'terraform/'
+          scanners: 'vuln,secret,misconfig'
+          format: 'table'
+          exit-code: '0' # Informational only, will not break the build
+          severity: 'CRITICAL,HIGH'
+          output: 'trivy-iac-summary.txt'
+
+      - name: Publish IaC Summary
+        if: always()
+        run: |
+          if [ -f trivy-iac-summary.txt ]; then
+            echo "### 🏗️ Terraform Misconfiguration Scan" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat trivy-iac-summary.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # --- 2. INFRASTRUCTURE SYNC (The New Marketplace Action) ---
+      - name: Apply Infrastructure Changes
+        uses: grada-run/grada-action@v1
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}-github-actions-role
+          terraform-dir: 'terraform'
+
+      # --- 3. BUILD ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Build static site
+        run: |
+          npm ci
+          npm run build
+
+      # --- 4. DEPLOY ---
+      - name: Sync to S3
+        run: |
+          aws s3 sync "${{ env.BUILD_DIR }}/" "s3://${{ env.S3_BUCKET }}" --delete \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='${{ env.CF_COMMENT }}'].Id | [0]" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*" \
+            --region ${{ env.AWS_REGION }}

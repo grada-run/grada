@@ -61,7 +61,9 @@ export async function runSleep(input = {}) {
         return failProjectNotInitialized({ event: 'sleep_run' });
     }
     const target = resolveSleepTarget(options, cwd);
-    const isLambda = readTerraformComputeTarget(cwd) === 'lambda';
+    const computeTarget = readTerraformComputeTarget(cwd);
+    const isLambda = computeTarget === 'lambda';
+    const isStatic = computeTarget === 'static';
     const headless = resolveHeadless(options);
     const skipDb = options.skipDb === true || options.skipDb === 'true';
     const confirmed = options.yes === true || options.yes === 'true'
@@ -168,6 +170,10 @@ export async function runSleep(input = {}) {
             s.stop(color.yellow('Nothing to sleep.'));
             return failCommand({
                 print: () => {
+                    if (isStatic) {
+                        console.log(`\n  ${color.cyan(target.appPrefix)} is a static target — no compute or database to sleep. Nothing was changed.\n`);
+                        return;
+                    }
                     if (isLambda) {
                         console.log(`\n  No databases found for ${color.cyan(target.appPrefix)} — and Lambda compute is already scale-to-zero.`);
                     } else {

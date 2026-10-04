@@ -69,6 +69,12 @@ describe('parseDriftArgs', () => {
     it('collects unexpected positionals', () => {
         expect(parseDriftArgs(['drift', 'bogus']).unexpectedPositionals).toEqual(['bogus']);
     });
+
+    it('drops --headless, which drift never reads', () => {
+        const options = parseDriftArgs(['drift', '--setup', '--force', '--headless']);
+        expect(options).toMatchObject({ setup: true, force: true });
+        expect(options.headless).toBeUndefined();
+    });
 });
 
 describe('extractRoleArn / extractPlanSummary', () => {

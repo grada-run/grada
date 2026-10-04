@@ -287,7 +287,7 @@ export function createMcpServer() {
     server.registerTool(
         'analyze_stack',
         {
-            description: 'Inspect a Grada project: detected framework, compute target (ecs or lambda), whether Terraform is initialized, and installed add-on primitives.',
+            description: 'Inspect a Grada project: detected framework, compute target (ecs, lambda, or static), whether Terraform is initialized, and installed add-on primitives.',
             inputSchema: { cwd: cwdArg },
         },
         async (args) => handleAnalyzeStack(args)

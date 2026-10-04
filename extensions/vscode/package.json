@@ -2,7 +2,7 @@
     "name": "grada",
     "displayName": "Grada",
     "description": "Provision production-ready AWS infrastructure and operate it from VS Code. Installs the Grada MCP server (stack analysis, add-ons, status, logs, secrets audit) with one command.",
-    "version": "0.1.0",
+    "version": "0.36.0",
     "publisher": "grada-run",
     "license": "MIT",
     "repository": {

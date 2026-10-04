@@ -5,7 +5,7 @@ sidebar:
   order: 7
 ---
 
-Managing `.env` files across a team and syncing them to the cloud is a notorious pain point. `grada` solves this by natively integrating with **AWS Secrets Manager**, ensuring zero plaintext secrets ever touch your GitHub repository or CI/CD pipelines. Secrets Manager bills $0.40 per secret per month (one for your app secrets, plus one for the database master password when applicable) — itemized in the `apply` cost preview.
+Managing `.env` files across a team and syncing them to the cloud is a notorious pain point. `grada` solves this by natively integrating with **AWS Secrets Manager**, ensuring zero plaintext secrets ever touch your GitHub repository or CI/CD pipelines. Secrets Manager bills $0.40 per secret per month (one for your app secrets, plus one for the database master password when applicable) — itemized in the `apply` cost preview. Static targets (`--target static`) provision no vault — there is no compute to inject secrets into, so the `secrets` commands point back to `apply`.
 
 ## The Secrets Lifecycle
 

@@ -149,7 +149,7 @@ function waitForExit(child) {
 }
 
 function printDbNoTasksGuidance(service, cluster) {
-    printNoTasksGuidance({ service, cluster, reason: 'to act as a jump host for the import tunnel' });
+    printNoTasksGuidance(service, cluster, 'to act as a jump host for the import tunnel');
 }
 
 export async function runDbImport(input = {}) {

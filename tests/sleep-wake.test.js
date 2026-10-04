@@ -133,6 +133,14 @@ describe('parseSleepArgs / parseWakeArgs', () => {
         expect(options.env).toBeUndefined();
     });
 
+    it('drops confirmation flags that wake never reads', () => {
+        const options = parseWakeArgs(['wake', '--no-wait', '--yes', '--force', '--headless']);
+        expect(options.noWait).toBe(true);
+        expect(options.yes).toBeUndefined();
+        expect(options.force).toBeUndefined();
+        expect(options.headless).toBeUndefined();
+    });
+
     it('collects extra positionals for the guard', () => {
         expect(parseSleepArgs(['sleep', 'a', 'b']).unexpectedPositionals).toEqual(['b']);
     });
@@ -954,6 +962,35 @@ describe('runSleep on --target lambda projects', () => {
             cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging', ecsClient, rdsClient,
         });
         expect(result).toMatchObject({ ok: false, reason: 'nothing-to-sleep' });
+    });
+});
+
+describe('runSleep on --target static projects', () => {
+    function staticDir() {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp"\n}\nresource "aws_cloudfront_distribution" "site" {}\n'
+        );
+        return dir;
+    }
+
+    it('reports static targets as nothing to sleep without the apply pointer', async () => {
+        const dir = staticDir();
+        const { ecsClient, rdsClient } = mockClients({});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            const result = await runSleep({
+                cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging', ecsClient, rdsClient,
+            });
+            expect(result).toMatchObject({ ok: false, reason: 'nothing-to-sleep' });
+            const output = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
+            expect(output).toContain('is a static target — no compute or database to sleep');
+            expect(output).not.toContain('npx grada-run apply');
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 });
 

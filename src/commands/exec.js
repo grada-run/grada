@@ -2,9 +2,9 @@ import { ECSClient, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/clie
 import { spawn } from 'child_process';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
 import {
@@ -79,8 +79,20 @@ export async function findRunningTask(ecsClient, { cluster, service }) {
     return { taskArn: tasks[0].taskArn || taskArns[0], containerName: tasks[0].containers?.[0]?.name || null, task: tasks[0] };
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runExec(input = {}) {
+    setActiveCommandName('exec');
+    try {
+        return await runExecMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runExecMain(input = {}) {
     const options = normalizeOptions(input);
+    const noExit = isProgrammaticCall(options);
     let cwd;
     let region;
     let projectName;
@@ -95,7 +107,7 @@ export async function runExec(input = {}) {
         service = resolveService(options, cwd);
         expectedContainer = resolveContainer(options, cwd);
     } catch {
-        return failProjectNotInitialized({ event: 'exec_run' });
+        return failProjectNotInitialized({ event: 'exec_run', noExit });
     }
     const shellCommand = resolveShellCommand(options);
 
@@ -109,6 +121,7 @@ export async function runExec(input = {}) {
 
     if (readTerraformComputeTarget(cwd) === 'lambda') {
         return failCommand({
+            noExit,
             print: () => {
                 console.log(color.red(`\n✖ Exec opens a shell in a running ECS container, but "${projectName}" is a Lambda project.`));
                 console.log(`  Lambda functions have no shell to attach to — inspect recent output with ${color.green('npx grada-run logs')} instead.\n`);
@@ -122,6 +135,7 @@ export async function runExec(input = {}) {
 
     if (!awsCliPresent) {
         return failCommand({
+            noExit,
             print: printAwsCliGuidance,
             event: 'exec_run',
             telemetry: { projectName, error_code: 'AWS_CLI_MISSING' },
@@ -132,6 +146,7 @@ export async function runExec(input = {}) {
 
     if (!ssmPluginPresent) {
         return failCommand({
+            noExit,
             print: printSessionManagerGuidance,
             event: 'exec_run',
             telemetry: { projectName, error_code: 'SSM_PLUGIN_MISSING' },
@@ -149,6 +164,7 @@ export async function runExec(input = {}) {
         if (!found) {
             s.stop(color.yellow('No running tasks.'));
             return failCommand({
+                noExit,
                 print: () => printNoTasksGuidance(service, cluster),
                 event: 'exec_run',
                 telemetry: { projectName, error_code: 'NO_RUNNING_TASKS' },
@@ -208,6 +224,7 @@ export async function runExec(input = {}) {
         }
         s.stop(color.red('❌ Exec failed.'));
         return failCommand({
+            noExit,
             message: `✖ ${error?.message || error}`,
             hint: 'Check your AWS credentials and region, then try again.',
             reason: 'error',

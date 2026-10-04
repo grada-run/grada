@@ -9,7 +9,7 @@ Let AI coding assistants inspect and operate your infrastructure directly — st
 
 - Serves 5 tools over STDIO (the default): `analyze_stack` (framework/compute detection), `add_primitive` (headless `grada add`), `stack_status` (live ECS/Lambda health), `fetch_logs` (CloudWatch logs), and `audit_secrets` (local vs AWS secrets drift, key names only).
 - Keeps the JSON-RPC stream pure: command output is captured during tool calls and internal `process.exit` failures are converted into structured error results, so the server survives errors instead of crashing.
-- Serves the same tools over stateless Streamable HTTP (`--transport http`) on `/mcp` for your own tunnels and container hosts — see the `Dockerfile` bridge. The bridge is user-hosted only (Grada runs no central instance), and the HTTP transport has no authentication: bind it to localhost or expose it only behind a trusted tunnel you control.
+- Serves the same tools over stateless Streamable HTTP (`--transport http`) on `/mcp` for your own tunnels and container hosts. The HTTP transport is user-hosted only (Grada runs no central instance) and has no authentication: bind it to localhost or expose it only behind a trusted tunnel you control.
 - Installs the server entry into your editor's MCP config with `--install <editor>` (`windsurf`, `zed`, `cursor`, `vscode`, `claude-desktop`, `gemini-cli`), preserving existing keys and servers.
 - Emits an `mcp_install` telemetry event on installs; tool calls emit the wrapped command's own telemetry with the real command name.
 

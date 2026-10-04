@@ -344,6 +344,7 @@ describe('Headless contract (automation-safe)', () => {
         [['--headless', '--with=email:ses'], 'missing-ses-domain', 'MISSING_SES_DOMAIN'],
         [['--headless', '--db-engine=sqlite'], 'invalid-db-engine', 'INVALID_DB_ENGINE'],
         [['--headless', '--target=eks'], 'invalid-compute-target', 'INVALID_COMPUTE_TARGET'],
+        [['--headless', '--framework=node', '--target=static'], 'static-target-framework-mismatch', 'STATIC_TARGET_FRAMEWORK_MISMATCH'],
     ])('fails fast (%s) before AWS provisioning or file backup', async (argv, reason, code) => {
         process.chdir(tmpDir);
         await fs.mkdir(path.join(tmpDir, 'terraform'), { recursive: true });
@@ -472,6 +473,25 @@ describe('Headless: --target lambda', () => {
         await runHeadlessLambda(['--headless', '--framework=node']);
         const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf-8');
         expect(mainTf).toContain('resource "aws_ecs_service" "app"');
+    });
+
+    it('scaffolds the static stack headless with zero baseline telemetry', async () => {
+        const { exitSpy } = await runHeadlessLambda(['--headless', '--framework=static', '--target=static']);
+        expect(exitSpy).not.toHaveBeenCalled();
+
+        const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf-8');
+        expect(mainTf).toContain('resource "aws_cloudfront_distribution" "site"');
+        expect(mainTf).not.toContain('aws_ecs_service');
+        expect(mainTf).not.toContain('aws_lambda_function');
+
+        await expect(fs.stat(path.join(tmpDir, 'Dockerfile'))).rejects.toThrow();
+        const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+        expect(deployYml).toContain('aws s3 sync');
+
+        expect(trackEvent).toHaveBeenCalledWith(
+            'project_provisioned',
+            expect.objectContaining({ target: 'static' })
+        );
     });
 
     it('warns about connection bursts for lambda with a database', async () => {

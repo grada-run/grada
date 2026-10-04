@@ -18,11 +18,18 @@ export function readFileSafe(filePath) {
 // canonical `ecs` value and its `fargate` synonym.
 export const COMPUTE_TARGETS = ['ecs', 'lambda'];
 
-// Pure target check over rendered `main.tf` content: a Lambda project is
-// any project whose main.tf provisions the serverless function.
+// Pure target check over rendered `main.tf` content: Lambda projects
+// provision the serverless function; static projects serve the site
+// straight from a CloudFront distribution (ECS keeps its distribution in
+// cloudfront.tf, so one in main.tf is unambiguous); the rest is ECS.
 export function detectComputeTargetFromMainTf(mainTfContent) {
-    if (typeof mainTfContent === 'string' && mainTfContent.includes('resource "aws_lambda_function"')) {
-        return 'lambda';
+    if (typeof mainTfContent === 'string') {
+        if (mainTfContent.includes('resource "aws_lambda_function"')) {
+            return 'lambda';
+        }
+        if (mainTfContent.includes('resource "aws_cloudfront_distribution"')) {
+            return 'static';
+        }
     }
     return 'ecs';
 }

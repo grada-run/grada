@@ -19,6 +19,7 @@ import { runDomain, parseDomainArgs } from '../src/commands/domain.js';
 import { runSleep, parseSleepArgs } from '../src/commands/sleep.js';
 import { runWake, parseWakeArgs } from '../src/commands/wake.js';
 import { runDrift, parseDriftArgs } from '../src/commands/drift.js';
+import { runAlerts, parseAlertsArgs } from '../src/commands/alerts.js';
 import { runMcp, parseMcpArgs } from '../src/commands/mcp.js';
 import { parseCliArgs } from '../src/core/parser.js';
 
@@ -34,7 +35,7 @@ const HELP_TEXT = [
     '  destroy              Tear down infrastructure (--yes)',
     '  doctor               Run pre-flight dependency checks',
     '  logs [service]       Stream CloudWatch logs (--tail, -f/--follow, --error, --since, --region)',
-    '  status               Service health dashboard (--region, --json)',
+    '  status               Service health dashboard (--region, --json, --watch)',
     '  rollback [rev]       Roll back ECS service to a previous task revision',
     '  exec                 Open an interactive shell in a running container (--cluster, --service, --container, --command, --region)',
     '  db connect           Open a secure local tunnel to your database (--port, --show-credentials, --workspace, --region)',
@@ -47,6 +48,7 @@ const HELP_TEXT = [
     '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes)',
     '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait)',
     '  drift                Detect Terraform drift locally or scaffold scheduled checks (--setup)',
+    '  alerts               Scaffold SNS + 5xx alarm notifications for ECS (--force)',
     '  add <capability>     Provision a modular addon (storage:s3, db:dynamodb, db:redis, queue:sqs, ai:bedrock, email:ses, cron) [--model <id>, --list-models, --refresh]',
     '  domain add <domain>    Provision a custom domain with automated ACM TLS (--zone-id, --activate)',
     '  domain verify|status|remove  Activate, inspect, or remove the custom domain',
@@ -58,7 +60,7 @@ const HELP_TEXT = [
     '  mcp [--install <editor>] [--transport stdio|http]  Start the MCP server (stdio default; http serves /mcp for tunnels), or write IDE config (windsurf, zed, cursor, vscode, claude-desktop, gemini-cli)',
     '',
     'Init options:',
-    '  --target <ecs|lambda>  Compute architecture: always-on Fargate + ALB (~$31/mo flat, best for steady traffic) or scale-to-zero Lambda + API Gateway ($0/mo idle, best for sporadic traffic). Tradeoffs: Stack Architecture guide → Fargate vs Lambda.',
+    '  --target <ecs|lambda|static>  Compute architecture: always-on Fargate + ALB (~$31/mo flat, best for steady traffic), scale-to-zero Lambda + API Gateway ($0/mo idle, best for sporadic traffic), or zero-compute S3 + CloudFront (static sites only). Tradeoffs: Stack Architecture guide → Fargate vs Lambda.',
 ];
 
 const rawArgs = process.argv.slice(2);
@@ -83,7 +85,12 @@ function parseRegionFlag(args) {
 // prints the error and exits non-zero instead of surfacing as an unhandled
 // rejection with a stack trace and an unpredictable exit code.
 function runCommand(promise) {
-    promise.catch((error) => {
+    // Commands suppress process.exit for programmatic callers and stamp the
+    // intended code onto the result instead — the CLI restores it here so
+    // terminal exit codes never change.
+    promise.then((result) => {
+        if (result && result.ok === false && typeof result.exitCode === 'number') process.exit(result.exitCode);
+    }).catch((error) => {
         console.error(error);
         process.exit(1);
     });
@@ -135,6 +142,8 @@ if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     runCommand(runWake({ ...parseWakeArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'drift') {
     runCommand(runDrift({ ...parseDriftArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+} else if (positionalArgs[0] === 'alerts') {
+    runCommand(runAlerts(parseAlertsArgs(rawArgs)));
 } else if (positionalArgs[0] === 'mcp') {
     runCommand(runMcp(parseMcpArgs(rawArgs)));
 } else if (positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h')) {

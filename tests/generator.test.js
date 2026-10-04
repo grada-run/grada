@@ -751,6 +751,129 @@ describe('Infrastructure Generator: --target lambda', () => {
     });
 });
 
+describe('Infrastructure Generator: --target static', () => {
+    const staticTargetDir = path.join(process.cwd(), 'tests', '.tmp-test-env-static');
+
+    beforeAll(async () => {
+        await fs.mkdir(staticTargetDir, { recursive: true });
+    });
+
+    afterAll(async () => {
+        await fs.rm(staticTargetDir, { recursive: true, force: true });
+    });
+
+    beforeEach(async () => {
+        await fs.rm(staticTargetDir, { recursive: true, force: true });
+        await fs.mkdir(staticTargetDir, { recursive: true });
+    });
+
+    function staticConfig(overrides = {}) {
+        return {
+            PROJECT_NAME: 'test-static',
+            REGION: 'us-east-2',
+            PORT: '8080',
+            CPU: '256',
+            MEMORY: '512',
+            COMPUTE_TIER: 'Micro (0.25 vCPU, 512MB RAM)',
+            ESTIMATED_COST: '0.00',
+            STATE_BUCKET: 'test-bucket-123',
+            AWS_ACCOUNT_ID: '123456789012',
+            HEALTH_CHECK_PATH: '/',
+            DESIRED_COUNT: '1',
+            DEPLOY_BRANCH: 'main',
+            BUILD_DIR: 'dist',
+            finalFramework: 'static',
+            NEEDS_DATABASE: false,
+            DB_ENGINE: 'postgres',
+            DJANGO_WSGI: '',
+            DISABLE_DEFAULT_CI: false,
+            PROCFILE: null,
+            VERCEL_RULES: null,
+            VERCEL_EDGE_ROUTING: '',
+            DOCKER_COMPOSE: null,
+            ENABLE_PR_PREVIEWS: false,
+            TASK_COMMAND: '',
+            WORKER_COMMAND: '',
+            DB_ENV_VARS: '',
+            COMPOSE_WEB_ENV_VARS: '',
+            EXTRA_CONTAINERS: '',
+            TASK_SECRETS: '',
+            INITIAL_SECRET_MAP: '{\n  }',
+            SAFE_ALB_NAME: 'test-static',
+            TARGET: 'static',
+            ...overrides,
+        };
+    }
+
+    async function readTf(name) {
+        return fs.readFile(path.join(staticTargetDir, 'terraform', name), 'utf-8');
+    }
+
+    it('writes the S3 + CloudFront topology with no compute resources', async () => {
+        await generateTemplates(staticTargetDir, staticConfig());
+
+        const mainTf = await readTf('main.tf');
+        expect(mainTf).toContain('resource "aws_s3_bucket" "site"');
+        expect(mainTf).toContain('resource "aws_cloudfront_origin_access_control" "site"');
+        expect(mainTf).toContain('resource "aws_cloudfront_distribution" "site"');
+        expect(mainTf).toContain('output "cloudfront_distribution_id"');
+        expect(mainTf).toContain('"${local.app_name}-cdn"');
+        expect(mainTf).not.toContain('aws_ecs_service');
+        expect(mainTf).not.toContain('aws_lambda_function');
+        expect(mainTf).not.toContain('aws_lb');
+        expect(mainTf).not.toContain('aws_db_instance');
+
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'network.tf'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'secrets.tf'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'database.tf'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'cloudfront.tf'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'oidc.tf'))).resolves.toBeTruthy();
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'backend.tf'))).resolves.toBeTruthy();
+        await expect(fs.stat(path.join(staticTargetDir, 'Dockerfile'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, '.dockerignore'))).rejects.toThrow();
+    });
+
+    it('deploys by syncing the build output instead of building images', async () => {
+        await generateTemplates(staticTargetDir, staticConfig());
+
+        const deployYml = await fs.readFile(path.join(staticTargetDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+        expect(deployYml).toContain('npm run build');
+        expect(deployYml).toContain('aws s3 sync');
+        expect(deployYml).toContain('test-static-site-123456789012');
+        expect(deployYml).toContain('aws cloudfront create-invalidation');
+        expect(deployYml).not.toContain('docker build');
+        expect(deployYml).not.toContain('Force ECS deployment');
+    });
+
+    it('renders the static deployment doc with a zero baseline', async () => {
+        await generateTemplates(staticTargetDir, staticConfig());
+
+        const readme = await fs.readFile(path.join(staticTargetDir, 'README.md'), 'utf-8');
+        expect(readme).toContain('private S3 bucket');
+        expect(readme).toContain('Estimated Fixed Monthly Baseline:');
+        expect(readme).toContain('~$0.00/month');
+        expect(readme).not.toContain('ECS Fargate');
+    });
+
+    it('never provisions worker.tf or database.tf, even when requested', async () => {
+        await generateTemplates(staticTargetDir, staticConfig({
+            NEEDS_DATABASE: true,
+            PROCFILE: { web: ['npm', 'run', 'build'], worker: ['node', 'worker.js'] },
+            WORKER_COMMAND: 'command = ["node", "worker.js"]',
+        }));
+
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'worker.tf'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'database.tf'))).rejects.toThrow();
+    });
+
+    it('skips PR preview workflows when opted in', async () => {
+        await generateTemplates(staticTargetDir, staticConfig({ ENABLE_PR_PREVIEWS: true }));
+
+        await expect(fs.stat(path.join(staticTargetDir, '.github', 'workflows', 'preview.yml'))).rejects.toThrow();
+        await expect(fs.stat(path.join(staticTargetDir, '.github', 'workflows', 'teardown.yml'))).rejects.toThrow();
+    });
+});
+
 describe('Lambda generator helpers', () => {
     it('injectLambdaAdapter inserts after the last FROM and skips duplicates', () => {
         const multiStage = 'FROM node:22 AS builder\nRUN build\nFROM node:22 AS runner\nUSER node\nCMD ["node"]\n';

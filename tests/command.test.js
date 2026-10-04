@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // during module evaluation and need the factories initialized.
 import { telemetryMockFactory } from './helpers/telemetry.js';
 import { mockConsoleTrio } from './helpers/console.js';
-import { failCommand, failProjectNotInitialized } from '../src/utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../src/utils/command.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
 vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
@@ -95,5 +95,44 @@ describe('failCommand', () => {
         expect(flushTelemetry).toHaveBeenCalled();
         expect(exitSpy).toHaveBeenCalledWith(1);
         expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Could not determine the project'));
+    });
+
+    it('noExit suppresses the exit and stamps the code for the CLI to restore', async () => {
+        const result = await failCommand({ message: 'failed', event: 'drift_run', reason: 'drift-failed', noExit: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(result).toEqual({ ok: false, exitCode: 1, reason: 'drift-failed' });
+        expect(trackEvent).toHaveBeenCalledWith('drift_run', expect.objectContaining({ success: false }));
+
+        const custom = await failCommand({ message: 'failed', exitCode: 2, noExit: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(custom).toEqual({ ok: false, exitCode: 2 });
+    });
+
+    it('noExit leaves soft failures unstamped', async () => {
+        const result = await failCommand({ message: 'soft', exitCode: null, noExit: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(result).toEqual({ ok: false });
+    });
+
+    it('failProjectNotInitialized honors noExit', async () => {
+        const result = await failProjectNotInitialized({ event: 'drift_run', noExit: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(result).toEqual({ ok: false, exitCode: 1, reason: 'project-not-initialized' });
+    });
+});
+
+describe('isProgrammaticCall', () => {
+    it.each([
+        [{ isHeadless: true }, true],
+        [{ headless: true }, true],
+        [{ json: true }, true],
+        [{ isHeadless: 'true' }, true],
+        [{ json: 'true' }, true],
+        [{}, false],
+        [null, false],
+        [{ yes: true }, false],
+        [{ autoApprove: true }, false],
+    ])('classifies %j as %s', (input, expected) => {
+        expect(isProgrammaticCall(input)).toBe(expected);
     });
 });

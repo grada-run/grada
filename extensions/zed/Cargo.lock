@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "grada"
-version = "0.1.0"
+version = "0.36.0"
 dependencies = [
  "zed_extension_api",
 ]

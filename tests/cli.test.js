@@ -23,7 +23,7 @@ describe('CLI Executable', () => {
         const cliPath = path.resolve(__dirname, '../bin/cli.js');
         const content = fs.readFileSync(cliPath, 'utf8');
 
-        expect(content).toContain('--target <ecs|lambda>');
+        expect(content).toContain('--target <ecs|lambda|static>');
         expect(content).toContain('Fargate vs Lambda');
     });
 });

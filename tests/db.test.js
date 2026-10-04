@@ -1744,6 +1744,26 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         expect(result.reason).toBe('confirmation-required');
     });
 
+    it('names the service and cluster when no tasks are running', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
+        const sqlFile = writeSqlFile(dir);
+        const { spawnImpl } = mockImportSpawn();
+        const result = await runDbImport(importOptions({
+            file: sqlFile,
+            spawnImpl,
+            ecsClient: mockEcsClient({ taskArns: [], tasks: [] }),
+        }));
+
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('no-running-tasks');
+        const text = stripVTControlCharacters(output.join('\n'));
+        expect(text).toContain('No running containers');
+        expect(text).toContain('myapp-service');
+        expect(text).toContain('myapp-cluster');
+        expect(text).not.toContain('[object Object]');
+        expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
     it('streams a .sql file into psql with env-only secrets', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
         const sqlFile = writeSqlFile(dir);

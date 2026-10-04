@@ -13,7 +13,7 @@ Tasks run with `awsvpc` networking in **public subnets** spread across availabil
 
 ## Compute and images
 
-One ECS cluster holds the `app` service, plus an optional private `worker` service with no load balancer (see [Background Workers](/grada/guides/background-workers/)). Both run the same ECR image: the pipeline builds once per push and tags it with the commit SHA (the immutable deploy artifact) and `latest`. Scheduled jobs ([`add cron`](/grada/cli/add/)) reuse that same image — an EventBridge Scheduler rule launches a one-off Fargate task inside the VPC on your `cron(...)` or `rate(...)` expression, so there is no always-on worker to pay for.
+One ECS cluster holds the `app` service, plus an optional internal `worker` service with no load balancer — though like the web service it still runs in the public subnets (see [Background Workers](/grada/guides/background-workers/)). Both run the same ECR image: the pipeline builds once per push and tags it with the commit SHA (the immutable deploy artifact) and `latest`. Scheduled jobs ([`add cron`](/grada/cli/add/)) reuse that same image — an EventBridge Scheduler rule launches a one-off Fargate task inside the VPC on your `cron(...)` or `rate(...)` expression, so there is no always-on worker to pay for.
 
 Two IAM roles split concerns: the **execution role** pulls images and reads secrets at boot, while the **task role** carries workload permissions — every [`add`](/grada/cli/add/) addon attaches its least-privilege policy here, so application code uses the AWS SDK with no keys.
 
@@ -30,6 +30,14 @@ Deploys push the SHA-tagged image to ECR and call `update-function-code`, which 
 Projects with a database attach the function to the VPC subnets (still no NAT gateway) and receive credentials as `DB_*` environment variables, since VPC-attached functions cannot reach Secrets Manager without a paid VPC endpoint. Non-database functions stay outside the VPC with direct internet access; `add db:redis` attaches the VPC config on demand. Cron schedules invoke the function directly with a JSON payload carrying the configured command — handle scheduled events in application code.
 
 Day-2 commands adapt: `status` and `diagnose` read function configuration via the AWS CLI, `logs` tails `/aws/lambda/<project>-fn`, and `sleep`/`wake` manage only the database (compute needs no scaling). `exec` and `rollback` are ECS-only and exit with the Lambda-native alternative.
+
+## Static target (`--target static`)
+
+Passing `--target static` to [`init`](/grada/cli/init/) generates a zero-compute topology for static-site frameworks (Vite, Astro, SPA exports — anything the `static` framework preset detects). Non-static frameworks are rejected with a validation error.
+
+Internet → **CloudFront** → **private S3 bucket**. There is no VPC, no ALB, no ECS, and no Dockerfile: the bucket blocks all public access and CloudFront reads through an Origin Access Control (OAC), unknown paths fall back to `/index.html` for client-side routers, and the fixed baseline is **$0.00/mo**. Deploys build the site, `aws s3 sync` the output folder, and invalidate the CloudFront cache.
+
+Day-2 commands adapt: `status` reports distribution status (`Deployed` vs propagating) instead of ECS, and `alerts` is ECS-only with a clear error. Container-oriented commands (`exec`, `rollback`, `logs`) behave as on an unprovisioned ECS project (service-not-found guidance). Workers, databases, and PR preview workflows are skipped (with a warning) — there is no compute to run them on.
 
 ### Fargate vs Lambda tradeoffs
 
@@ -67,7 +75,7 @@ Choose **Lambda** when traffic is sporadic, bursty, or unpredictable (side proje
 
 ## CDN, domain, and email
 
-CloudFront serves the app globally from the ALB origin. [`domain add`](/grada/cli/domain/) attaches your own hostname with an automated `us-east-1` ACM certificate; [`add email:ses`](/grada/cli/add/) provisions SES sending on the same domain with DKIM/SPF/DMARC. Both are optional day-2 steps over the base stack.
+CloudFront serves the app globally — from the ALB origin on ECS, the API Gateway origin on Lambda, or the S3 origin on static. [`domain add`](/grada/cli/domain/) attaches your own hostname with an automated `us-east-1` ACM certificate; [`add email:ses`](/grada/cli/add/) provisions SES sending on the same domain with DKIM/SPF/DMARC. Both are optional day-2 steps over the base stack.
 
 ## Observability
 

@@ -4,12 +4,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, select, text, spinner, log, cancel, isCancel } from '@clack/prompts';
-import { trackEvent, flushTelemetry, trackSuccess, isActiveEnvValue } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, isActiveEnvValue, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf } from '../utils/resolvers.js';
 import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars } from '../utils/addons.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, isValidFromEmail, parseDomainTf } from '../utils/domains.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { findArrayBounds, findMapBounds, findNestedBlock, findResourceBlock, enclosingBraceBounds } from '../utils/hcl.js';
 import { syncDocCostEstimate } from '../utils/visualizer.js';
 import {
@@ -893,15 +893,27 @@ export function formatCatalogListing(catalog) {
     return blocks;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runAdd(input = {}) {
+    setActiveCommandName('add');
+    try {
+        return await runAddMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runAddMain(input = {}) {
     const options = normalizeOptions(input);
+    const noExit = isProgrammaticCall(options);
     let cwd;
     let projectName;
     try {
         cwd = resolveCwd(options);
         projectName = resolveProjectName(options, cwd);
     } catch {
-        return failProjectNotInitialized({ event: 'add_run' });
+        return failProjectNotInitialized({ event: 'add_run', noExit });
     }
     const capability = typeof options.capability === 'string' ? options.capability.trim() : '';
     const force = options.force === true || options.force === 'true';
@@ -911,6 +923,7 @@ export async function runAdd(input = {}) {
 
     if (!addon) {
         return failCommand({
+            noExit,
             print: () => {
                 console.log(color.red(`\n✖ Unknown capability "${capability || 'none'}".`));
                 console.log(`  Supported capabilities: ${color.cyan(Object.keys(ADDON_REGISTRY).join(', '))}\n`);
@@ -923,6 +936,7 @@ export async function runAdd(input = {}) {
     }
 
     const cancelSelection = () => failCommand({
+        noExit,
         print: () => cancel(capability === 'email:ses' ? 'SES setup cancelled.' : 'Model selection cancelled.'),
         event: 'add_run',
         telemetry: { projectName, capability, reason: 'cancelled' },
@@ -931,6 +945,7 @@ export async function runAdd(input = {}) {
     });
 
     const failResolved = (failure) => failCommand({
+        noExit,
         message: failure.message,
         hint: failure.hint ?? null,
         event: 'add_run',
@@ -970,6 +985,7 @@ export async function runAdd(input = {}) {
     const mainTfPath = path.join(cwd, 'terraform', 'main.tf');
     if (!fsSync.existsSync(mainTfPath)) {
         return failCommand({
+            noExit,
             message: '\n✖ No terraform/main.tf found. Run "grada" first before adding services.\n',
             event: 'add_run',
             telemetry: { capability, error_code: 'TERRAFORM_NOT_INITIALIZED' },
@@ -998,6 +1014,7 @@ export async function runAdd(input = {}) {
         const canSwitchBedrock = capability === 'ai:bedrock' && (resolved.meta.explicitModel || resolved.meta.selectedInteractively);
         if (!canSwitchBedrock) {
             return failCommand({
+                noExit,
                 message: `\n⚠ terraform/${addon.file} already exists. Pass --force to overwrite.\n`,
                 tone: 'yellow',
                 event: 'add_run',

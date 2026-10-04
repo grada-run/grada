@@ -40,6 +40,9 @@ export default defineConfig({
             { label: 'Troubleshooting AWS Credentials', slug: 'guides/aws-credentials' },
             { label: 'Re-running Init Safely', slug: 'guides/rerun-init' },
             { label: 'Headless Mode & Automation', slug: 'guides/headless' },
+            { label: 'Static-Site Hosting', slug: 'guides/static-hosting' },
+            { label: 'Alert Notifications', slug: 'guides/alert-notifications' },
+            { label: 'Going-Live Checklist', slug: 'guides/going-live' },
           ],
         },
         {
@@ -64,6 +67,7 @@ export default defineConfig({
             { label: 'domain', slug: 'cli/domain' },
             { label: 'sleep & wake', slug: 'cli/sleep' },
             { label: 'drift', slug: 'cli/drift' },
+            { label: 'alerts', slug: 'cli/alerts' },
             { label: 'mcp', slug: 'cli/mcp' },
           ],
         },
