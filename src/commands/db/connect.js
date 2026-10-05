@@ -123,16 +123,9 @@ export async function runDbConnect(input = {}) {
         ? options.port.trim()
         : null;
 
-    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
-    const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
-    const secretsClient = resolveClient(options.secretsClient, SecretsManagerClient, { region });
-
-    const spawnImpl = options.spawnImpl || spawn;
-    const awsCliPresent = options.hasAwsCli ?? hasAwsCli({ spawnSyncImpl: options.spawnSyncImpl });
-    const ssmPluginPresent = options.hasSsmPlugin ?? hasSessionManagerPlugin({ spawnSyncImpl: options.spawnSyncImpl });
-
-    intro(color.bgCyan(color.black(' grada db 🛢️  ')));
-
+    // Validate before any AWS client construction or child-process
+    // pre-flight checks below: an invalid --port must fail fast instead of
+    // blocking on external binaries (aws --version can take seconds).
     if (portOverride !== null && !isValidPort(portOverride)) {
         return failCommand({
             message: `\n✖ Invalid --port "${portOverride}". Use a number between 1 and 65535.\n`,
@@ -142,6 +135,16 @@ export async function runDbConnect(input = {}) {
             resultExtra: { cluster, service, region },
         });
     }
+
+    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
+    const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
+    const secretsClient = resolveClient(options.secretsClient, SecretsManagerClient, { region });
+
+    const spawnImpl = options.spawnImpl || spawn;
+    const awsCliPresent = options.hasAwsCli ?? hasAwsCli({ spawnSyncImpl: options.spawnSyncImpl });
+    const ssmPluginPresent = options.hasSsmPlugin ?? hasSessionManagerPlugin({ spawnSyncImpl: options.spawnSyncImpl });
+
+    intro(color.bgCyan(color.black(' grada db 🛢️  ')));
 
     if (!awsCliPresent) {
         return failCommand({

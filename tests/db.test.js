@@ -551,6 +551,22 @@ describe('Command: db connect (mocked AWS + spawn)', () => {
         expect(mockTrackEvent).toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: false, error_code: 'INVALID_PORT' }));
     });
 
+    it('rejects an invalid --port before any child-process pre-flight check', async () => {
+        // No hasAwsCli/hasSsmPlugin injection: if validation ran after the
+        // pre-flight checks, this spy would observe the spawnSync probe
+        // (aws --version takes ~500ms locally and timed out CI at 5s).
+        const spawnSyncImpl = vi.fn(() => { throw new Error('must not spawn'); });
+        const options = baseOptions({ port: 'abc' });
+        delete options.hasAwsCli;
+        delete options.hasSsmPlugin;
+        const result = await runDbConnect({ ...options, spawnSyncImpl });
+
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('invalid-port');
+        expect(spawnSyncImpl).not.toHaveBeenCalled();
+        expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
     it('fails fast with install guidance when AWS CLI is missing', async () => {
         const clients = healthyClients();
         const spawnImpl = mockSpawnImpl([], 0);
