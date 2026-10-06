@@ -36,6 +36,32 @@ describe('CI scans rendered templates (not raw {{VARS}})', () => {
     }
 });
 
+describe('Terraform is installed before grada renders (init shells to terraform fmt)', () => {
+    for (const workflow of ['.github/workflows/test.yml', '.github/workflows/publish.yml']) {
+        it(`${workflow} sets up Terraform ahead of the render step`, () => {
+            const yml = readRepo(workflow);
+            const setup = yml.indexOf('hashicorp/setup-terraform');
+            const render = yml.indexOf('Render templates for IaC scanning');
+            expect(setup).toBeGreaterThanOrEqual(0);
+            expect(render).toBeGreaterThanOrEqual(0);
+            expect(setup).toBeLessThan(render);
+        });
+    }
+
+    it('iac-validation.yml installs Terraform in every scaffold job', () => {
+        const yml = readRepo('.github/workflows/iac-validation.yml');
+        // Split per job; the lambda job carries its scaffold commands in the
+        // matrix block (textually before steps), so assert presence per job
+        // rather than textual order within the job.
+        const jobs = yml.split('runs-on: ubuntu-latest').slice(1);
+        const scaffoldJobs = jobs.filter((job) => job.includes('bin/cli.js'));
+        expect(scaffoldJobs.length).toBe(4);
+        for (const job of scaffoldJobs) {
+            expect(job).toContain('hashicorp/setup-terraform');
+        }
+    });
+});
+
 describe('Docker templates run as non-root (DS-0002)', () => {
     const dir = path.join(process.cwd(), 'templates', 'docker');
     const files = fs.readdirSync(dir).filter((f) => f.endsWith('.Dockerfile'));

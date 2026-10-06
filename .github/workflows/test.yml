@@ -23,6 +23,11 @@ jobs:
       - name: Run Vitest Suite
         run: npm test
 
+      # grada init shells out to `terraform fmt` while rendering templates,
+      # so the CLI fails without Terraform on PATH.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
       - name: Render templates for IaC scanning
         env:
           CI_MOCK_AWS: 'true'
