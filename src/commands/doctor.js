@@ -100,7 +100,7 @@ async function checkAwsAuthSafe() {
 // A lone failure names itself: missing binaries as MISSING_<ID>, dead
 // credentials as AWS_CLI_UNCONFIGURED. reason mirrors error_code in
 // kebab-case per the failCommand/spec convention.
-function singleCheckFailure(checkId) {
+export function singleCheckFailure(checkId) {
     if (checkId === 'aws_auth') {
         return { error_code: 'AWS_CLI_UNCONFIGURED', reason: 'aws-cli-unconfigured' };
     }
@@ -109,6 +109,12 @@ function singleCheckFailure(checkId) {
         reason: `missing-${checkId.replace(/_/g, '-')}`,
     };
 }
+
+// Enterprise downgrade note: when the AWS CLI binary is missing but live
+// SDK credentials resolve (SSO tools/wrappers without `aws` on PATH),
+// doctor stays green — core provisioning works, only CLI-shell-out
+// features (SSM tunnels) are unavailable.
+export const AWS_CLI_DOWNGRADE_NOTE = 'AWS CLI is missing, but active AWS SDK credentials were found. Core deployments will work, but SSM tunnels (`grada db connect`, `grada exec`) will be unavailable until the AWS CLI is installed.';
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
 // invocation path, including direct imports that bypass bin/cli.js and MCP.
@@ -149,14 +155,28 @@ async function runDoctorMain() {
         }
     };
 
-    for (const check of results) {
-        printStatus(check.ok, check.label, installHint(check.id), check.id);
-    }
-
     const passedChecks = results.filter((check) => check.ok).map((check) => check.id);
     const failedChecks = results.filter((check) => !check.ok).map((check) => check.id);
 
-    if (failedChecks.length === 0) {
+    // Enterprise downgrade: a missing `aws` binary with live SDK credentials
+    // is a warning, not a failure — the SDK path provisions fine. Applies
+    // only when aws_cli is the SOLE failure; anything else failing alongside
+    // keeps the red verdict. Telemetry keeps check_aws_cli: false (honest
+    // per-check state) while success flips true.
+    const awsAuthOk = results.some((check) => check.id === 'aws_auth' && check.ok);
+    const cliDowngraded = failedChecks.length === 1 && failedChecks[0] === 'aws_cli' && awsAuthOk;
+    const success = failedChecks.length === 0 || cliDowngraded;
+
+    for (const check of results) {
+        if (check.id === 'aws_cli' && cliDowngraded) {
+            console.log(`   ${color.yellow('⚠️')} ${check.label} (⚠)`);
+            console.log(`      └─ ${color.dim(AWS_CLI_DOWNGRADE_NOTE)}`);
+        } else {
+            printStatus(check.ok, check.label, installHint(check.id), check.id);
+        }
+    }
+
+    if (success) {
         outro(color.green('Your system is 100% ready to provision and deploy! 🚀'));
     } else if (failedChecks.length === 1 && failedChecks[0] === 'aws_auth') {
         outro(color.yellow('Please refresh your AWS credentials before running the provisioning tool.'));
@@ -173,15 +193,18 @@ async function runDoctorMain() {
         results.map((check) => [`check_${check.id}`, check.ok])
     );
     // One failure names itself (MISSING_TERRAFORM, AWS_CLI_UNCONFIGURED);
-    // several keep the aggregate code.
-    const failureProps = failedChecks.length === 1
-        ? singleCheckFailure(failedChecks[0])
-        : { error_code: 'DOCTOR_CHECKS_FAILED', reason: 'doctor-checks-failed' };
+    // several keep the aggregate code. Downgraded runs carry no error
+    // fields — success:true with check_aws_cli:false IS the signal.
+    const failureProps = !success
+        ? (failedChecks.length === 1
+            ? singleCheckFailure(failedChecks[0])
+            : { error_code: 'DOCTOR_CHECKS_FAILED', reason: 'doctor-checks-failed' })
+        : {};
 
     trackEvent('doctor_run', {
-        success: failedChecks.length === 0,
+        success,
         ...checkFlags,
-        ...(failedChecks.length > 0 ? failureProps : {}),
+        ...failureProps,
         passed_checks: passedChecks,
         failed_checks: failedChecks,
         total_failed: failedChecks.length,

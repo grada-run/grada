@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // during module evaluation and need the factories initialized.
 import { clackPromptsMockFactory, mockOutro } from './helpers/clack.js';
 import { telemetryMockFactory } from './helpers/telemetry.js';
-import { runDoctor, installHint, ciHint, DOCTOR_CHECKS } from '../src/commands/doctor.js';
+import { runDoctor, installHint, ciHint, singleCheckFailure, DOCTOR_CHECKS } from '../src/commands/doctor.js';
 import { checkDependency } from '../src/utils/system.js';
 import { checkAwsCredentials } from '../src/utils/aws.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
@@ -121,6 +121,14 @@ describe('ciHint', () => {
     });
 });
 
+describe('singleCheckFailure', () => {
+    it('maps underscored check IDs to SCREAMING error codes and kebab reasons', () => {
+        expect(singleCheckFailure('aws_cli')).toEqual({ error_code: 'MISSING_AWS_CLI', reason: 'missing-aws-cli' });
+        expect(singleCheckFailure('terraform')).toEqual({ error_code: 'MISSING_TERRAFORM', reason: 'missing-terraform' });
+        expect(singleCheckFailure('aws_auth')).toEqual({ error_code: 'AWS_CLI_UNCONFIGURED', reason: 'aws-cli-unconfigured' });
+    });
+});
+
 describe('runDoctor', () => {
     it('reports all passing checks with empty failed arrays', async () => {
         const { output, restore } = captureLog();
@@ -202,21 +210,49 @@ describe('runDoctor', () => {
         }
     });
 
-    it('maps underscored check IDs to SCREAMING error codes and kebab reasons', async () => {
-        mockBinaries({ terraform: true, aws: false, docker: true, git: true });
-        const { restore } = captureLog();
+    it('downgrades a lone missing aws binary to a warning when SDK auth succeeds', async () => {
+        mockBinaries({ terraform: true, aws: false, docker: true, git: true, auth: true });
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: true,
+                    check_aws_cli: false,
+                    check_aws_auth: true,
+                    failed_checks: ['aws_cli'],
+                })
+            );
+            const [, props] = vi.mocked(trackEvent).mock.calls[0];
+            expect(props).not.toHaveProperty('error_code');
+            expect(props).not.toHaveProperty('reason');
+            const text = output.join('\n');
+            expect(text).toContain('AWS CLI (⚠)');
+            expect(text).toContain('active AWS SDK credentials were found');
+            expect(text).toContain('grada db connect');
+            expect(text).not.toContain('AWS CLI (✗)');
+            expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining('100% ready'));
+        } finally {
+            restore();
+        }
+    });
+
+    it('keeps the red verdict when aws_cli fails alongside anything else', async () => {
+        mockBinaries({ terraform: false, aws: false, docker: true, git: true, auth: true });
+        const { output, restore } = captureLog();
         try {
             await runDoctor();
             expect(trackEvent).toHaveBeenCalledWith(
                 'doctor_run',
                 expect.objectContaining({
                     success: false,
-                    error_code: 'MISSING_AWS_CLI',
-                    reason: 'missing-aws-cli',
-                    check_aws_cli: false,
-                    failed_checks: ['aws_cli'],
+                    error_code: 'DOCTOR_CHECKS_FAILED',
+                    failed_checks: ['terraform', 'aws_cli'],
                 })
             );
+            expect(output.join('\n')).toContain('AWS CLI (✗)');
+            expect(output.join('\n')).not.toContain('active AWS SDK credentials were found');
         } finally {
             restore();
         }

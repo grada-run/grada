@@ -14,8 +14,13 @@ export const CLI = path.join(ROOT, 'bin', 'cli.js');
 // Overridable via E2E_TMP_ROOT for local debugging.
 export const E2E_TMP_ROOT = process.env.E2E_TMP_ROOT || path.join(HERE, '.tmp');
 
-// Shared provider cache across runs (mirrors scripts/test-iac.js).
-const pluginCacheDir = path.join(os.tmpdir(), 'grada-e2e-plugin-cache');
+// Shared provider cache across runs (mirrors scripts/test-iac.js),
+// namespaced per Vitest worker. Parallel workers must never share one
+// cache dir: concurrent `terraform init` corrupts it (checksum mismatches
+// against the lock file, dead plugin binaries) and fails `validate` in
+// whichever test loses the race. Same-worker tests run sequentially, so
+// sharing one dir within a worker is safe.
+const pluginCacheDir = path.join(os.tmpdir(), `grada-e2e-plugin-cache-${process.env.VITEST_WORKER_ID ?? 'main'}`);
 
 export function e2eEnv({ mockAws }) {
     fs.mkdirSync(pluginCacheDir, { recursive: true });
