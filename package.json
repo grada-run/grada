@@ -1,6 +1,6 @@
 {
   "name": "grada-run",
-  "version": "0.36.0",
+  "version": "0.37.0",
   "description": "Provision production-ready AWS infrastructure and CI/CD pipelines in seconds.",
   "engines": {
     "node": ">=18.0.0"
