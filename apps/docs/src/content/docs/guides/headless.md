@@ -29,7 +29,7 @@ You can append any of these flags to customize the generated architecture. These
 | `--desiredCount=<number>` | Number of container replicas to run (`1` or `2`). | `1` |
 | `--branch=<name>` | The primary Git deployment branch for CI/CD. | `main` |
 | `--dir=<path>` | The directory to generate files into (use `.` for current).| `.` |
-| `--target=<target>` | Compute architecture: `ecs` (default, `fargate` synonym), `lambda` (scale-to-zero serverless), or `static` (S3 + CloudFront, static-site frameworks only). | `ecs` |
+| `--target=<target>` | Compute architecture: `ecs` (default, `fargate` synonym), `lambda` (scale-to-zero serverless), or `static` (S3 + CloudFront; static-site frameworks and detected static exports only). | `ecs` |
 | `--needsDatabase` | Provisions a managed AWS database alongside Fargate (engine via `--db-engine`). | `false` |
 | `--db-engine=<engine>` | Database engine: `postgres` (default), `mysql` (MySQL 8.0), or `aurora-postgresql` (Serverless v2 scale-to-zero). | `postgres` |
 | `--enablePrPreviews` | Generates workflows for Ephemeral PR Previews. | `false` |

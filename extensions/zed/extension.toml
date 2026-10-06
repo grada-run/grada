@@ -1,6 +1,6 @@
 id = "grada"
 name = "Grada"
-version = "0.36.0"
+version = "0.37.0"
 schema_version = 1
 authors = ["Grada <hello@grada.run>"]
 description = "Provision production-ready AWS infrastructure and operate it from Zed. Exposes the Grada MCP server (stack analysis, add-ons, status, logs, secrets audit) to the Agent Panel."

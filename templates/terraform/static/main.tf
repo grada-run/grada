@@ -35,6 +35,7 @@ resource "aws_s3_bucket_public_access_block" "site" {
   restrict_public_buckets = true
 }
 
+# trivy:ignore:AVD-AWS-0132 - Using free AES256 instead of Customer Managed Keys as a cost-saving trade-off
 resource "aws_s3_bucket_server_side_encryption_configuration" "site" {
   bucket = aws_s3_bucket.site.id
 
@@ -75,6 +76,7 @@ resource "aws_s3_bucket_policy" "site" {
 
 # NOTE: grada detects the static target by the presence of this resource in
 # main.tf (see detectComputeTargetFromMainTf) — do not move it elsewhere.
+# trivy:ignore:AVD-AWS-0011 - WAF is omitted by default to prevent unexpected monthly costs for users
 resource "aws_cloudfront_distribution" "site" {
   enabled             = true
   comment             = "${local.app_name}-cdn"

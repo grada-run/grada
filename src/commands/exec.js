@@ -6,7 +6,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, guardComputeTarget } from '../utils/resolvers.js';
 import {
     hasSessionManagerPlugin,
     resolveContainer,
@@ -119,16 +119,21 @@ async function runExecMain(input = {}) {
 
     intro(color.bgCyan(color.black(' grada exec 🐚 ')));
 
-    if (readTerraformComputeTarget(cwd) === 'lambda') {
+    const targetGuard = guardComputeTarget({
+        cwd,
+        command: 'ECS Exec',
+        supported: ['ecs'],
+        hint: 'Lambda functions and static sites have no shell to attach to — inspect recent output with npx grada-run logs instead.',
+    });
+    if (targetGuard) {
         return failCommand({
             noExit,
-            print: () => {
-                console.log(color.red(`\n✖ Exec opens a shell in a running ECS container, but "${projectName}" is a Lambda project.`));
-                console.log(`  Lambda functions have no shell to attach to — inspect recent output with ${color.green('npx grada-run logs')} instead.\n`);
-            },
+            message: targetGuard.message,
+            hint: targetGuard.hint,
             event: 'exec_run',
-            telemetry: { projectName, error_code: 'LAMBDA_TARGET_UNSUPPORTED' },
-            reason: 'lambda-target-unsupported',
+            telemetry: { projectName },
+            errorCode: targetGuard.errorCode,
+            reason: targetGuard.reason,
             resultExtra: { cluster, service, region },
         });
     }

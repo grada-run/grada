@@ -1,5 +1,6 @@
 import color from 'picocolors';
-import { failCommand } from '../utils/command.js';
+import { failCommand, isProgrammaticCall } from '../utils/command.js';
+import { guardComputeTarget } from '../utils/resolvers.js';
 import { normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { runDbConnect, parseDbArgs } from './db/connect.js';
 import { runDbMigrate, parseDbMigrateArgs } from './db/migrate.js';
@@ -46,6 +47,31 @@ export async function runDb(argv = [], extraOptions = {}) {
     const extra = normalizeOptions(extraOptions);
     if (args[0] === 'db') args.shift();
     const subcommand = args[0] && !String(args[0]).startsWith('-') ? args[0] : undefined;
+
+    // Static sites provision no database, so every subcommand would fail
+    // obscurely downstream (SSM/RDS lookups with nothing to find). Guard
+    // once at the dispatcher — before any parsing side effects — instead
+    // of repeating the check in all six runners.
+    if (DB_SUBCOMMANDS.includes(subcommand)) {
+        const targetGuard = guardComputeTarget({
+            cwd: extra.cwd ?? process.cwd(),
+            command: `db ${subcommand}`,
+            supported: ['ecs', 'lambda'],
+            hint: 'Static sites provision no database — static sites needing data need an API backend.',
+        });
+        if (targetGuard) {
+            return failCommand({
+                noExit: isProgrammaticCall(extra),
+                message: targetGuard.message,
+                hint: targetGuard.hint,
+                event: 'db_run',
+                telemetry: { subcommand },
+                errorCode: targetGuard.errorCode,
+                reason: targetGuard.reason,
+                resultExtra: { subcommand },
+            });
+        }
+    }
 
     if (subcommand === 'connect') {
         return runDbConnect({ ...parseDbArgs(argv), ...extra });

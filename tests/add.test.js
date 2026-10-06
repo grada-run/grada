@@ -590,6 +590,20 @@ describe('queue:sqs generated terraform', () => {
         expect(mainTf).toContain('SQS_DLQ_URL');
     });
 
+    it('warns on lambda targets and never creates worker.tf', async () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp"\n}\nresource "aws_lambda_function" "app" {}\n'
+        );
+        const result = await runAdd({ cwd: dir, capability: 'queue:sqs' });
+        expect(result.ok).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'terraform', 'sqs.tf'))).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'terraform', 'worker.tf'))).toBe(false);
+        expect(vi.mocked(log.warn)).toHaveBeenCalledWith(expect.stringContaining('long-running workers require ECS'));
+    });
+
     it('renders active auto-scaling when worker.tf exists', async () => {
         const dir = makeTmp();
         writeMainTf(dir);

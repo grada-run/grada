@@ -955,13 +955,31 @@ describe('runSleep on --target lambda projects', () => {
         expect(readSleepState(dir).staging).toMatchObject({ services: { app: 0, worker: 0 } });
     });
 
-    it('reports nothing to sleep when no database exists', async () => {
+    it('exits gracefully when no database exists (probes RDS, never touches ECS)', async () => {
         const dir = lambdaDir();
-        const { ecsClient, rdsClient } = mockClients({});
+        const { ecsClient, rdsClient, seen } = mockClients({});
         const result = await runSleep({
             cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging', ecsClient, rdsClient,
         });
-        expect(result).toMatchObject({ ok: false, reason: 'nothing-to-sleep' });
+        expect(result).toMatchObject({ ok: true, skipped: 'lambda-no-database' });
+        expect(seen).not.toContain('DescribeServicesCommand');
+        expect(seen).not.toContain('UpdateServiceCommand');
+        expect(seen).not.toContain('StopDBInstanceCommand');
+        expect(exitSpy).not.toHaveBeenCalled();
+        const output = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
+        expect(output).toContain('already scale-to-zero');
+    });
+
+    it('exits gracefully with --skip-db without any AWS calls', async () => {
+        const dir = lambdaDir();
+        const { ecsClient, rdsClient } = mockClients({});
+        const result = await runSleep({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging', ecsClient, rdsClient, skipDb: true,
+        });
+        expect(result).toMatchObject({ ok: true, skipped: 'lambda-skip-db' });
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(rdsClient.send).not.toHaveBeenCalled();
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 });
 
@@ -976,21 +994,29 @@ describe('runSleep on --target static projects', () => {
         return dir;
     }
 
-    it('reports static targets as nothing to sleep without the apply pointer', async () => {
+    it('exits gracefully without any AWS calls', async () => {
         const dir = staticDir();
         const { ecsClient, rdsClient } = mockClients({});
-        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-        try {
-            const result = await runSleep({
-                cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging', ecsClient, rdsClient,
-            });
-            expect(result).toMatchObject({ ok: false, reason: 'nothing-to-sleep' });
-            const output = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
-            expect(output).toContain('is a static target — no compute or database to sleep');
-            expect(output).not.toContain('npx grada-run apply');
-        } finally {
-            logSpy.mockRestore();
-        }
+        const result = await runSleep({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging', ecsClient, rdsClient,
+        });
+        expect(result).toMatchObject({ ok: true, skipped: 'static-target' });
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(rdsClient.send).not.toHaveBeenCalled();
+        expect(exitSpy).not.toHaveBeenCalled();
+        const output = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
+        expect(output).toContain('is a static target — no compute or database to sleep');
+        expect(output).not.toContain('npx grada-run apply');
+    });
+
+    it('intercepts before the production confirm gate on the default env', async () => {
+        const dir = staticDir();
+        const { ecsClient, rdsClient } = mockClients({});
+        const result = await runSleep({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', ecsClient, rdsClient,
+        });
+        expect(result).toMatchObject({ ok: true, skipped: 'static-target' });
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 });
 
@@ -1031,5 +1057,46 @@ describe('runWake on --target lambda projects', () => {
         expect(seen).not.toContain('UpdateServiceCommand');
         expect(seen).toContain('StartDBInstanceCommand');
         expect(readSleepState(dir).staging).toBeUndefined();
+    });
+
+    it('exits gracefully when no database exists (probes RDS, never touches ECS)', async () => {
+        const dir = lambdaDir();
+        const { ecsClient, rdsClient, seen } = mockClients({});
+        const result = await runWake({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
+            noWait: true, ecsClient, rdsClient,
+        });
+        expect(result).toMatchObject({ ok: true, skipped: 'lambda-no-database' });
+        expect(seen).not.toContain('DescribeServicesCommand');
+        expect(seen).not.toContain('UpdateServiceCommand');
+        expect(seen).not.toContain('StartDBInstanceCommand');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+});
+
+describe('runWake on --target static projects', () => {
+    function staticDir() {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp"\n}\nresource "aws_cloudfront_distribution" "site" {}\n'
+        );
+        return dir;
+    }
+
+    it('exits gracefully without any AWS calls', async () => {
+        const dir = staticDir();
+        const { ecsClient, rdsClient } = mockClients({});
+        const result = await runWake({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
+            noWait: true, ecsClient, rdsClient,
+        });
+        expect(result).toMatchObject({ ok: true, skipped: 'static-target' });
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(rdsClient.send).not.toHaveBeenCalled();
+        expect(exitSpy).not.toHaveBeenCalled();
+        const output = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
+        expect(output).toContain('is a static target — no compute or database to wake');
     });
 });

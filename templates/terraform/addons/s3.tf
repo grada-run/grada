@@ -24,6 +24,7 @@ resource "aws_s3_bucket_public_access_block" "storage" {
   restrict_public_buckets = true
 }
 
+# trivy:ignore:AVD-AWS-0132 - Using free AES256 instead of Customer Managed Keys as a cost-saving trade-off
 resource "aws_s3_bucket_server_side_encryption_configuration" "storage" {
   bucket = aws_s3_bucket.storage.id
 
@@ -56,6 +57,7 @@ resource "aws_cloudfront_origin_access_control" "storage_oac" {
   signing_protocol                  = "sigv4"
 }
 
+# trivy:ignore:AVD-AWS-0011 - WAF is omitted by default to prevent unexpected monthly costs for users
 resource "aws_cloudfront_distribution" "storage_cdn" {
   enabled             = true
   is_ipv6_enabled     = true

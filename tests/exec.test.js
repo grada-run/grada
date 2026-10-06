@@ -364,3 +364,37 @@ describe('exec on --target lambda projects', () => {
         }
     });
 });
+
+describe('exec on --target static projects', () => {
+    let exitSpy;
+    let logSpy;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        exitSpy.mockRestore();
+        logSpy.mockRestore();
+    });
+
+    it('fails cleanly instead of probing for ECS containers', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exec-static-test-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'main.tf'),
+                'locals {\n  app_name = "myapp"\n}\nresource "aws_cloudfront_distribution" "site" {}\n'
+            );
+            const result = await runExec({ cwd: dir, hasAwsCli: true, hasSsmPlugin: true });
+            expect(result).toMatchObject({ ok: false, reason: 'static-target-unsupported' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(trackEvent).toHaveBeenCalledWith('exec_run', expect.objectContaining({ error_code: 'STATIC_TARGET_UNSUPPORTED' }));
+            expect(logSpy.mock.calls.map((call) => String(call[0])).join('\n')).toContain('ECS Exec is not supported on Lambda or Static targets');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});

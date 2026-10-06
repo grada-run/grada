@@ -82,6 +82,101 @@ export async function runSleep(input = {}) {
         });
     }
 
+    // Scale-to-zero intercept: static targets have no compute or database,
+    // so there is nothing to sleep. Runs before the confirm gate and any
+    // AWS call — prompting to take "production offline" would be nonsense.
+    if (isStatic) {
+        console.log(`\n  ${color.cyan(target.appPrefix)} is a static target — no compute or database to sleep. Nothing to do.\n`);
+        await trackSuccess('sleep_run', {
+            projectName,
+            env_kind: target.envKind,
+            ecs_scaled: 0,
+            db_stopped: false,
+            db_kind: 'none',
+            cron_paused: false,
+            scaling_suspended: false,
+            skipped: 'static-target',
+        });
+        outro(color.green('Done.'));
+        return {
+            ok: true,
+            env: target.envKey,
+            cluster: target.cluster,
+            region,
+            ecsScaled: 0,
+            dbStopped: false,
+            skipped: 'static-target',
+        };
+    }
+
+    // FinOps Preservation: Lambda compute is already scale-to-zero, but a
+    // provisioned database must still hibernate. Probe RDS (read-only)
+    // before the confirm gate: no database means nothing to sleep, while
+    // --skip-db short-circuits the probe entirely (ECS is skipped by
+    // target, the database by flag). Client construction performs no
+    // network I/O, and probe failures fall through to the main flow so
+    // auth errors surface through the standard branch.
+    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
+    let lambdaDbTarget = null;
+    let lambdaDbProbed = false;
+    if (isLambda) {
+        if (skipDb) {
+            console.log(`\n  Lambda compute is already scale-to-zero and ${color.cyan('--skip-db')} was passed — nothing to sleep.\n`);
+            await trackSuccess('sleep_run', {
+                projectName,
+                env_kind: target.envKind,
+                ecs_scaled: 0,
+                db_stopped: false,
+                db_kind: 'none',
+                cron_paused: false,
+                scaling_suspended: false,
+                skipped: 'lambda-skip-db',
+            });
+            outro(color.green('Done.'));
+            return {
+                ok: true,
+                env: target.envKey,
+                cluster: target.cluster,
+                region,
+                ecsScaled: 0,
+                dbStopped: false,
+                skipped: 'lambda-skip-db',
+            };
+        }
+        try {
+            lambdaDbTarget = await findDbTarget(rdsClient, {
+                dbIdentifier: target.dbIdentifier,
+                dbClusterIdentifier: target.dbClusterIdentifier,
+            });
+            lambdaDbProbed = true;
+        } catch {
+            lambdaDbProbed = false;
+        }
+        if (lambdaDbProbed && !lambdaDbTarget) {
+            console.log(`\n  No databases found for ${color.cyan(target.appPrefix)} — and Lambda compute is already scale-to-zero. Nothing to do.\n`);
+            await trackSuccess('sleep_run', {
+                projectName,
+                env_kind: target.envKind,
+                ecs_scaled: 0,
+                db_stopped: false,
+                db_kind: 'none',
+                cron_paused: false,
+                scaling_suspended: false,
+                skipped: 'lambda-no-database',
+            });
+            outro(color.green('Done.'));
+            return {
+                ok: true,
+                env: target.envKey,
+                cluster: target.cluster,
+                region,
+                ecsScaled: 0,
+                dbStopped: false,
+                skipped: 'lambda-no-database',
+            };
+        }
+    }
+
     // Safety guard: sleeping the default (production) environment takes the
     // web service offline, so it needs an explicit confirmation.
     if (target.requiresConfirm && !confirmed) {
@@ -104,7 +199,7 @@ export async function runSleep(input = {}) {
     }
 
     const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
-    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
+    // rdsClient was resolved above the confirm gate for the Lambda probe.
     const runSync = options.spawnSyncImpl || spawnSync;
 
     const s = spinner();
@@ -146,7 +241,11 @@ export async function runSleep(input = {}) {
         let dbStopped = false;
         let dbNote = null;
         if (!skipDb) {
-            dbTarget = await findDbTarget(rdsClient, {
+            // Lambda already probed above the confirm gate — reuse it so a
+            // hibernation run describes RDS exactly once.
+            dbTarget = lambdaDbProbed
+                ? lambdaDbTarget
+                : await findDbTarget(rdsClient, {
                 dbIdentifier: target.dbIdentifier,
                 dbClusterIdentifier: target.dbClusterIdentifier,
             });
@@ -170,10 +269,9 @@ export async function runSleep(input = {}) {
             s.stop(color.yellow('Nothing to sleep.'));
             return failCommand({
                 print: () => {
-                    if (isStatic) {
-                        console.log(`\n  ${color.cyan(target.appPrefix)} is a static target — no compute or database to sleep. Nothing was changed.\n`);
-                        return;
-                    }
+                    // Static intercepts above; Lambda without a database
+                    // intercepts above. This Lambda branch survives only for
+                    // the probe-failed fallback path.
                     if (isLambda) {
                         console.log(`\n  No databases found for ${color.cyan(target.appPrefix)} — and Lambda compute is already scale-to-zero.`);
                     } else {

@@ -11,7 +11,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/
 import { failCommand, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget } from '../utils/resolvers.js';
 import { sleep } from '../utils/system.js';
 
 export const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -78,17 +78,18 @@ export async function runRollback(input = {}) {
 
     intro(color.bgCyan(color.black(' grada rollback ⏪ ')));
 
-    if (readTerraformComputeTarget(cwd) === 'lambda') {
+    const targetGuard = guardComputeTarget({ cwd, command: 'Rollback', supported: ['ecs'] });
+    if (targetGuard) {
         const functionName = `${projectName}-fn`;
         return failCommand({
-            print: () => {
-                console.log(color.red(`\n✖ Rollback targets ECS task revisions, but "${projectName}" is a Lambda project.`));
-                console.log(`  Redeploy a previous image instead: ${color.green(`aws lambda update-function-code --function-name ${functionName} --image-uri <ecr-repo>:<sha-tag> --region ${region}`)}`);
-                console.log(`  List past image tags with: ${color.green(`aws ecr describe-images --repository-name ${projectName}-repo --region ${region}`)}\n`);
-            },
+            message: targetGuard.message,
+            hint: targetGuard.actual === 'lambda'
+                ? `Redeploy a previous image instead: aws lambda update-function-code --function-name ${functionName} --image-uri <ecr-repo>:<sha-tag> --region ${region}\n  List past image tags with: aws ecr describe-images --repository-name ${projectName}-repo --region ${region}`
+                : 'Static sites have no revisions — push to redeploy.',
             event: 'rollback_run',
-            telemetry: { projectName, error_code: 'LAMBDA_TARGET_UNSUPPORTED' },
-            reason: 'lambda-target-unsupported',
+            telemetry: { projectName },
+            errorCode: targetGuard.errorCode,
+            reason: targetGuard.reason,
             resultExtra: { cluster, service, region },
         });
     }

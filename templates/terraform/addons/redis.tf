@@ -36,6 +36,8 @@ resource "aws_security_group" "redis" {
 # --- ElastiCache for Valkey Replication Group ---
 # Valkey requires aws_elasticache_replication_group even for a single node:
 # the aws_elasticache_cluster API rejects engine = "valkey".
+# trivy:ignore:AVD-AWS-0045 - At-rest encryption disabled as a cost-saving trade-off for non-sensitive cache data
+# trivy:ignore:AVD-AWS-0051 - Transit encryption disabled as a cost-saving trade-off for single-AZ cache traffic
 resource "aws_elasticache_replication_group" "redis" {
   # replication_group_id allows at most 40 chars and must start with a letter.
   # The ds- prefix guarantees a leading letter and the md5 suffix keeps

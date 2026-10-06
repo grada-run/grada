@@ -28,11 +28,28 @@ The container port is taken from the **last segment of the first port entry** �
 ## What this means in practice
 
 - Sidecars (Redis, Memcached, background helpers) run **in the same task** as the web container and share its lifecycle — this is co-location, not separate services.
-- The mapping is ECS-shaped on other targets too: on `--target lambda` the web service's environment still injects into the function (and the port override applies), but the command override and sidecars are skipped; on `--target static` there is no container or function to inject into, so Compose services are ignored.
+- The mapping is ECS-shaped on other targets too: on `--target lambda` the web service's environment still injects into the function (and the port override applies), sidecars are skipped with a warning, and the web service's `command` is preserved as the function's `image_config` entrypoint; on `--target static` there is no container or function to inject into, so Compose services are ignored.
 - Compose `build:` contexts are not used in AWS; the image is built from the generated `Dockerfile` by the [CI/CD pipeline](/grada/guides/cicd-pipeline/).
 - Runtime secrets still belong in AWS Secrets Manager, not in Compose `environment:`. See [Secrets Management](/grada/guides/secrets-management/).
 
+## Migrating from Compose: sidecars and targets
+
+The automatic mapping above is a starting point, not the end state. When migrating, decide per sidecar:
+
+| Sidecar | Stay co-located | Graduate to managed |
+|---|---|---|
+| `redis` / `memcached` | Fine for dev parity and tiny workloads | `grada add db:redis` (ElastiCache Valkey) for persistence and independent scaling |
+| `postgres` / `mysql` | Never in production — task storage is ephemeral | `grada --needsDatabase` (RDS/Aurora), then `grada db import --file dump.sql` |
+| Background helpers | Keep as sidecars while they share the web lifecycle | `grada add queue:sqs` when the work needs its own scaling and retries |
+
+Target equivalencies, expanded:
+
+- **`--target ecs`** (default): full mapping — web service plus sidecars in one task definition, ALB health checks against the resolved port.
+- **`--target lambda`**: the web service's environment (and port override) injects into the function, and its `command` carries over into the function's `image_config`. Sidecars are skipped with a warning — Lambda runs one container per function, so stateful sidecars must become add-ons *before* migrating.
+- **`--target static`**: Compose is ignored entirely (no container to inject into). If your Compose file only serves static assets, drop it and point `--target static` at the build output directory instead.
+
 ## See also
 
+- [Migration Overview](/grada/migrations/) for the full provider-to-target matrix.
 - [Supported Frameworks](/grada/guides/frameworks/) for detection and defaults.
 - [Dockerfiles & the container contract](/grada/guides/dockerfiles/) for runtime requirements.

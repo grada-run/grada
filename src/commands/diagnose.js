@@ -7,7 +7,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { normalizeOptions } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
 
 export const LOG_FETCH_LIMIT = 50;
 
@@ -239,6 +239,25 @@ async function runDiagnoseMain(input = {}) {
 
     if (readTerraformComputeTarget(cwd) === 'lambda') {
         return runLambdaDiagnose({ ...options, cwd, projectName, region, logGroup });
+    }
+
+    const targetGuard = guardComputeTarget({
+        cwd,
+        command: 'Diagnose',
+        supported: ['ecs', 'lambda'],
+        hint: 'Static sites have no containers to inspect — check the distribution state with npx grada-run status instead.',
+    });
+    if (targetGuard) {
+        return failCommand({
+            noExit,
+            message: targetGuard.message,
+            hint: targetGuard.hint,
+            event: 'diagnose_run',
+            telemetry: { projectName },
+            errorCode: targetGuard.errorCode,
+            reason: targetGuard.reason,
+            resultExtra: { cluster, region },
+        });
     }
 
     intro(color.bgCyan(color.black(' grada diagnose 🩺 ')));

@@ -5,7 +5,7 @@ This repository's AWS infrastructure is managed strictly by the `grada` CLI.
 
 ## Mental model
 
-- **Two compute targets.** `--target ecs` (default) runs always-on Fargate containers behind an ALB — best for steady traffic. `--target lambda` runs scale-to-zero containers behind API Gateway — best for sporadic traffic. Check `terraform/main.tf` (or the `analyze_stack` MCP tool) before assuming which one a project uses.
+- **Three compute targets.** `--target ecs` (default) runs always-on Fargate containers behind an ALB — best for steady traffic. `--target lambda` runs scale-to-zero containers behind API Gateway — best for sporadic traffic. `--target static` serves pre-built assets from S3 + CloudFront with zero compute. Check `terraform/main.tf` (or the `analyze_stack` MCP tool) before assuming which one a project uses.
 - **Lifecycle: `init` → `add` → `apply`.** `grada init` scaffolds the base stack (VPC, compute, CI/CD). `grada add <capability>` provisions one add-on primitive at a time (e.g. `queue:sqs`, `db:redis`, `storage:s3`, `ai:bedrock`). `grada apply` deploys. Never skip to `apply` before the stack is scaffolded.
 - **Primitives, not raw blocks.** To add storage, queues, caches, cron jobs, email, or Bedrock access, always use the `add_primitive` MCP tool — never hand-write the Terraform resource blocks yourself.
 
@@ -23,3 +23,4 @@ This repository's AWS infrastructure is managed strictly by the `grada` CLI.
 2. **New environment variables:** after adding keys to `.env`, prompt the user to run `grada secrets audit` (or call `audit_secrets`) and then `npx grada-run secrets push <env-file>` to sync them to AWS.
 3. **After editing any `.tf` file:** run `terraform validate` in the background to catch syntax errors early.
 4. **Teardown:** tell the user to run `npx grada-run destroy` (destructive — confirm first).
+5. **After changing build output:** if you modify a `package.json` build script or framework output directory, remind the user to run `npx grada-run apply` if the infrastructure needs to be updated.

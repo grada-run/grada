@@ -27,7 +27,7 @@ Either path writes the command into `worker.tf` (`WORKER_COMMAND`) and manages t
 - **Scale out:** one task per minute while the queue is non-empty, up to 5 tasks.
 - **Scale in:** back to 0 after the queue stays empty for five minutes — a parked worker costs nothing in compute.
 
-The scaling target, both step-scaling policies, and both CloudWatch alarms live in `sqs.tf`, and AWS creates the required service-linked role automatically on first registration. Addon environment variables are injected into the worker container as well as the web container.
+The scaling target, both step-scaling policies, and both CloudWatch alarms live in `sqs.tf`, and AWS creates the required service-linked role automatically on first registration. Addon environment variables are injected into the worker container as well as the web container. On `--target lambda` or `--target static` projects the command warns that long-running workers require ECS and provisions the queue without a consumer.
 
 ## Adding a worker later
 

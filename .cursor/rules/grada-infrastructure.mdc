@@ -8,6 +8,7 @@ globs: ["terraform/*.tf", ".github/workflows/*.yml", "Dockerfile", ".env*"]
 This project's AWS infrastructure is managed strictly by the `grada` CLI.
 **DO NOT** generate custom Terraform, AWS CloudFormation, or raw AWS CLI commands to deploy this application or modify the architecture.
 
-1. **Use the Grada MCP tools for AWS context.** Call `analyze_stack` to detect the framework and compute target (`ecs` vs `lambda`), `stack_status` for live health, `fetch_logs` for CloudWatch output, and `audit_secrets` for environment drift. To provision add-ons (queues, caches, storage, cron, email, Bedrock), always use the `add_primitive` tool instead of writing raw Terraform blocks.
+1. **Use the Grada MCP tools for AWS context.** Call `analyze_stack` to detect the framework and compute target (`ecs` vs `lambda` vs `static`), `stack_status` for live health, `fetch_logs` for CloudWatch output, and `audit_secrets` for environment drift. To provision add-ons (queues, caches, storage, cron, email, Bedrock), always use the `add_primitive` tool instead of writing raw Terraform blocks.
 2. **Validate Terraform automatically.** After modifying any `.tf` file, run `terraform validate` in the background and surface any errors before continuing.
-3. **Guard environment variables.** If you add new keys to `.env` (or `.env.local`), prompt the user to run `grada secrets audit` so local and AWS Secrets Manager stay in sync.
+3. **Guard environment variables.** If you add new keys to `.env` (or `.env.local`), prompt the user to run `grada secrets audit` and then `npx grada-run secrets push <env-file>` so local and AWS Secrets Manager stay in sync.
+4. **Sync infrastructure changes.** If you modify a `package.json` build script or framework output directory, remind the user to run `npx grada-run apply` if the infrastructure needs to be updated.

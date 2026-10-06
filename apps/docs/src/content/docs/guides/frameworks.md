@@ -43,11 +43,11 @@ Notes from the actual code:
 
 The interactive picker and the headless `--framework` flag accept: `node`, `nestjs`, `nextjs`, `nuxt`, `svelte`, `python`, `django`, `rails`, `go`, `static`. In headless mode with no `--framework`, detection applies and anything unmatched falls back to `static`.
 
-Framework and `--target` are independent choices with one guardrail: `--target static` requires the `static` preset and rejects anything else with a validation error. Every other framework runs on `ecs` and `lambda` — Lambda via the Web Adapter, with workers, ALB listener rules, and the migration gate skipped.
+Framework and `--target` are independent choices with one guardrail: `--target static` requires the `static` preset — or a detected static export (Next.js `output: 'export'`, SvelteKit `adapter-static`) — and rejects anything else with a validation error. Every other framework runs on `ecs` and `lambda` — Lambda via the Web Adapter, with workers, ALB listener rules, and the migration gate skipped.
 
 ## Per-framework defaults
 
-- **Static build directory** (`buildDir`): SvelteKit `build`, Gatsby `public`, everything else (`astro`, `vite`, Vue, Angular) `dist`. This selects the folder the generated `Dockerfile` serves.
+- **Static build directory** (`buildDir`): SvelteKit `build`, Gatsby `public`, Next.js static export `out`, everything else (`astro`, `vite`, Vue, Angular) `dist`. This selects the folder the generated `Dockerfile` serves — or, on `--target static`, the folder synced to S3 (`BUILD_DIR`).
 - **Default container port**: `8080` for `static` and `go`, `8000` for `python` and `django`, `3000` for everything else (headless uses `8080` only when `--framework=static`, else `3000`).
 - **Database prompt**: offered only for backend presets (`node`, `nestjs`, `nextjs`, `nuxt`, `svelte`, `python`, `django`, `rails`, `go`).
 
@@ -55,21 +55,21 @@ Framework and `--target` are independent choices with one guardrail: `--target s
 
 | Framework | What `grada` automates | Application code requirement | Zero-click starter / plugin |
 |---|---|---|---|
-| **Next.js** | Multi-stage Dockerfile, CloudFront edge routing, `vercel.json` parsing | `output: 'standalone'` must be set in `next.config.js` | Built-in CLI detection |
+| **Next.js** | Multi-stage Dockerfile, CloudFront edge routing, `vercel.json` parsing | `output: 'standalone'` must be set in `next.config.js` (container targets; static exports use `output: 'export'` with `--target static`) | Built-in CLI detection |
 | **NestJS** | Multi-stage TypeScript build (`dist/`), unprivileged Node runtime | `await app.listen(port, '0.0.0.0')` in `src/main.ts` | `nest-grada` (`nest add`) |
 | **FastAPI** | Alpine Python container, Uvicorn CLI args, unprivileged port mapping | None (0.0.0.0 set via Docker CMD) | `cookiecutter-fastapi-grada` |
 | **Django** | Gunicorn WSGI adapter, Celery worker topologies, RDS bindings | None (0.0.0.0 set via Docker CMD) | `cookiecutter-django-grada` |
 | **Ruby on Rails** | Puma adapter, `RAILS_MASTER_KEY` injection into Secrets Manager placeholder, Kamal Dockerfile replaced with a minimal multi-stage Alpine build | None (0.0.0.0 set via Docker CMD) | `rails-template-grada` |
 | **Nuxt 3** | Nitro-optimized Node output | None (`NITRO_HOST=0.0.0.0` injected automatically) | `nuxt-grada` |
 | **SvelteKit** | Node adapter conversion | None (`HOST=0.0.0.0` injected automatically) | `svelte-adapter-grada` |
-| **Static Sites** *(Vite, Astro, React)* | Output folder detection (`dist/`, `build/`), Nginx routing | None | `vite-plugin-grada` |
+| **Static Sites** *(Vite, Astro, React)* | Output folder detection (`dist/`, `build/`, `out/`), Nginx routing | None | `vite-plugin-grada` |
 
 ## Post-detection checks
 
 After detection, setup validates framework-specific requirements and warns before generating:
 
 - **NestJS**: `src/main.ts` (or `main.js`) must bind `0.0.0.0`, e.g. `await app.listen(process.env.PORT ?? 3000, '0.0.0.0')`.
-- **Next.js**: config must set `output: 'standalone'` (`.js/.mjs/.cjs/.ts` checked).
+- **Next.js**: config must set `output: 'standalone'` (`.js/.mjs/.cjs/.ts` checked) — unless it sets `output: 'export'`, which routes to `--target static` instead.
 - **SvelteKit**: adapter must not be `@sveltejs/adapter-vercel` or `adapter-auto`.
 - **Astro**: adapter must not be `@astrojs/vercel`.
 

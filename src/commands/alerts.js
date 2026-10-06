@@ -100,7 +100,7 @@ export async function runAlerts(input = {}) {
     const mainTf = readFileSafe(path.join(cwd, 'terraform', 'main.tf'));
     if (!mainTf) {
         return failCommand({
-            message: '\n✖ No terraform/main.tf found. Run "grada init" first before scaffolding alerts.\n',
+            message: '\n✖ No terraform/main.tf found. Run "grada" first before scaffolding alerts.\n',
             event: 'alerts_run',
             telemetry: { projectName },
             errorCode: 'TERRAFORM_NOT_INITIALIZED',

@@ -75,6 +75,7 @@ export default defineConfig({
           label: 'Platform Migrations',
           collapsed: true,
           items: [
+            { label: 'Migration Overview', slug: 'migrations' },
             { label: 'Vercel (Next.js)', slug: 'migrations/nextjs-vercel-to-aws' },
             { label: 'Heroku (Procfile)', slug: 'migrations/heroku-procfile-to-aws' },
             { label: 'Vercel (Astro)', slug: 'migrations/astro-vercel-to-aws' },

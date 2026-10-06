@@ -4,11 +4,12 @@ import { intro, outro, spinner, log } from '@clack/prompts';
 import color from 'picocolors';
 import { getAiAssistants } from '../utils/prompts.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
+import { readTerraformComputeTarget } from '../utils/resolvers.js';
 import { trackEvent, flushTelemetry } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 
 function getProjectContext(cwd) {
-    const context = { region: '', port: '' };
+    const context = { region: '', port: '', target: readTerraformComputeTarget(cwd) };
     const mainTfPath = path.join(cwd, 'terraform', 'main.tf');
 
     if (fsSync.existsSync(mainTfPath)) {

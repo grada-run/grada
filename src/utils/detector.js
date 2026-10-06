@@ -20,15 +20,29 @@ export function detectFramework(targetDir) {
 
             // Fullstack / API
             if (deps['@nestjs/core']) return { id: 'nestjs', name: 'NestJS' };
-            if (deps['next']) return { id: 'nextjs', name: 'Next.js' };
+            if (deps['next']) {
+                // A static export is still Next.js (same container preset on
+                // ecs/lambda) but carries no server — flag it so --target
+                // static admits it and BUILD_DIR points at out/.
+                if (analyzeNextConfig(targetDir).isExport) {
+                    return { id: 'nextjs', name: 'Next.js Static Export', buildDir: 'out', isStaticExport: true };
+                }
+                return { id: 'nextjs', name: 'Next.js' };
+            }
             if (deps['nuxt']) return { id: 'nuxt', name: 'Nuxt 3 (SSR)' };
             if (deps['express']) return { id: 'node', name: 'Node.js / Express' };
 
             // Explicit SvelteKit SSR Detection
-            if (deps['@sveltejs/kit']) return { id: 'svelte', name: 'SvelteKit SSR', buildDir: 'build' };
+            if (deps['@sveltejs/kit']) {
+                // adapter-static prerenders to build/ with no server — same
+                // static-target eligibility as a Next.js static export.
+                if (analyzeSvelteConfig(targetDir).adapter === 'static') {
+                    return { id: 'svelte', name: 'SvelteKit Static', buildDir: 'build', isStaticExport: true };
+                }
+                return { id: 'svelte', name: 'SvelteKit SSR', buildDir: 'build' };
+            }
 
             // Static Site Generators & SPAs (with precise build directories)
-            if (deps['@sveltejs/kit']) return { id: 'static', name: 'SvelteKit', buildDir: 'build' };
             if (deps['react-scripts']) return { id: 'static', name: 'Create React App', buildDir: 'build' };
             if (deps['gatsby']) return { id: 'static', name: 'Gatsby', buildDir: 'public' };
             if (deps['astro']) return { id: 'static', name: 'Astro', buildDir: 'dist' };
@@ -152,14 +166,18 @@ export function analyzeNextConfig(targetDir) {
         }
     }
 
-    if (!configPath) return { hasConfig: false, isStandalone: false };
+    if (!configPath) return { hasConfig: false, isStandalone: false, isExport: false };
 
     // Regex looks for output: 'standalone' or output: "standalone" (handling spacing)
     const isStandalone = /output\s*:\s*['"`]standalone['"`]/.test(configContent);
+    // Static exports (output: 'export') emit plain files to out/ — they are
+    // eligible for --target static without a container (see detectFramework).
+    const isExport = /output\s*:\s*['"`]export['"`]/.test(configContent);
 
     return {
         hasConfig: true,
         isStandalone: isStandalone,
+        isExport: isExport,
         configPath: configPath
     };
 }

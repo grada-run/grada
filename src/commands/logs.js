@@ -3,7 +3,7 @@ import color from 'picocolors';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, isComputeTarget } from '../utils/resolvers.js';
 import { failProjectNotInitialized } from '../utils/command.js';
 import { sleep } from '../utils/system.js';
 
@@ -140,7 +140,7 @@ export async function runLogs(input = {}) {
     const onlyErrors = Boolean(options.error ?? options.onlyErrors ?? options.filterErrors);
     // Lambda stream names are date/request-id based, not container names, so
     // a service stream-prefix filter would hide every event on that target.
-    const isLambda = readTerraformComputeTarget(cwd) === 'lambda';
+    const isLambda = isComputeTarget(cwd, 'lambda');
     const explicitService = hasExplicitService(options) && !isLambda;
 
     const sinceRaw = options.since ?? options.sinceDuration ?? (follow ? undefined : DEFAULT_SINCE);

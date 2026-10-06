@@ -1,15 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory } from './helpers/clack.js';
+import { clackPromptsMockFactory, mockOutro } from './helpers/clack.js';
 import { telemetryMockFactory } from './helpers/telemetry.js';
 import { runDoctor, installHint, ciHint, DOCTOR_CHECKS } from '../src/commands/doctor.js';
 import { checkDependency } from '../src/utils/system.js';
+import { checkAwsCredentials } from '../src/utils/aws.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
 vi.mock('../src/utils/system.js', () => ({
     checkDependency: vi.fn(),
 }));
+
+vi.mock('../src/utils/aws.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, checkAwsCredentials: vi.fn() };
+});
 
 vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
@@ -21,9 +27,13 @@ function setPlatform(platform) {
     Object.defineProperty(process, 'platform', { value: platform, configurable: true });
 }
 
-function mockBinaries({ terraform = true, aws = true, docker = true, git = true } = {}) {
+function mockBinaries({ terraform = true, aws = true, docker = true, git = true, auth = true } = {}) {
     const availability = { terraform, aws, docker, git };
     vi.mocked(checkDependency).mockImplementation(async (binary) => availability[binary] ?? false);
+    vi.mocked(checkAwsCredentials).mockImplementation(async () => {
+        if (!auth) throw Object.assign(new Error('ExpiredToken: The security token included in the request is expired'), { name: 'ExpiredTokenException' });
+        return { accountId: '123456789012', region: 'us-east-2' };
+    });
 }
 
 function captureLog() {
@@ -102,6 +112,13 @@ describe('ciHint', () => {
         expect(ciHint('git')).toBe('');
         expect(ciHint('nope')).toBe('');
     });
+
+    it('returns a credentials hint for aws_auth when CI is set', () => {
+        process.env.CI = 'true';
+        expect(ciHint('aws_auth')).toContain('aws-actions/configure-aws-credentials');
+        delete process.env.CI;
+        expect(ciHint('aws_auth')).toBe('');
+    });
 });
 
 describe('runDoctor', () => {
@@ -113,13 +130,19 @@ describe('runDoctor', () => {
                 'doctor_run',
                 expect.objectContaining({
                     success: true,
-                    passed_checks: ['terraform', 'aws_cli', 'docker', 'git'],
+                    check_terraform: true,
+                    check_aws_cli: true,
+                    check_aws_auth: true,
+                    check_docker: true,
+                    check_git: true,
+                    passed_checks: ['terraform', 'aws_cli', 'aws_auth', 'docker', 'git'],
                     failed_checks: [],
                     total_failed: 0,
                 })
             );
             const [, successProps] = vi.mocked(trackEvent).mock.calls[0];
             expect(successProps).not.toHaveProperty('error_code');
+            expect(successProps).not.toHaveProperty('reason');
             expect(flushTelemetry).toHaveBeenCalled();
             expect(output.join('\n')).not.toContain('Try:');
         } finally {
@@ -137,7 +160,13 @@ describe('runDoctor', () => {
                 expect.objectContaining({
                     success: false,
                     error_code: 'DOCTOR_CHECKS_FAILED',
-                    passed_checks: ['aws_cli', 'git'],
+                    reason: 'doctor-checks-failed',
+                    check_terraform: false,
+                    check_aws_cli: true,
+                    check_aws_auth: true,
+                    check_docker: false,
+                    check_git: true,
+                    passed_checks: ['aws_cli', 'aws_auth', 'git'],
                     failed_checks: ['terraform', 'docker'],
                     total_failed: 2,
                 })
@@ -146,6 +175,82 @@ describe('runDoctor', () => {
             expect(event).toBe('doctor_run');
             expect(JSON.stringify(props)).not.toMatch(/[0-9]{12}|arn:aws|\/home\/|\/Users\/|Error/);
             expect(output.join('\n')).toContain('Try:');
+        } finally {
+            restore();
+        }
+    });
+
+    it('names the single missing binary in error_code and reason', async () => {
+        mockBinaries({ terraform: false, aws: true, docker: true, git: true });
+        const { restore } = captureLog();
+        try {
+            await runDoctor();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    error_code: 'MISSING_TERRAFORM',
+                    reason: 'missing-terraform',
+                    check_terraform: false,
+                    check_aws_cli: true,
+                    failed_checks: ['terraform'],
+                    total_failed: 1,
+                })
+            );
+        } finally {
+            restore();
+        }
+    });
+
+    it('maps underscored check IDs to SCREAMING error codes and kebab reasons', async () => {
+        mockBinaries({ terraform: true, aws: false, docker: true, git: true });
+        const { restore } = captureLog();
+        try {
+            await runDoctor();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    error_code: 'MISSING_AWS_CLI',
+                    reason: 'missing-aws-cli',
+                    check_aws_cli: false,
+                    failed_checks: ['aws_cli'],
+                })
+            );
+        } finally {
+            restore();
+        }
+    });
+
+    it('reports expired credentials with recovery guidance and no leaked details', async () => {
+        mockBinaries({ auth: false });
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    error_code: 'AWS_CLI_UNCONFIGURED',
+                    reason: 'aws-cli-unconfigured',
+                    check_aws_cli: true,
+                    check_aws_auth: false,
+                    failed_checks: ['aws_auth'],
+                    total_failed: 1,
+                })
+            );
+            const text = output.join('\n');
+            expect(text).toContain('AWS Credentials (✗)');
+            expect(text).toContain('aws sso login');
+            expect(text).toContain('aws-credentials.md');
+            expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining('refresh your AWS credentials'));
+            // The SDK rejection (token details, exception names, account
+            // IDs) must reach neither the terminal nor the payload — only
+            // the static recovery guidance and stable IDs may appear.
+            expect(text).not.toContain('ExpiredTokenException');
+            expect(text).not.toContain('security token included');
+            const [, props] = vi.mocked(trackEvent).mock.calls[0];
+            expect(JSON.stringify(props)).not.toMatch(/ExpiredToken|123456789012|arn:aws/);
         } finally {
             restore();
         }
@@ -176,8 +281,8 @@ describe('runDoctor', () => {
         }
     });
 
-    it('exposes exactly the four binary checks', () => {
-        expect(DOCTOR_CHECKS.map((check) => check.id)).toEqual(['terraform', 'aws_cli', 'docker', 'git']);
+    it('exposes the four binary checks plus the credentials probe', () => {
+        expect(DOCTOR_CHECKS.map((check) => check.id)).toEqual(['terraform', 'aws_cli', 'aws_auth', 'docker', 'git']);
     });
 
     it('reports the detected CI provider without disturbing check order', async () => {
@@ -189,7 +294,7 @@ describe('runDoctor', () => {
             expect(trackEvent).toHaveBeenCalledWith(
                 'doctor_run',
                 expect.objectContaining({
-                    passed_checks: ['terraform', 'aws_cli', 'docker', 'git'],
+                    passed_checks: ['terraform', 'aws_cli', 'aws_auth', 'docker', 'git'],
                     failed_checks: [],
                     ci_provider: 'github_actions',
                 })

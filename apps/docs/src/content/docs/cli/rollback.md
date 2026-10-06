@@ -12,7 +12,7 @@ Two layers of deployment safety: your infrastructure rolls back bad deployments 
 - In automation and CI (or with `--headless`), it defaults to the most recent older revision with no prompt.
 - Resolves its inputs automatically: cluster (`<project-name>-cluster`, overridable via `ECS_CLUSTER`), service (`<project-name>-service`, overridable via `ECS_SERVICE`), and region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`). `--workspace` targets a PR-preview environment's namespaced service.
 - Watches the rollback deployment until it stabilizes (up to 5 minutes), and points you to `status` and `logs` if it fails or times out.
-- ECS only: on `--target lambda` projects the command exits with the Lambda-native alternative — redeploy a previous image with `aws lambda update-function-code` (list SHA tags via `aws ecr describe-images`).
+- ECS only: on `--target lambda` projects the command exits with the Lambda-native alternative — redeploy a previous image with `aws lambda update-function-code` (list SHA tags via `aws ecr describe-images`). On `--target static` projects it exits with the same guard — static sites have no revisions, so push to redeploy.
 - Emits a `rollback_run` telemetry event recording success and outcome.
 
 ## Usage

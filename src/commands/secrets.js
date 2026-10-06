@@ -8,7 +8,30 @@ import path from 'path';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { readTerraformComputeTarget } from '../utils/resolvers.js';
+import { readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
+
+// Static sites provision no secrets vault, so push/pull/audit would fail
+// obscurely against a Secrets Manager secret that can never exist. One
+// shared guard keeps the three entry points consistent.
+function secretsTargetGuard(subcommand) {
+    return guardComputeTarget({
+        cwd: process.cwd(),
+        command: `secrets ${subcommand}`,
+        supported: ['ecs', 'lambda'],
+        hint: 'Static sites provision no secrets vault — static sites needing secrets need an API backend.',
+    });
+}
+
+function failUnsupportedTarget(guard, event, projectName) {
+    return failCommand({
+        message: guard.message,
+        hint: guard.hint,
+        event,
+        telemetry: { projectName },
+        errorCode: guard.errorCode,
+        reason: guard.reason,
+    });
+}
 
 function resolveSecretsFile(envFilePath) {
     let resolvedFilePath = (typeof envFilePath === 'string' && envFilePath.trim())
@@ -99,6 +122,10 @@ export function resolveEcsService(projectName, options = {}) {
 }
 
 export async function pushSecrets(envFilePath, projectName, options = {}) {
+    const pushGuard = secretsTargetGuard('push');
+    if (pushGuard) {
+        return failUnsupportedTarget(pushGuard, 'secrets_pushed', typeof projectName === 'string' ? projectName : path.basename(process.cwd()));
+    }
     const normalized = normalizeSecretsArgs(projectName, options);
     const opts = normalized.options;
     const explicitProjectName = normalized.projectName;
@@ -300,6 +327,10 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
 }
 
 export async function pullSecrets(envFilePath, projectName, options = {}) {
+    const pullGuard = secretsTargetGuard('pull');
+    if (pullGuard) {
+        return failUnsupportedTarget(pullGuard, 'secrets_pull', typeof projectName === 'string' ? projectName : path.basename(process.cwd()));
+    }
     const { resolvedProjectName, opts } = resolvePullAuditArgs(projectName, options);
     const resolvedFilePath = resolveSecretsFile(envFilePath);
     const { isHeadless = false, client: injectedClient } = opts;
@@ -400,6 +431,10 @@ export async function pullSecrets(envFilePath, projectName, options = {}) {
 }
 
 export async function auditSecrets(envFilePath, projectName, options = {}) {
+    const auditGuard = secretsTargetGuard('audit');
+    if (auditGuard) {
+        return failUnsupportedTarget(auditGuard, 'secrets_audit', typeof projectName === 'string' ? projectName : path.basename(process.cwd()));
+    }
     const { resolvedProjectName, opts } = resolvePullAuditArgs(projectName, options);
     const resolvedFilePath = resolveSecretsFile(envFilePath);
     const { client: injectedClient } = opts;

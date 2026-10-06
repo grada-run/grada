@@ -31,7 +31,7 @@ import { getTargetDirectory, getProjectConfig, promptWorkerCommand } from '../ut
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
 import { parseDockerCompose } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS } from '../utils/resolvers.js';
 import { parseDomainTf } from '../utils/domains.js';
 
 const pkg = JSON.parse(fsSync.readFileSync(new URL('../../package.json', import.meta.url)));
@@ -91,12 +91,11 @@ export async function mainStack(input = {}) {
             reason: 'invalid-db-engine',
         });
     }
-    const VALID_COMPUTE_TARGETS = ['ecs', 'lambda', 'static'];
     const explicitTarget = typeof initOptions.target === 'string' && initOptions.target.trim() !== ''
         ? initOptions.target.trim()
         : null;
     const normalizedExplicitTarget = explicitTarget === 'fargate' ? 'ecs' : explicitTarget;
-    if (explicitTarget !== null && !VALID_COMPUTE_TARGETS.includes(normalizedExplicitTarget)) {
+    if (explicitTarget !== null && !COMPUTE_TARGETS.includes(normalizedExplicitTarget)) {
         return failCommand({
             message: `\n✖ Invalid compute target "${explicitTarget}". Supported targets: ecs, lambda, static.`,
             hint: '  Use --target ecs (or fargate) for always-on containers, --target lambda for scale-to-zero serverless, or --target static for zero-compute S3 + CloudFront hosting.\n',
@@ -191,7 +190,12 @@ export async function mainStack(input = {}) {
     // 3b. Dependency-aware composition (worker, migration gate, addons).
     // Everything here resolves before backups, AWS calls, or file writes.
     const isStaticSite = config.framework === 'static';
-    if (target === 'static' && !isStaticSite) {
+    // Static exports (Next.js output:'export', SvelteKit adapter-static)
+    // carry no server, so --target static admits them like static presets.
+    // This extends only the gate — prompts.js still resolves the container
+    // preset from the detected id on ecs/lambda.
+    const isStaticExport = detectedFramework?.isStaticExport === true;
+    if (target === 'static' && !isStaticSite && !isStaticExport) {
         return failCommand({
             message: `\n✖ --target static only supports static-site frameworks (detected: ${config.framework}).\n`,
             hint: '  Use --target ecs for containerized apps or --target lambda for scale-to-zero serverless.\n',
@@ -379,11 +383,13 @@ export async function mainStack(input = {}) {
         }
     } else if (config.framework === 'nextjs') {
         const nextConfig = analyzeNextConfig(dirConfig.targetDir);
-        if (nextConfig.hasConfig && !nextConfig.isStandalone) {
+        // Static exports need no container, so the standalone warning
+        // (container-image slimming) does not apply to them.
+        if (nextConfig.hasConfig && !nextConfig.isStandalone && !nextConfig.isExport) {
             log.warn(color.yellow('⚠️ Next.js config is missing "output: \'standalone\'".'));
             console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/nextjs-vercel-to-aws.md'));
         }
-    } else if (detectedFramework?.name === 'SvelteKit') {
+    } else if (detectedFramework?.id === 'svelte') {
         const svelteConfig = analyzeSvelteConfig(dirConfig.targetDir);
         if (svelteConfig.adapter === 'vercel' || svelteConfig.adapter === 'auto') {
             log.warn(color.yellow('⚠️ SvelteKit is locked into the Vercel/Auto adapter.'));
@@ -542,7 +548,7 @@ export async function mainStack(input = {}) {
 
     // 8.5 Configure AI Context
     s.start('Configuring AI workspace rules...');
-    const aiContext = { region: config.region, port: config.port };
+    const aiContext = { region: config.region, port: config.port, target: config.target };
     const cwd = dirConfig.targetDir;
 
     if (config.setupType === 'advanced') {

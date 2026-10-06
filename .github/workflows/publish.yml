@@ -39,24 +39,61 @@ jobs:
         run: npm test
 
       # --- Phase 2: Execution & Security Validation ---
+      - name: Render templates for IaC scanning
+        env:
+          CI_MOCK_AWS: 'true'
+          DO_NOT_TRACK: '1'
+        run: |
+          SCAN_ROOT=$(mktemp -d)
+          mkdir -p "$SCAN_ROOT/ecs" "$SCAN_ROOT/lambda" "$SCAN_ROOT/static"
+          (cd "$SCAN_ROOT/ecs" && node "$GITHUB_WORKSPACE/bin/cli.js" init --target ecs --headless)
+          (cd "$SCAN_ROOT/lambda" && node "$GITHUB_WORKSPACE/bin/cli.js" init --target lambda --headless)
+          (cd "$SCAN_ROOT/static" && node "$GITHUB_WORKSPACE/bin/cli.js" init --target static --headless)
+          echo "SCAN_ROOT=$SCAN_ROOT" >> "$GITHUB_ENV"
+
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Init TFLint
-        run: tflint --init
+        run: |
+          (cd "$SCAN_ROOT/ecs/terraform" && tflint --init)
+          (cd "$SCAN_ROOT/lambda/terraform" && tflint --init)
+          (cd "$SCAN_ROOT/static/terraform" && tflint --init)
 
-      - name: Run TFLint across Terraform files
-        run: tflint --recursive || true
+      - name: Run TFLint on rendered templates
+        run: |
+          (cd "$SCAN_ROOT/ecs/terraform" && tflint) || true
+          (cd "$SCAN_ROOT/lambda/terraform" && tflint) || true
+          (cd "$SCAN_ROOT/static/terraform" && tflint) || true
 
-      - name: Run Trivy IaC Config Scanner
+      - name: Run Trivy IaC Config Scanner (ECS)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'config'
-          scan-dir: '.'
+          scan-ref: '${{ env.SCAN_ROOT }}/ecs'
           format: 'table'
-          exit-code: '0' 
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Run Trivy IaC Config Scanner (Lambda)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '${{ env.SCAN_ROOT }}/lambda'
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Run Trivy IaC Config Scanner (Static)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '${{ env.SCAN_ROOT }}/static'
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
       
       # --- Phase 3: Publish ---
       - name: Publish Primary Package (grada-run)

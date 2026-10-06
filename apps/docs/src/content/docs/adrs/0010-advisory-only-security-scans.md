@@ -3,7 +3,7 @@ title: "Advisory-Only Security Scans in the Pipeline"
 description: "Trivy scans report vulnerabilities without blocking builds or deploys."
 ---
 
-* **Status:** Accepted
+* **Status:** Accepted — complemented by [ADR-0017](/grada/adrs/0017-blocking-iac-config-scans-own-ci/), which gates grada's own repo CI on config findings while this ADR keeps generated user pipelines advisory-only.
 * **Date:** 2026-09-24 (Retroactive)
 
 ## Context and Problem Statement

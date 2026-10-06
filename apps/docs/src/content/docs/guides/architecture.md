@@ -29,11 +29,11 @@ Deploys push the SHA-tagged image to ECR and call `update-function-code`, which 
 
 Projects with a database attach the function to the VPC subnets (still no NAT gateway) and receive credentials as `DB_*` environment variables, since VPC-attached functions cannot reach Secrets Manager without a paid VPC endpoint. Non-database functions stay outside the VPC with direct internet access; `add db:redis` attaches the VPC config on demand. Cron schedules invoke the function directly with a JSON payload carrying the configured command — handle scheduled events in application code.
 
-Day-2 commands adapt: `status` and `diagnose` read function configuration via the AWS CLI, `logs` tails `/aws/lambda/<project>-fn`, and `sleep`/`wake` manage only the database (compute needs no scaling). `exec` and `rollback` are ECS-only and exit with the Lambda-native alternative.
+Day-2 commands adapt: `status` and `diagnose` read function configuration via the AWS CLI, `logs` tails `/aws/lambda/<project>-fn`, and `sleep`/`wake` manage only the database (compute needs no scaling) — exiting successfully when no database exists. `exec` and `rollback` are ECS-only and exit with the Lambda-native alternative. On static targets `sleep`/`wake` exit successfully (nothing to pause) while `exec`/`rollback` fail fast with an unsupported-target error.
 
 ## Static target (`--target static`)
 
-Passing `--target static` to [`init`](/grada/cli/init/) generates a zero-compute topology for static-site frameworks (Vite, Astro, SPA exports — anything the `static` framework preset detects). Non-static frameworks are rejected with a validation error.
+Passing `--target static` to [`init`](/grada/cli/init/) generates a zero-compute topology for static-site frameworks (Vite, Astro, SPA exports — anything the `static` framework preset detects) plus detected static exports (Next.js `output: 'export'`, SvelteKit `adapter-static`). Anything else is rejected with a validation error.
 
 Internet → **CloudFront** → **private S3 bucket**. There is no VPC, no ALB, no ECS, and no Dockerfile: the bucket blocks all public access and CloudFront reads through an Origin Access Control (OAC), unknown paths fall back to `/index.html` for client-side routers, and the fixed baseline is **$0.00/mo**. Deploys build the site, `aws s3 sync` the output folder, and invalidate the CloudFront cache.
 

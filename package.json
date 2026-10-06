@@ -18,7 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:update": "vitest run -u",
-    "test:iac": "node scripts/test-iac.js",
+    "test:iac": "node ./scripts/test-iac.js",
     "test:e2e:tier0": "vitest run -c vitest.e2e.tier0.config.js",
     "test:e2e:tier1": "vitest run -c vitest.e2e.tier1.config.js",
     "sync:bedrock-models": "node scripts/sync-bedrock-models.js",

@@ -53,7 +53,9 @@ export async function runWake(input = {}) {
         return failProjectNotInitialized({ event: 'wake_run' });
     }
     const target = resolveSleepTarget(options, cwd);
-    const isLambda = readTerraformComputeTarget(cwd) === 'lambda';
+    const computeTarget = readTerraformComputeTarget(cwd);
+    const isLambda = computeTarget === 'lambda';
+    const isStatic = computeTarget === 'static';
     const skipDb = options.skipDb === true || options.skipDb === 'true';
     const noWait = options.noWait === true || options.noWait === 'true'
         || options.wait === false || options.wait === 'false';
@@ -73,13 +75,113 @@ export async function runWake(input = {}) {
         });
     }
 
+    // Scale-to-zero intercept: static targets have no compute or database,
+    // so there is nothing to wake. Runs before any state read or AWS call.
+    if (isStatic) {
+        console.log(`\n  ${color.cyan(target.appPrefix)} is a static target — no compute or database to wake. Nothing to do.\n`);
+        await trackSuccess('wake_run', {
+            projectName,
+            env_kind: target.envKind,
+            ecs_restored: 0,
+            db_started: false,
+            waited: false,
+            cron_resumed: false,
+            scaling_resumed: false,
+            skipped: 'static-target',
+        });
+        outro(color.green('Done.'));
+        return {
+            ok: true,
+            env: target.envKey,
+            cluster: target.cluster,
+            region,
+            ecsRestored: 0,
+            dbStarted: false,
+            waited: false,
+            cronResumed: false,
+            scalingResumed: false,
+            skipped: 'static-target',
+        };
+    }
+
+    // FinOps Preservation (mirrors sleep): Lambda compute needs no
+    // wake-up, but a stopped database must still start. Probe RDS
+    // read-only before doing anything else; --skip-db short-circuits the
+    // probe. Probe failures fall through to the main flow.
+    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
+    let lambdaDbTarget = null;
+    let lambdaDbProbed = false;
+    if (isLambda) {
+        if (skipDb) {
+            console.log(`\n  Lambda compute is already scale-to-zero and ${color.cyan('--skip-db')} was passed — nothing to wake.\n`);
+            await trackSuccess('wake_run', {
+                projectName,
+                env_kind: target.envKind,
+                ecs_restored: 0,
+                db_started: false,
+                waited: false,
+                cron_resumed: false,
+                scaling_resumed: false,
+                skipped: 'lambda-skip-db',
+            });
+            outro(color.green('Done.'));
+            return {
+                ok: true,
+                env: target.envKey,
+                cluster: target.cluster,
+                region,
+                ecsRestored: 0,
+                dbStarted: false,
+                waited: false,
+                cronResumed: false,
+                scalingResumed: false,
+                skipped: 'lambda-skip-db',
+            };
+        }
+        try {
+            lambdaDbTarget = await findDbTarget(rdsClient, {
+                dbIdentifier: target.dbIdentifier,
+                dbClusterIdentifier: target.dbClusterIdentifier,
+            });
+            lambdaDbProbed = true;
+        } catch {
+            lambdaDbProbed = false;
+        }
+        if (lambdaDbProbed && !lambdaDbTarget) {
+            console.log(`\n  No databases found for ${color.cyan(target.appPrefix)} — and Lambda compute needs no wake-up. Nothing to do.\n`);
+            await trackSuccess('wake_run', {
+                projectName,
+                env_kind: target.envKind,
+                ecs_restored: 0,
+                db_started: false,
+                waited: false,
+                cron_resumed: false,
+                scaling_resumed: false,
+                skipped: 'lambda-no-database',
+            });
+            outro(color.green('Done.'));
+            return {
+                ok: true,
+                env: target.envKey,
+                cluster: target.cluster,
+                region,
+                ecsRestored: 0,
+                dbStarted: false,
+                waited: false,
+                cronResumed: false,
+                scalingResumed: false,
+                skipped: 'lambda-no-database',
+            };
+        }
+    }
+
     const entry = readSleepState(cwd)[target.envKey] || null;
     if (entry?.autoRestartAt && Date.now() > Date.parse(entry.autoRestartAt)) {
         console.log(color.yellow('\n⚠ The 7-day sleep window has elapsed — AWS may have auto-restarted the database already.'));
     }
 
     const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
-    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
+    // rdsClient was resolved above for the Lambda probe.
     const runSync = options.spawnSyncImpl || spawnSync;
 
     const s = spinner();
@@ -91,7 +193,11 @@ export async function runWake(input = {}) {
         let dbTarget = null;
         let dbStarted = false;
         if (!skipDb) {
-            dbTarget = await findDbTarget(rdsClient, {
+            // Lambda already probed above — reuse it so a wake run
+            // describes RDS exactly once.
+            dbTarget = lambdaDbProbed
+                ? lambdaDbTarget
+                : await findDbTarget(rdsClient, {
                 dbIdentifier: target.dbIdentifier,
                 dbClusterIdentifier: target.dbClusterIdentifier,
             });

@@ -62,7 +62,23 @@ Then re-authenticate via `aws configure` or `aws sso login`.
 
 ---
 
-## 2. Common Error References
+### D. CI (GitHub Actions)
+If a workflow fails with `ExpiredTokenException`, the job's credentials were never configured or the step ordering dropped them. Use OIDC — no long-lived keys:
+
+```yaml
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: arn:aws:iam::<account-id>:role/<role-name>
+    aws-region: us-east-2
+```
+
+---
+
+## 2. Verify the fix
+
+Run `npx grada-run doctor` — the `AWS Credentials` line should turn green. If it stays red, re-check for stale `AWS_*` environment overrides (section C) or an `AWS_PROFILE` pointing at an unconfigured profile.
+
+## 3. Common Error References
 
 | Error Name | Root Cause | Solution |
 | :--- | :--- | :--- |

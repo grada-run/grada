@@ -668,3 +668,36 @@ describe('rollback on --target lambda projects', () => {
         }
     });
 });
+
+describe('rollback on --target static projects', () => {
+    let exitSpy;
+    let logSpy;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        exitSpy.mockRestore();
+        logSpy.mockRestore();
+    });
+
+    it('fails cleanly with the push-to-redeploy pointer', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-static-test-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'main.tf'),
+                'locals {\n  app_name = "myapp"\n}\nresource "aws_cloudfront_distribution" "site" {}\n'
+            );
+            const result = await runRollback({ cwd: dir });
+            expect(result).toMatchObject({ ok: false, reason: 'static-target-unsupported' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(logSpy.mock.calls.map((call) => String(call[0])).join('\n')).toContain('push to redeploy');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});

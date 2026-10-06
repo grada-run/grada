@@ -1,12 +1,24 @@
 #!/usr/bin/env node
-// Local parity check for the Terraform + TFLint steps in
-// .github/workflows/iac-validation.yml (no Docker builds or Trivy scans).
-// Scaffolds a base project, a full addons + domain project, one project per
-// non-default database engine, and the Lambda equivalents (base, full
-// Aurora addons + domain, MySQL conversion) in temp dirs, runs
+// Local parity check for the IaC validation pipeline
+// (.github/workflows/iac-validation.yml). Run with: npm run test:iac
+//
+// Phase 1 — containerized scans (requires Docker): scaffolds a base ECS
+// project at /tmp/grada-iac-test via
+//   node bin/cli.js init --target ecs --headless
+// and a base static project at /tmp/grada-iac-test-static via
+//   node bin/cli.js init --target static --headless
+// then runs the same blocking scans CI runs against each:
+//   docker run --rm -v /tmp/grada-iac-test:/src aquasec/trivy config --exit-code 1 --severity HIGH,CRITICAL /src
+//   docker run --rm -v /tmp/grada-iac-test:/data -t ghcr.io/terraform-linters/tflint
+// Without Docker on PATH, prints a warning and exits 0.
+//
+// Phase 2 — local toolchain: scaffolds a base project, a full addons +
+// domain project, one project per non-default database engine, the
+// Lambda equivalents (base, full Aurora addons + domain, MySQL conversion),
+// and the static equivalent (base) in temp dirs, runs
 // `terraform init -backend=false`, `terraform validate`, and (when
 // installed) `tflint --init` + `tflint` in each, then cleans up.
-// Exits non-zero on any failure. Run with: npm run test:iac
+// Exits non-zero on any failure.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -45,6 +57,27 @@ function commandExists(cmd) {
     } catch {
         return false;
     }
+}
+
+// Phase 1: Docker-based Trivy + TFLint scans against freshly rendered
+// base ECS and static projects. Fixed paths (not mkdtemp) so a failure can
+// be reinspected and rescanned by hand; the dirs are left in place.
+const DOCKER_PROJECT_DIR = '/tmp/grada-iac-test';
+const DOCKER_STATIC_DIR = '/tmp/grada-iac-test-static';
+
+if (!commandExists('docker')) {
+    console.log('WARNING: Docker is required to run test:iac locally. Install Docker (https://docs.docker.com/get-docker/) and re-run.');
+    process.exit(0);
+}
+
+section('Docker scans: base ECS + static projects (mirrors CI trivy/tflint steps)');
+for (const [projectDir, target] of [[DOCKER_PROJECT_DIR, 'ecs'], [DOCKER_STATIC_DIR, 'static']]) {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    fs.mkdirSync(projectDir, { recursive: true });
+    run('node', [CLI, 'init', '--target', target, '--headless'], { cwd: projectDir, env: baseEnv });
+    run('docker', ['run', '--rm', '-v', `${projectDir}:/src`, 'aquasec/trivy', 'config', '--exit-code', '1', '--severity', 'HIGH,CRITICAL', '/src'], { env: baseEnv });
+    run('docker', ['run', '--rm', '-v', `${projectDir}:/data`, '-t', 'ghcr.io/terraform-linters/tflint'], { env: baseEnv });
+    console.log(`Containerized scans passed for ${projectDir} (left in place for inspection).`);
 }
 
 if (!commandExists('terraform')) {
@@ -114,6 +147,31 @@ function engineProject(engine, marker) {
             ];
         },
     };
+}
+
+function assertStaticBaseFiles(dir) {
+    const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+    for (const marker of [
+        'resource "aws_cloudfront_distribution" "site"',
+        'resource "aws_s3_bucket" "site"',
+        'output "site_url"',
+    ]) {
+        if (!mainTf.includes(marker)) throw new Error(`expected ${marker} in terraform/main.tf`);
+    }
+    if (mainTf.includes('aws_ecs_service')) throw new Error('expected no ECS resources in terraform/main.tf');
+    if (mainTf.includes('aws_lambda_function')) throw new Error('expected no Lambda resources in terraform/main.tf');
+    const deployYml = fs.readFileSync(path.join(dir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+    if (!deployYml.includes('aws s3 sync')) {
+        throw new Error('expected aws s3 sync in .github/workflows/deploy.yml');
+    }
+    if (!deployYml.includes('BUILD_DIR: dist')) {
+        throw new Error('expected BUILD_DIR: dist in .github/workflows/deploy.yml');
+    }
+    for (const file of ['Dockerfile', 'terraform/worker.tf', 'terraform/database.tf', 'terraform/secrets.tf']) {
+        if (fs.existsSync(path.join(dir, file))) {
+            throw new Error(`expected no ${file} on a static project`);
+        }
+    }
 }
 
 function assertLambdaBaseFiles(dir) {
@@ -221,6 +279,17 @@ const projects = [
             return [
                 ['scaffold', () => run('node', [CLI, 'init', '--headless', '--framework=node', '--target', 'lambda', '--needsDatabase', '--db-engine', 'mysql'], { cwd: this.dir, env: baseEnv })],
                 ['assert files', () => assertEngineFiles(this.dir, 'mysql', 'engine            = "mysql"')],
+                ['terraform', () => checkTerraform(path.join(this.dir, 'terraform'))],
+            ];
+        },
+    },
+    {
+        name: 'static base (no domain)',
+        dirName: 'test-app-static-base',
+        steps() {
+            return [
+                ['scaffold', () => run('node', [CLI, 'init', '--target', 'static', '--headless'], { cwd: this.dir, env: baseEnv })],
+                ['assert files', () => assertStaticBaseFiles(this.dir)],
                 ['terraform', () => checkTerraform(path.join(this.dir, 'terraform'))],
             ];
         },

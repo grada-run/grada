@@ -32,13 +32,13 @@ You retain complete ownership of your infrastructure code without relying on bla
 **🚀 Zero-Config Deployments**
 * **Framework Agnostic:** Tailored container presets for 10 supported frameworks — Node.js/Express, NestJS, Next.js, Nuxt 3, SvelteKit, Python/FastAPI, Django, Rails, Go, and Static Sites (React, Vue, Astro).
 * **Smart Discovery:** Automatically detects build output directories and generates highly optimized, multi-stage Dockerfiles.
-* **Migration Engines:** Natively parses Heroku `Procfile` configurations, `vercel.json` routing rules, and `docker-compose.yml` sidecar architectures to automatically translate them into standard AWS Fargate and Application Load Balancer topologies.
+* **Migration Engines:** Natively parses Heroku `Procfile` configurations, `vercel.json` routing rules, and `docker-compose.yml` sidecar architectures to automatically translate them into AWS topologies across all three compute targets (Fargate + ALB, Lambda + API Gateway, or zero-compute S3 + CloudFront).
 * **Database Scaffolding:** Automatically provisions fully isolated, zero-trust AWS databases for backend monoliths — RDS PostgreSQL 16, RDS MySQL 8.0, or Aurora PostgreSQL Serverless v2 with 0–2 ACU scale-to-zero (`--db-engine`, or pick interactively with per-engine cost hints).
 * **Dependency-Aware Init:** Scans your manifests for database, worker, migration, and addon signals before prompting — pre-selecting the database question, pre-filling the worker command, pre-checking detected addons with evidence, and offering the migration gate — or compose the stack explicitly with `--with` in headless mode.
 
 **🛡️ DevSecOps & Security**
 * **Automated Trivy Scanning:** Integrated IaC and container vulnerability scanning on every GitHub Actions run.
-* **Continuous IaC Validation:** Matrix pipeline scaffolds all 10 supported frameworks headlessly and gates every commit on `terraform validate`, `tflint`, and Trivy (HIGH/CRITICAL).
+* **Continuous IaC Validation:** Matrix pipeline scaffolds all 10 supported frameworks headlessly and gates every commit on `terraform validate`, `tflint`, and blocking Trivy config scans — HIGH/CRITICAL misconfigurations fail the build (container image scans stay advisory), reproducible locally with `npm run test:iac`.
 * **Hardened Containers:** Multi-stage Alpine builds that drop root privileges (including `nginx-unprivileged` for static sites) and strip package managers from the final image. Distroless runners were evaluated and rejected to preserve shell access via ECS Exec (see ADR-0012).
 * **Zero-Secret CI/CD:** Utilizes AWS IAM OpenID Connect (OIDC) for automated deployments—no long-lived AWS keys in GitHub.
 * **Built-in Secrets Manager:** Push local `.env` variables into encrypted AWS Secrets Manager vaults, pull them back onto a new machine, and audit local-vs-remote drift — with one-prompt rolling ECS restarts for value-only rotations.
@@ -46,7 +46,7 @@ You retain complete ownership of your infrastructure code without relying on bla
 **☁️ AWS Native Architecture**
 * **Production Defaults:** Provisions an Amazon ECS Fargate cluster fronted by an Application Load Balancer across multiple availability zones.
 * **Serverless Target:** Prefer scale-to-zero? `--target lambda` (or the interactive prompt) generates a Lambda + API Gateway HTTP API v2 topology running the same container via the Lambda Web Adapter — $0/mo idle compute, with day-2 commands adapted and a Fargate-vs-Lambda tradeoff guide in the docs.
-* **Zero-Compute Static Target:** `--target static` hosts static-site frameworks (Vite, Astro, SPA exports) on a private S3 bucket behind CloudFront with Origin Access Control — no VPC, no containers, no Dockerfile, $0.00/mo idle baseline. Non-static frameworks are rejected with a validation error, and the pipeline builds, syncs, and invalidates on every push.
+* **Zero-Compute Static Target:** `--target static` hosts static-site frameworks (Vite, Astro, SPA exports) and detected static exports (Next.js `output: 'export'`, SvelteKit `adapter-static`) on a private S3 bucket behind CloudFront with Origin Access Control — no VPC, no containers, no Dockerfile, $0.00/mo idle baseline. Anything else is rejected with a validation error, and the pipeline builds, syncs, and invalidates on every push.
 * **Global Edge Acceleration:** Integrated AWS CloudFront CDN distribution with SSL termination and edge caching.
 * **Modular Day-2 Addons:** Attach private S3 storage (`add storage:s3`), serverless DynamoDB (`add db:dynamodb`), Valkey caching (`add db:redis`), SQS queues (`add queue:sqs`), Bedrock AI access (`add ai:bedrock`), or SES transactional email (`add email:ses`) anytime after init — no Terraform hand-writing, with container env wiring included — plus scheduled cron jobs (`add cron`) that run one-off Fargate tasks on an EventBridge schedule.
 * **Cost & Observability:** Keeps AWS spend visible with fixed-baseline cost previews before every provision, explicit 14-day CloudWatch log retention, and auto-generated 5XX error alerting. `status` renders live Golden Signals (`--watch` repaints), `alerts` scaffolds SNS email notifications, pause idle environments with one command (`sleep`/`wake`) and see the exact hourly savings, and catch out-of-band console changes with scheduled IaC drift detection (`drift`).
@@ -56,7 +56,7 @@ You retain complete ownership of your infrastructure code without relying on bla
 * **Native S3 State Locking:** Automatically creates an encrypted S3 state bucket utilizing modern Terraform concurrency locking.
 * **Safe Iteration:** Idempotent CLI safely backs up existing configurations to `.bak` files to guarantee zero data loss.
 * **Ephemeral PR Previews (Opt-In):** Automatically spins up completely isolated AWS environments for every Pull Request and posts the live preview URL to GitHub, accelerating team code reviews.
-* **🤖 IDE AI Integration:** Automatically generates contextual rules for Cursor, Windsurf, Copilot, and Claude to prevent Terraform hallucinations.
+* **🤖 IDE AI Integration:** Automatically generates contextual, target-aware rules for Cursor, Windsurf, Copilot, and Claude to prevent Terraform hallucinations — now with proactive guardrails (automatic `terraform validate`, secrets audit reminders, and apply nudges when build output changes).
 
 **🔭 Day-2 Operations**
 * **Observe & Troubleshoot:** Stream CloudWatch logs (`logs --tail --error -f`), check service health (`status`, with auto-`diagnose` on degradation), and open a shell in a running container (`exec`) — without leaving the terminal.
@@ -67,6 +67,7 @@ You retain complete ownership of your infrastructure code without relying on bla
 
 ## 📚 Documentation & Guides
 Transitioning from PaaS to AWS involves a few architectural shifts. Start with our **[live documentation site](https://grada-run.github.io/grada)** for full CLI references, guides, and migration walkthroughs. We've also written concise guides to help you understand how `grada` handles the heavy lifting:
+* [Migration Overview (provider-to-target matrix)](./apps/docs/src/content/docs/migrations/index.md)
 * [Migrating from Heroku to AWS (Procfile Support)](./apps/docs/src/content/docs/migrations/heroku-procfile-to-aws.md)
 * [Managing Secrets & Environment Variables](./apps/docs/src/content/docs/guides/secrets-management.md)
 * [Zero-Trust Database Connections](./apps/docs/src/content/docs/guides/database-connections.md)
@@ -95,7 +96,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | ------- | ------------ |
 | [`apply`](./apps/docs/src/content/docs/cli/apply.md) | Provisions your AWS infrastructure and prints the live URLs (`--dry-run` previews topology and cost). |
 | [`secrets push` / `pull` / `audit`](./apps/docs/src/content/docs/cli/secrets.md) | Encrypts `.env` files into Secrets Manager, syncs them back, and diffs drift. |
-| [`doctor`](./apps/docs/src/content/docs/cli/doctor.md) | Verifies Docker, Terraform, the AWS CLI, and git are installed. |
+| [`doctor`](./apps/docs/src/content/docs/cli/doctor.md) | Verifies Docker, Terraform, the AWS CLI, and git are installed — and that AWS credentials are active. |
 | [`diagnose`](./apps/docs/src/content/docs/cli/diagnose.md) (`wtf`) | Explains a failing ECS deployment from the stopped task and its logs. |
 | [`logs`](./apps/docs/src/content/docs/cli/logs.md) | Streams CloudWatch logs (`--tail`, `-f`, `--error`, `--since`). |
 | [`status`](./apps/docs/src/content/docs/cli/status.md) | Health dashboard with live Golden Signals, auto-`diagnose` on degradation, `--json` for scripts, and `--watch` for live repaint. |

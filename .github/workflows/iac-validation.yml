@@ -58,15 +58,13 @@ jobs:
         working-directory: ${{ env.GENERATED_DIR }}/terraform
         run: tflint
 
-      - name: DevSecOps Scan (IaC & Filesystem)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
-        with:
-          scan-type: 'fs'
-          scan-ref: ${{ env.GENERATED_DIR }}
-          format: 'table'
-          output: 'trivy-fs-results.txt'
-          severity: 'HIGH,CRITICAL'
-          exit-code: '0'
+      - name: DevSecOps Scan (IaC Config)
+        # Same blocking command as `npm run test:iac` (Phase 1): fails the PR
+        # on any HIGH/CRITICAL misconfiguration. pipefail keeps the tee'd
+        # summary file without swallowing Trivy's exit code.
+        run: |
+          set -o pipefail
+          docker run --rm -v "${{ env.GENERATED_DIR }}:/src" aquasec/trivy config --exit-code 1 --severity HIGH,CRITICAL /src | tee trivy-fs-results.txt
 
       - name: Build Container Image
         working-directory: ${{ env.GENERATED_DIR }}

@@ -14,9 +14,11 @@ export function readFileSafe(filePath) {
     return null;
 }
 
-// Compute targets supported by `--target`. `ecs` covers both the
-// canonical `ecs` value and its `fargate` synonym.
-export const COMPUTE_TARGETS = ['ecs', 'lambda'];
+// Canonical compute targets supported by `--target`. `ecs` covers both
+// the canonical `ecs` value and its `fargate` synonym (normalized by
+// callers). Single source of truth — commands must import this instead
+// of re-declaring their own target list.
+export const COMPUTE_TARGETS = ['ecs', 'lambda', 'static'];
 
 // Pure target check over rendered `main.tf` content: Lambda projects
 // provision the serverless function; static projects serve the site
@@ -40,6 +42,38 @@ export function detectComputeTargetFromMainTf(mainTfContent) {
 export function readTerraformComputeTarget(cwd = process.cwd()) {
     const base = resolveCwd({}, cwd);
     return detectComputeTargetFromMainTf(readFileSafe(path.join(base, 'terraform', 'main.tf')));
+}
+
+// Predicate form of the target check for commands that adapt (rather
+// than refuse) per target: `isComputeTarget(cwd, 'lambda')`.
+export function isComputeTarget(cwd = process.cwd(), ...targets) {
+    return targets.includes(readTerraformComputeTarget(cwd));
+}
+
+function prettyTargetName(target) {
+    return target === 'ecs' ? 'ECS' : `${target[0].toUpperCase()}${target.slice(1)}`;
+}
+
+// Shared unsupported-target guard: checks the target BEFORE the caller
+// prompts or constructs AWS clients. Returns null when the project
+// target is supported; otherwise a descriptor the caller passes straight
+// to failCommand ({ actual, reason, errorCode, message, hint }).
+// The message names every unsupported target ("…is not supported on
+// Lambda or Static targets.") so one call site covers all of them.
+export function guardComputeTarget({ cwd = process.cwd(), command, supported = ['ecs'], hint = null } = {}) {
+    const actual = readTerraformComputeTarget(cwd);
+    if (supported.includes(actual)) return null;
+    const unsupported = COMPUTE_TARGETS.filter((target) => !supported.includes(target)).map(prettyTargetName);
+    const targetList = unsupported.length > 1
+        ? `${unsupported.slice(0, -1).join(', ')} or ${unsupported[unsupported.length - 1]} targets`
+        : `${unsupported[0] ?? prettyTargetName(actual)} targets`;
+    return {
+        actual,
+        reason: `${actual}-target-unsupported`,
+        errorCode: `${actual.toUpperCase()}_TARGET_UNSUPPORTED`,
+        message: `\n✖ ${command} is not supported on ${targetList}.`,
+        hint,
+    };
 }
 
 // Working directory for file resolution: an explicit string `cwd` option,

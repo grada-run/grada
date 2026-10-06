@@ -5,7 +5,7 @@ import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
 import { failProjectNotInitialized } from '../utils/command.js';
 
@@ -202,7 +202,7 @@ export async function runGc(input = {}) {
 
     let discovered;
     try {
-        const isLambda = readTerraformComputeTarget(cwd) === 'lambda';
+        const isLambda = isComputeTarget(cwd, 'lambda');
         discovered = await discoverOrphanedResources({
             ecrClient,
             logsClient,

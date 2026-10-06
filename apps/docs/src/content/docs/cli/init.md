@@ -33,7 +33,7 @@ Running with no subcommand starts the interactive setup wizard (`init` is the de
 
 - `ecs` (default, `fargate` accepted as a synonym) — always-on ECS Fargate tasks behind an ALB: zero cold starts, ~$31.28/mo compute+ALB baseline.
 - `lambda` — scale-to-zero AWS Lambda container function (via the Lambda Web Adapter, zero app code changes) behind API Gateway HTTP API v2 and CloudFront: $0.00/mo fixed compute baseline, usage-based invocations.
-- `static` — zero-compute hosting for static-site frameworks only: a private S3 bucket served through CloudFront with Origin Access Control. No containers, no Dockerfile, $0.00/mo idle baseline. Non-static frameworks are rejected with a validation error.
+- `static` — zero-compute hosting for static-site frameworks and detected static exports (Next.js `output: 'export'`, SvelteKit `adapter-static`): a private S3 bucket served through CloudFront with Origin Access Control. No containers, no Dockerfile, $0.00/mo idle baseline. Anything else is rejected with a validation error.
 
 Lambda targets skip ECS-only scaffolding (no worker service, no ALB listener rules, no pre-deploy migration gate — run migrations from CI against your database endpoint instead). Day-0 `apply` seeds a placeholder image into ECR automatically, so the first provision succeeds before any code push. Secrets pushed with `secrets push` stay in the shared vault for runtime reads (`APP_SECRETS_ARN`); database credentials flow as `DB_*` environment variables so VPC-attached functions need no Secrets Manager endpoint.
 
@@ -55,7 +55,7 @@ Not sure which to pick? Choose `ecs` for steady or latency-sensitive traffic, lo
 | `--branch=<name>` | Branch the CI workflow deploys. |
 | `--needsDatabase` | Provision a managed database. |
 | `--db-engine <engine>` | Database engine: `postgres` (default), `mysql` (MySQL 8.0), or `aurora-postgresql` (Serverless v2 scale-to-zero). Skip the interactive engine prompt. |
-| `--target <target>` | Compute target: `ecs` (default, `fargate` synonym), `lambda` (scale-to-zero serverless), or `static` (S3 + CloudFront, static-site frameworks only). Skips the interactive target prompt. |
+| `--target <target>` | Compute target: `ecs` (default, `fargate` synonym), `lambda` (scale-to-zero serverless), or `static` (S3 + CloudFront; static-site frameworks and detected static exports only). Skips the interactive target prompt. |
 | `--enablePrPreviews` | Enable ephemeral PR preview environments. |
 | `--dir=<path>` | Target directory for generated files. |
 | `--preconfigured` | Skip framework-specific warnings (for preconfigured setups). |

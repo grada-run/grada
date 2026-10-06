@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, select, text, spinner, log, cancel, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, isActiveEnvValue, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf, isComputeTarget, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars } from '../utils/addons.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, isValidFromEmail, parseDomainTf } from '../utils/domains.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
@@ -992,6 +992,13 @@ async function runAddMain(input = {}) {
             reason: 'terraform-not-initialized',
             resultExtra: { capability },
         });
+    }
+
+    // Long-running workers require ECS: the generator never renders
+    // worker.tf for Lambda/static targets, so warn now instead of
+    // provisioning a queue that nothing will ever drain.
+    if (capability === 'queue:sqs' && isComputeTarget(cwd, 'lambda', 'static')) {
+        log.warn(color.yellow(`⚠️  Adding queue:sqs to a ${readTerraformComputeTarget(cwd)} target provisions the queue without a worker service — long-running workers require ECS (--target ecs).`));
     }
 
     // Interactive selection runs only on real TTYs without explicit

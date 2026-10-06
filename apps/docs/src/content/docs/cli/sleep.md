@@ -13,8 +13,8 @@ Pause a non-production or idle environment with a single command, and wake it ba
 - Sleeping the default (production) environment requires confirmation (`--yes` in automation); named environments sleep without prompting.
 - AWS automatically restarts stopped RDS databases after 7 consecutive days — `sleep` prints the exact restart timestamp, and `wake` warns if the window already elapsed.
 - Sleep state lives in `.grada/sleep-state.json` (one entry per environment, gitignored), so `wake` restores your original replica counts even for scaled-out services.
-- On `--target lambda` projects, compute is already scale-to-zero, so `sleep`/`wake` manage only the database (and pause/resume the cron schedule) — no services are scaled or restored.
-- On `--target static` projects there is nothing to pause — no compute or database exists — so `sleep` reports nothing-to-sleep without suggesting `apply`.
+- On `--target lambda` projects, compute is already scale-to-zero, so `sleep`/`wake` manage only the database (and pause/resume the cron schedule) — no services are scaled or restored. With no database provisioned (or with `--skip-db`), both exit successfully with nothing to do instead of failing.
+- On `--target static` projects there is nothing to pause — no compute or database exists — so `sleep`/`wake` exit successfully before any AWS call or confirmation prompt.
 - Emits `sleep_run` / `wake_run` telemetry events recording the outcome.
 
 ## Usage

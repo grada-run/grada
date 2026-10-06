@@ -24,6 +24,7 @@
 - **Audience First:** Write all READMEs, documentation, and release notes for the **end-user**, not the backend engineer. 
 - **Focus on Value:** Emphasize *what* the change does for the user (e.g., "Enhanced security," "Faster deployments") rather than *how* it was implemented under the hood.
 - **Hide the Wiring:** Do not explain deep technical refactors, regex changes, or script adjustments in user-facing docs unless they require the user to change their own behavior. Keep it concise, accessible, and benefit-driven.
+- **Bare init invocation:** Setup is invoked with no subcommand — always write `npx grada-run` (or `grada`), never `npx grada-run init` / `grada init`, including with flags (`npx grada-run --target lambda --headless`). The CLI accepts an explicit `init`, but docs, examples, and all user-facing text must use the bare form.
 
 ## 5. Terminal UI & Viewport Ergonomics
 - **Target viewport:** Users typically run the CLI inside an IDE bottom terminal panel (bottom 1/4 to 1/3 of a fullscreen window: ~10–15 visible rows, ~85–100 columns wide).

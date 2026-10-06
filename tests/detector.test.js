@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { detectMigrationCommand } from '../src/utils/detector.js';
+import { analyzeNextConfig, detectFramework, detectMigrationCommand } from '../src/utils/detector.js';
 
 function makeProject(files = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-migrate-'));
@@ -75,5 +75,74 @@ describe('detectMigrationCommand', () => {
             'manage.py': '# django',
         });
         expect(detectMigrationCommand(dir)).toBe('npm run migrate');
+    });
+});
+
+describe('detectFramework SvelteKit contract', () => {
+    it("maps @sveltejs/kit to id 'svelte' (init.js adapter-warning predicate)", () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({ dependencies: { '@sveltejs/kit': '2.0.0' } }),
+        });
+        expect(detectFramework(dir)).toMatchObject({ id: 'svelte', buildDir: 'build' });
+    });
+});
+
+describe('detectFramework static-export detection', () => {
+    it("flags Next.js output:'export' with buildDir 'out' (--target static gate)", () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({ dependencies: { next: '15.0.0' } }),
+            'next.config.js': "module.exports = { output: 'export' };\n",
+        });
+        expect(detectFramework(dir)).toMatchObject({
+            id: 'nextjs',
+            name: 'Next.js Static Export',
+            buildDir: 'out',
+            isStaticExport: true,
+        });
+    });
+
+    it('does not flag Next.js standalone or config-less apps', () => {
+        const standalone = makeProject({
+            'package.json': JSON.stringify({ dependencies: { next: '15.0.0' } }),
+            'next.config.js': "module.exports = { output: 'standalone' };\n",
+        });
+        expect(detectFramework(standalone)).toMatchObject({ id: 'nextjs' });
+        expect(detectFramework(standalone).isStaticExport).toBeUndefined();
+        const bare = makeProject({
+            'package.json': JSON.stringify({ dependencies: { next: '15.0.0' } }),
+        });
+        expect(detectFramework(bare)).toMatchObject({ id: 'nextjs' });
+        expect(detectFramework(bare).isStaticExport).toBeUndefined();
+    });
+
+    it('reads output export with double quotes and odd spacing', () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({ dependencies: { next: '15.0.0' } }),
+            'next.config.mjs': 'export default { output  :  "export" };\n',
+        });
+        expect(analyzeNextConfig(dir).isExport).toBe(true);
+        expect(detectFramework(dir).isStaticExport).toBe(true);
+    });
+
+    it('flags SvelteKit adapter-static with buildDir build (--target static gate)', () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({ dependencies: { '@sveltejs/kit': '2.0.0' } }),
+            'svelte.config.js': "import adapter from '@sveltejs/adapter-static';\nexport default { kit: { adapter: adapter() } };\n",
+        });
+        expect(detectFramework(dir)).toMatchObject({
+            id: 'svelte',
+            name: 'SvelteKit Static',
+            buildDir: 'build',
+            isStaticExport: true,
+        });
+    });
+
+    it('does not flag SvelteKit adapter-auto as a static export', () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({ dependencies: { '@sveltejs/kit': '2.0.0' } }),
+            'svelte.config.js': "import adapter from '@sveltejs/adapter-auto';\nexport default { kit: { adapter: adapter() } };\n",
+        });
+        expect(detectFramework(dir)).toMatchObject({ id: 'svelte', name: 'SvelteKit SSR' });
+        expect(detectFramework(dir).isStaticExport).toBeUndefined();
     });
 });
