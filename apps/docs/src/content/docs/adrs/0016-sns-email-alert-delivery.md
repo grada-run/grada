@@ -3,7 +3,7 @@ title: "SNS Email Alert Delivery with Manual Subscription"
 description: "Scaffold an SNS topic plus 5xx alarm for ECS projects and let users subscribe an email address — no forwarding compute."
 ---
 
-* **Status:** Accepted
+* **Status:** Accepted (amended 2026-10-07: universal multi-channel alerts)
 * **Date:** 2026-10-04 (Retroactive)
 
 ## Context and Problem Statement
@@ -39,3 +39,18 @@ We needed working notifications with no new always-on compute and no third-party
 * Chat-native teams get no Slack/Discord path until the forwarding Lambda ships — the CLI must say so plainly (it does) rather than let users paste webhook URLs that can never confirm.
 * The manual console step is a small papercut on an otherwise zero-click CLI; forgetting it means alarming into the void.
 * Lambda and static targets have no alert scaffolding yet.
+
+## Amendment (2026-10-07): Universal Multi-Channel Alerts
+
+All three negative consequences above are now retired. `grada alerts` scaffolds per-target alarms on every compute target — ALB 5xx (ECS), Lambda Errors (lambda), CloudFront 5xxErrorRate (static) — with `--email` (baked SNS subscription, confirmation click still required) and `--webhook` (a scale-to-zero Node.js forwarding Lambda adapting notifications to Slack/Discord/generic payloads) destinations, alone or combined.
+
+The v1 decision drivers survive the transition:
+
+* **No new always-on compute:** the forwarder runs only on alarm delivery, inside the Lambda free tier at any plausible volume — the "no billable runtime" property holds in the scale-to-zero sense.
+* **Explicit consent:** email keeps the SNS confirmation handshake; chat delivery needs no consent step because the operator pastes their own webhook URL explicitly.
+* **ECS-first is now target-aware:** the ECS alarm resources are unchanged from v1 (same thresholds, same topic and alarm names); lambda/static alarms are new files, not retrofits.
+
+Two implementation consequences worth recording:
+
+* **Static alerts live in `us-east-1`.** CloudWatch serves CloudFront metrics only there, and an alarm's SNS actions must sit in the alarm's region — so the topic, alarm, and forwarder are pinned to the `aws.us_east_1` alias, which `alerts` adds to `terraform/main.tf` when missing (the same home `grada domain` uses, so the two never declare it twice).
+* **The webhook URL stays out of git** via the sensitive `alerts_webhook_url` variable (`TF_VAR_alerts_webhook_url`), not a new Secrets Manager secret — a dedicated secret would cost $0.40/mo and break the $0.00 alerting baseline. Telemetry records destination kinds only, never the address or URL.

@@ -48,7 +48,7 @@ const HELP_TEXT = [
     '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes)',
     '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait)',
     '  drift                Detect Terraform drift locally or scaffold scheduled checks (--setup)',
-    '  alerts               Scaffold SNS + 5xx alarm notifications for ECS (--force)',
+    '  alerts               Scaffold SNS + alarm notifications for any target (--email, --webhook, --threshold, --force)',
     '  add <capability>     Provision a modular addon (storage:s3, db:dynamodb, db:redis, queue:sqs, ai:bedrock, email:ses, cron) [--model <id>, --list-models, --refresh]',
     '  domain add <domain>    Provision a custom domain with automated ACM TLS (--zone-id, --activate)',
     '  domain verify|status|remove  Activate, inspect, or remove the custom domain',
@@ -143,7 +143,7 @@ if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
 } else if (positionalArgs[0] === 'drift') {
     runCommand(runDrift({ ...parseDriftArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'alerts') {
-    runCommand(runAlerts(parseAlertsArgs(rawArgs)));
+    runCommand(runAlerts({ ...parseAlertsArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'mcp') {
     runCommand(runMcp(parseMcpArgs(rawArgs)));
 } else if (positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h')) {

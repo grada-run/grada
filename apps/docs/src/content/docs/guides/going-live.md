@@ -19,7 +19,7 @@ grada automates the infrastructure, but a few steps inherently need a human: AWS
 
 ## Operations
 
-- [ ] **Alerts subscribed.** `alerts` + `apply`, then confirm the SNS email subscription shows `Confirmed` — an unconfirmed topic pages nobody. See [Alert Notifications](/grada/guides/alert-notifications/).
+- [ ] **Alerts subscribed.** `alerts` + `apply`, then confirm the SNS email subscription shows `Confirmed` — an unconfirmed topic pages nobody (or verify a test alarm lands in the chat webhook). See [Alert Notifications](/grada/guides/alert-notifications/).
 - [ ] **Drift detection on.** `drift --setup` (or `--setup-ci-drift` at init) for the daily plan check with `iac-drift` issues, plus a `SLACK_WEBHOOK_URL` secret if the team lives in Slack.
 - [ ] **Billing ceiling set.** The CLI estimates expected spend; pair it with an AWS Budgets billing alarm in the console so actuals page you too.
 - [ ] **PR previews enabled** (if working as a team). `--enablePrPreviews` at init gives every PR an isolated environment with teardown on close — close stale PRs so ALB-hours stop billing.

@@ -34,5 +34,5 @@ We needed fast per-PR signal plus real-AWS proof, without coupling the two.
 * Both tiers skip loudly-but-cleanly without their prerequisites, so forks and local runs stay green.
 
 ### Negative Consequences
-* Two harnesses to maintain (`tests/e2e/tier0.e2e.test.js`, `tests/e2e/tier1.live.e2e.test.js`) plus dedicated Vitest configs.
+* Two harnesses to maintain (`tests/e2e/tier0.e2e.test.js`, `tests/e2e/tier1.live.e2e.test.js`) plus dedicated Vitest configs. (2026-10-07: Tier 0 has since grown two more suites — `migrations.e2e.test.js` and `alerts.e2e.test.js` — so this reads four harnesses today; the maintenance-cost point stands.)
 * Tier 1 failures arrive the morning after merge, not at review time — a nightly red run must still block the release train by policy, not by tooling.

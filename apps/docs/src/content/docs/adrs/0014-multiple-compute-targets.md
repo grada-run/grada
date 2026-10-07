@@ -43,3 +43,7 @@ Guardrails keep invalid combinations out at scaffold time: `--target static` wit
 * A Day-2 behavior matrix to maintain forever: `exec`, `rollback`, and `alerts` are ECS-only; `status`, `diagnose`, `logs`, `sleep`, and `db` adapt or degrade per target; `add` scaffolds infra on static but skips runtime env injection.
 * Lambda VPC networking has no NAT gateway, so VPC-attached functions cannot reach the public internet — a documented tradeoff, not a bug.
 * Static cannot use `domain add` yet (it patches `terraform/cloudfront.tf`, which static never generates) and prints no `site_url` from `apply` until the outputs reader learns it.
+
+## Amendment (2026-10-07)
+
+`alerts` is no longer ECS-only: it scaffolds per-target alarms (ALB 5xx, Lambda Errors, CloudFront 5xxErrorRate) with email and chat-webhook delivery on all three targets — see [ADR-0016](/grada/adrs/0016-sns-email-alert-delivery/). `exec` and `rollback` remain ECS-only; the matrix itself is proven by `tests/target-matrix.test.js`.

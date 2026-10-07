@@ -7,8 +7,9 @@
 // `trackSuccess`/`trackFailure` mirror the real delegation (calling through
 // to `trackEvent` + `flushTelemetry`) so success/failure-path assertions that
 // observe `trackEvent.mock.calls` keep working. `isActiveEnvValue`,
-// `detectCiProvider`, and the active-command pair pass through to the real
-// module, covering the union of what mocked consumers import.
+// `detectCiProvider`, `getCliVersion`, and the active-command pair pass
+// through to the real module, covering the union of what mocked consumers
+// import.
 //
 // Do NOT use this in tests/telemetry.test.js (it tests the real module).
 import { vi } from 'vitest';
@@ -33,6 +34,7 @@ export async function telemetryMockFactory(importOriginal) {
         trackFailure: mockTrackFailure,
         isActiveEnvValue: actual.isActiveEnvValue,
         detectCiProvider: actual.detectCiProvider,
+        getCliVersion: actual.getCliVersion,
         setActiveCommandName: actual.setActiveCommandName,
         resetActiveCommandName: actual.resetActiveCommandName,
     };

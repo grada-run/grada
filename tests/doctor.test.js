@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // during module evaluation and need the factories initialized.
 import { clackPromptsMockFactory, mockOutro } from './helpers/clack.js';
 import { telemetryMockFactory } from './helpers/telemetry.js';
-import { runDoctor, installHint, ciHint, singleCheckFailure, DOCTOR_CHECKS } from '../src/commands/doctor.js';
+import { runDoctor, installHint, ciHint, singleCheckFailure, DOCTOR_CHECKS, AWS_AUTH_TIMEOUT_MS } from '../src/commands/doctor.js';
 import { checkDependency } from '../src/utils/system.js';
 import { checkAwsCredentials } from '../src/utils/aws.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
@@ -384,6 +384,91 @@ describe('runDoctor', () => {
             passingRun.restore();
             if (savedCI === undefined) delete process.env.CI;
             else process.env.CI = savedCI;
+        }
+    });
+
+    it.each([
+        ['missing credentials', () => { throw Object.assign(new Error('Unable to locate credentials'), { name: 'CredentialsProviderError' }); }],
+        ['SDK timeout', async () => { throw Object.assign(new Error('Connection timed out'), { name: 'TimeoutError' }); }],
+        ['EACCES reading the credentials file', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); }],
+        ['non-Error string rejection', async () => { throw 'weird-string-failure'; }],
+        ['undefined rejection', async () => { throw undefined; }],
+    ])('collapses %s into a clean auth failure with a full payload', async (_label, fail) => {
+        vi.mocked(checkAwsCredentials).mockImplementation(fail);
+        const { restore } = captureLog();
+        try {
+            await expect(runDoctor()).resolves.toBeUndefined();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    error_code: 'AWS_CLI_UNCONFIGURED',
+                    reason: 'aws-cli-unconfigured',
+                    check_aws_auth: false,
+                    passed_checks: ['terraform', 'aws_cli', 'docker', 'git'],
+                    failed_checks: ['aws_auth'],
+                    total_failed: 1,
+                })
+            );
+            expect(flushTelemetry).toHaveBeenCalled();
+        } finally {
+            restore();
+        }
+    });
+
+    it('treats a hanging credential check as failed after the timeout', async () => {
+        vi.mocked(checkAwsCredentials).mockImplementation(() => new Promise(() => { }));
+        vi.useFakeTimers();
+        const { restore } = captureLog();
+        try {
+            const run = runDoctor();
+            await vi.advanceTimersByTimeAsync(AWS_AUTH_TIMEOUT_MS);
+            await run;
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    error_code: 'AWS_CLI_UNCONFIGURED',
+                    check_aws_auth: false,
+                    failed_checks: ['aws_auth'],
+                })
+            );
+        } finally {
+            restore();
+            vi.useRealTimers();
+        }
+    });
+
+    it('degrades a synchronously-throwing binary check to a red cell', async () => {
+        vi.mocked(checkDependency).mockImplementation((binary) => {
+            if (binary === 'docker') throw new Error('spawn EMFILE');
+            return Promise.resolve(true);
+        });
+        const { restore } = captureLog();
+        try {
+            await expect(runDoctor()).resolves.toBeUndefined();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    error_code: 'MISSING_DOCKER',
+                    check_docker: false,
+                    failed_checks: ['docker'],
+                })
+            );
+        } finally {
+            restore();
+        }
+    });
+
+    it('still prints results when telemetry itself throws', async () => {
+        vi.mocked(trackEvent).mockImplementation(() => { throw new Error('fetch failed'); });
+        const { output, restore } = captureLog();
+        try {
+            await expect(runDoctor()).resolves.toBeUndefined();
+            expect(output.join('\n')).toContain('Terraform (✓)');
+        } finally {
+            restore();
         }
     });
 

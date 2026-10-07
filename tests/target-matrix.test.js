@@ -197,13 +197,24 @@ describe('matrix: gc (ADAPT — clean exit on static)', () => {
     });
 });
 
-describe('matrix: alerts (GUARD static)', () => {
-    it('exits with the ECS-only error on static', async () => {
+describe('matrix: alerts (ADAPT all targets)', () => {
+    it('scaffolds a CloudFront 5xx-rate alarm on static', async () => {
         const dir = makeProject('alerts-static');
         const result = await runAlerts({ cwd: dir, projectName: 'myapp', region: 'us-east-2' });
-        expect(result).toMatchObject({ ok: false, reason: 'alerts-target-unsupported' });
-        expect(exitSpy).toHaveBeenCalledWith(1);
-        expect(output()).toContain('detected target: static');
+        expect(result).toMatchObject({ ok: true, target: 'static' });
+        const written = fs.readFileSync(path.join(dir, 'terraform', 'alerts.tf'), 'utf8');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_5xx_rate"');
+        expect(written).toContain('provider = aws.us_east_1');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('scaffolds a Lambda Errors alarm on lambda', async () => {
+        const dir = makeProject('alerts-lambda', 'resource "aws_lambda_function" "app" {}\n');
+        const result = await runAlerts({ cwd: dir, projectName: 'myapp', region: 'us-east-2' });
+        expect(result).toMatchObject({ ok: true, target: 'lambda' });
+        const written = fs.readFileSync(path.join(dir, 'terraform', 'alerts.tf'), 'utf8');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_errors"');
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 });
 

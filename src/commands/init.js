@@ -20,7 +20,7 @@ import { ADDON_REGISTRY } from '../utils/addons.js';
 import { validateAddonFlags, resolveAddonOptions, scaffoldAddon, DEFAULT_BEDROCK_MODEL } from './add.js';
 import { injectMigrationGate } from './db/migrate.js';
 import { scaffoldDriftWorkflow } from './drift.js';
-import { trackEvent, flushTelemetry } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, getCliVersion } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 import { getFrameworkWarning } from '../utils/warnings.js';
 import { provisionStateBucket } from '../utils/aws.js';
@@ -34,8 +34,11 @@ import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-ru
 import { readFileSafe, COMPUTE_TARGETS } from '../utils/resolvers.js';
 import { parseDomainTf } from '../utils/domains.js';
 
-const pkg = JSON.parse(fsSync.readFileSync(new URL('../../package.json', import.meta.url)));
-const CLI_VERSION = pkg.version;
+// Single source of truth for the CLI version (telemetry resolver: upward
+// manifest walk + env fallback). A local duplicate read here previously
+// risked crashing the whole CLI at import time when the manifest path
+// didn't resolve under global installs.
+const CLI_VERSION = getCliVersion();
 
 export async function mainStack(input = {}) {
     const options = normalizeOptions(input);

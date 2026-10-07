@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, setActiveCommandName, resetActiveCommandName } from '../src/core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName } from '../src/core/telemetry.js';
 
 const SHA256_UNKNOWN_PREFIX = crypto.createHash('sha256').update('unknown').digest('hex').substring(0, 16);
 
@@ -436,6 +436,70 @@ describe('trackEvent capture', () => {
             const fetchMock = mockFetch();
             trackEvent('exec_run', { cli_version: '9.9.9-override' });
             expect(lastPayload(fetchMock).properties.cli_version).toBe('9.9.9-override');
+        });
+
+        it('ignores undefined reserved props instead of erasing base values', () => {
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { cli_version: undefined, os: undefined, success: true });
+            const props = lastPayload(fetchMock).properties;
+            // An explicit undefined used to survive the ...eventProps spread
+            // and vanish in JSON.stringify — reading as "missing" in PostHog.
+            expect(props.cli_version).toBe(expectedVersion);
+            expect(props.os).toBe(process.platform);
+            expect(props.success).toBe(true);
+        });
+    });
+
+    describe('resolveCliVersion', () => {
+        function writeManifest(dir, name, version) {
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version }));
+        }
+
+        function withTmpDir(fn) {
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-version-'));
+            try {
+                return fn(dir);
+            } finally {
+                fs.rmSync(dir, { recursive: true, force: true });
+            }
+        }
+
+        it('climbs from a nested module dir to the name-matched manifest', () => {
+            withTmpDir((base) => {
+                writeManifest(base, 'grada-run', '1.2.3-fixture');
+                const deep = path.join(base, 'a', 'b');
+                fs.mkdirSync(deep, { recursive: true });
+                expect(resolveCliVersion({ startDir: deep })).toBe('1.2.3-fixture');
+            });
+        });
+
+        it('skips wrong-named and malformed manifests while climbing', () => {
+            withTmpDir((base) => {
+                writeManifest(base, 'grada-run', '9.9.9-top');
+                writeManifest(path.join(base, 'nested'), 'some-other-project', '0.0.0');
+                fs.mkdirSync(path.join(base, 'nested', 'deep'), { recursive: true });
+                fs.writeFileSync(path.join(base, 'nested', 'deep', 'package.json'), '{oops');
+                // Nearest manifest is malformed, next is wrong-named: the
+                // walk must pass both and return the real version above.
+                expect(resolveCliVersion({ startDir: path.join(base, 'nested', 'deep') })).toBe('9.9.9-top');
+            });
+        });
+
+        it('falls back to GRADA_CLI_VERSION when no manifest matches', () => {
+            const readFile = () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
+            expect(resolveCliVersion({
+                startDir: path.join(os.tmpdir(), 'cli-version-bare'),
+                readFile,
+                env: { GRADA_CLI_VERSION: '7.7.7-env' },
+            })).toBe('7.7.7-env');
+        });
+
+        it('returns unknown when neither manifest nor env yields a version', () => {
+            const readFile = () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); };
+            expect(resolveCliVersion({ startDir: path.join(os.tmpdir(), 'cli-version-bare'), readFile, env: {} })).toBe('unknown');
+            expect(resolveCliVersion({ startDir: path.join(os.tmpdir(), 'cli-version-bare'), readFile, env: { GRADA_CLI_VERSION: '  ' } })).toBe('unknown');
+            expect(resolveCliVersion({ startDir: null, readFile, env: null })).toBe('unknown');
         });
     });
 

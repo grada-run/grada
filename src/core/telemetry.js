@@ -2,12 +2,29 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 const TELEMETRY_ENDPOINT = 'https://eu.i.posthog.com/capture/';
 const POSTHOG_API_KEY = 'phc_o2wgA3jVT9rVDiGSDzFAR42zZeiVGhhCY53HXVHUcYGT';
 const pendingRequests = [];
 
 const CLI_ENTRY_BASENAMES = ['cli.js', 'grada', 'grada-run', 'deploy-stack'];
+
+// Base props trackEvent stamps on every payload. Callers may override them
+// with real values, but never with `undefined` (see step 3b below).
+const RESERVED_BASE_PROPS = [
+    'os',
+    'node_version',
+    'cli_version',
+    'is_ci',
+    'ci_provider',
+    'is_test_env',
+    'is_tty',
+    'is_cli_entry',
+    'cli_command',
+    'project_id',
+    'framework',
+];
 
 let cachedDistinctId = null;
 
@@ -29,17 +46,58 @@ export function resetActiveCommandName() {
     activeCommandName = null;
 }
 
-// CLI version stamped onto every event's base properties, read once from
-// package.json. Falls back to 'unknown' so telemetry never throws when the
-// manifest is missing or malformed (e.g. bundled distributions).
-function readCliVersion() {
+// The installed package's own name. The version resolver matches it so an
+// upward manifest search never mistakes a parent project's package.json
+// (monorepo root, npx cache parent, global node_modules scope) for ours.
+const CLI_PACKAGE_NAME = 'grada-run';
+
+// Operator escape hatch for distributions that cannot ship package.json
+// next to the code (single-binary bundlers). Only consulted when no
+// name-matched manifest is found — the manifest is authoritative.
+const CLI_VERSION_ENV_VAR = 'GRADA_CLI_VERSION';
+
+// Resolves the CLI version stamped onto every event's base properties:
+// climbs from the telemetry module's own directory (NOT the cwd, which is
+// the user's project) to the nearest package.json whose `name` is ours,
+// then GRADA_CLI_VERSION, then 'unknown'. Never throws: every filesystem
+// or parse failure at one level just continues the climb. `startDir`,
+// `readFile`, and `env` are injectable so tests can pin each fallback
+// without touching the real filesystem or process env.
+export function resolveCliVersion({ startDir, readFile = fs.readFileSync, env = process.env } = {}) {
+    let dir;
     try {
-        const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
-        if (pkg && typeof pkg.version === 'string' && pkg.version.trim() !== '') return pkg.version;
+        dir = startDir ?? path.dirname(fileURLToPath(import.meta.url));
+    } catch {
+        dir = null;
+    }
+    while (typeof dir === 'string' && dir !== '') {
+        try {
+            const pkg = JSON.parse(readFile(path.join(dir, 'package.json'), 'utf-8'));
+            if (pkg && pkg.name === CLI_PACKAGE_NAME && typeof pkg.version === 'string' && pkg.version.trim() !== '') {
+                return pkg.version;
+            }
+        } catch {
+            // Missing/unreadable/malformed manifest — keep climbing.
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    try {
+        const fromEnv = env?.[CLI_VERSION_ENV_VAR];
+        if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim();
     } catch {
         // Fall through to the 'unknown' default below.
     }
     return 'unknown';
+}
+
+function readCliVersion() {
+    try {
+        return resolveCliVersion();
+    } catch {
+        return 'unknown';
+    }
 }
 
 const CLI_VERSION = readCliVersion();
@@ -184,6 +242,17 @@ export function trackEvent(eventName, properties) {
         eventProps = { raw_properties: properties };
     }
 
+    // 3b. Callers may override base props with real values (pinned
+    // contract), but an explicit `undefined` must never erase them: the
+    // `...eventProps` spread below runs after the base props, and
+    // JSON.stringify drops undefined — which reads as "missing" in
+    // PostHog. Capture the framework fallback first; it is the one base
+    // prop callers legitimately feed.
+    const frameworkOverride = eventProps.framework;
+    for (const key of RESERVED_BASE_PROPS) {
+        if (eventProps[key] === undefined) delete eventProps[key];
+    }
+
     // 4. Resolve context first: provider before is_ci, entry before command.
     const ciProvider = detectCiProvider();
     const testEnv = isTestEnv();
@@ -222,7 +291,7 @@ export function trackEvent(eventName, properties) {
                 ? (process.env.CLI_COMMAND || process.argv.slice(2).join(' ') || 'unknown')
                 : (activeCommandName || 'module_import'),
             project_id: projectId,
-            framework: process.env.GRADA_FRAMEWORK || process.env.DEPLOY_STACK_FRAMEWORK || eventProps.framework || undefined,
+            framework: process.env.GRADA_FRAMEWORK || process.env.DEPLOY_STACK_FRAMEWORK || frameworkOverride || undefined,
             ...eventProps
         }
     };

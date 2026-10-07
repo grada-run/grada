@@ -83,17 +83,49 @@ function dedupedCheckDependency(binary) {
     return inFlightChecks.get(binary);
 }
 
+// Ceiling for the live credential probe. Enterprise SSO wrappers
+// (credential_process helpers, blackholed IMDS endpoints) can hang the
+// SDK's credential chain indefinitely — the race below converts any such
+// hang into a clean `false` instead of a wedged `doctor` run.
+export const AWS_AUTH_TIMEOUT_MS = 15000;
+
 // SDK equivalent of `aws sts get-caller-identity`: true only when active,
 // valid credentials resolve (honors CI_MOCK_AWS like every other caller).
-// Never throws and never surfaces identity or error text — the caller only
-// ever sees the boolean, so expired-token details cannot leak into output
-// or telemetry.
-async function checkAwsAuthSafe() {
+// Never throws, never hangs past AWS_AUTH_TIMEOUT_MS, and never surfaces
+// identity or error text — the caller only ever sees the boolean, so
+// missing credentials, timeouts, EACCES, and even non-Error rejections
+// all collapse to `false` and the telemetry payload still compiles.
+async function checkAwsAuthSafe(timeoutMs = AWS_AUTH_TIMEOUT_MS) {
+    let timer = null;
     try {
-        await checkAwsCredentials();
-        return true;
+        return await Promise.race([
+            Promise.resolve()
+                .then(() => checkAwsCredentials())
+                .then(() => true, () => false),
+            new Promise((resolve) => {
+                timer = setTimeout(() => resolve(false), timeoutMs);
+                if (timer && typeof timer.unref === 'function') timer.unref();
+            }),
+        ]);
     } catch {
         return false;
+    } finally {
+        if (timer !== null) clearTimeout(timer);
+    }
+}
+
+// One check that can neither throw nor reject: a synchronous spawn
+// failure (or any future checkDependency regression) degrades to a red
+// cell instead of rejecting the Promise.all and killing the run before
+// telemetry compiles.
+async function runCheckSafe(check) {
+    try {
+        return {
+            ...check,
+            ok: check.binary ? await dedupedCheckDependency(check.binary) : await checkAwsAuthSafe(),
+        };
+    } catch {
+        return { ...check, ok: false };
     }
 }
 
@@ -133,12 +165,7 @@ async function runDoctorMain() {
     const s = spinner();
     s.start('Running pre-flight checks...');
 
-    const results = await Promise.all(
-        DOCTOR_CHECKS.map(async (check) => ({
-            ...check,
-            ok: check.binary ? await dedupedCheckDependency(check.binary) : await checkAwsAuthSafe(),
-        }))
-    );
+    const results = await Promise.all(DOCTOR_CHECKS.map(runCheckSafe));
 
     s.stop('Pre-flight checks complete.\n');
 
@@ -201,14 +228,21 @@ async function runDoctorMain() {
             : { error_code: 'DOCTOR_CHECKS_FAILED', reason: 'doctor-checks-failed' })
         : {};
 
-    trackEvent('doctor_run', {
-        success,
-        ...checkFlags,
-        ...failureProps,
-        passed_checks: passedChecks,
-        failed_checks: failedChecks,
-        total_failed: failedChecks.length,
-        ci_provider: detectCiProvider(),
-    });
-    await flushTelemetry();
+    // Telemetry is the last thing that may run and the first thing that
+    // must never fail the command: a deleted cwd or a sync fetch throw
+    // would otherwise turn green checks into a red crash with no event.
+    try {
+        trackEvent('doctor_run', {
+            success,
+            ...checkFlags,
+            ...failureProps,
+            passed_checks: passedChecks,
+            failed_checks: failedChecks,
+            total_failed: failedChecks.length,
+            ci_provider: detectCiProvider(),
+        });
+        await flushTelemetry();
+    } catch {
+        // The checks already printed; losing one event beats crashing.
+    }
 }

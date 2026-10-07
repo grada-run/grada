@@ -37,7 +37,7 @@ Passing `--target static` to [`init`](/grada/cli/init/) generates a zero-compute
 
 Internet → **CloudFront** → **private S3 bucket**. There is no VPC, no ALB, no ECS, and no Dockerfile: the bucket blocks all public access and CloudFront reads through an Origin Access Control (OAC), unknown paths fall back to `/index.html` for client-side routers, and the fixed baseline is **$0.00/mo**. Deploys build the site, `aws s3 sync` the output folder, and invalidate the CloudFront cache.
 
-Day-2 commands adapt: `status` reports distribution status (`Deployed` vs propagating) instead of ECS, and `alerts` is ECS-only with a clear error. Container-oriented commands (`exec`, `rollback`, `logs`) behave as on an unprovisioned ECS project (service-not-found guidance). Workers, databases, and PR preview workflows are skipped (with a warning) — there is no compute to run them on.
+Day-2 commands adapt: `status` reports distribution status (`Deployed` vs propagating) instead of ECS, and `alerts` scaffolds a CloudFront 5xx-rate alarm (SNS + optional chat webhook) pinned to `us-east-1`. Container-oriented commands (`exec`, `rollback`, `logs`) behave as on an unprovisioned ECS project (service-not-found guidance). Workers, databases, and PR preview workflows are skipped (with a warning) — there is no compute to run them on.
 
 ### Fargate vs Lambda tradeoffs
 

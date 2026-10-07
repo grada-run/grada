@@ -49,7 +49,7 @@ You retain complete ownership of your infrastructure code without relying on bla
 * **Zero-Compute Static Target:** `--target static` hosts static-site frameworks (Vite, Astro, SPA exports) and detected static exports (Next.js `output: 'export'`, SvelteKit `adapter-static`) on a private S3 bucket behind CloudFront with Origin Access Control — no VPC, no containers, no Dockerfile, $0.00/mo idle baseline. Anything else is rejected with a validation error, and the pipeline builds, syncs, and invalidates on every push.
 * **Global Edge Acceleration:** Integrated AWS CloudFront CDN distribution with SSL termination and edge caching.
 * **Modular Day-2 Addons:** Attach private S3 storage (`add storage:s3`), serverless DynamoDB (`add db:dynamodb`), Valkey caching (`add db:redis`), SQS queues (`add queue:sqs`), Bedrock AI access (`add ai:bedrock`), or SES transactional email (`add email:ses`) anytime after init — no Terraform hand-writing, with container env wiring included — plus scheduled cron jobs (`add cron`) that run one-off Fargate tasks on an EventBridge schedule.
-* **Cost & Observability:** Keeps AWS spend visible with fixed-baseline cost previews before every provision, explicit 14-day CloudWatch log retention, and auto-generated 5XX error alerting. `status` renders live Golden Signals (`--watch` repaints), `alerts` scaffolds SNS email notifications, pause idle environments with one command (`sleep`/`wake`) and see the exact hourly savings, and catch out-of-band console changes with scheduled IaC drift detection (`drift`).
+* **Cost & Observability:** Keeps AWS spend visible with fixed-baseline cost previews before every provision, explicit 14-day CloudWatch log retention, and auto-generated 5XX error alerting. `status` renders live Golden Signals (`--watch` repaints), `alerts` scaffolds SNS email and Slack/Discord webhook notifications on every compute target, pause idle environments with one command (`sleep`/`wake`) and see the exact hourly savings, and catch out-of-band console changes with scheduled IaC drift detection (`drift`).
 
 **🛠️ Developer Experience**
 * **Zero Vendor Lock-In:** Generates standard, readable Terraform (`.tf`) files. You own the infrastructure.
@@ -110,7 +110,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`gc`](./apps/docs/src/content/docs/cli/gc.md) | Deletes orphaned ECR images, log groups, and EIPs — dry-run first, explicit confirmation only. |
 | [`sleep` / `wake`](./apps/docs/src/content/docs/cli/sleep.md) | Pauses an environment to $0 compute and restores exact replica counts (`--skip-db`, `--no-wait`). |
 | [`drift`](./apps/docs/src/content/docs/cli/drift.md) | Flags out-of-band AWS changes locally or daily in CI (`--setup`). |
-| [`alerts`](./apps/docs/src/content/docs/cli/alerts.md) | Scaffolds an SNS topic + 5xx alarm for email notifications (ECS only). |
+| [`alerts`](./apps/docs/src/content/docs/cli/alerts.md) | Scaffolds an SNS topic + alarm with email and chat-webhook delivery on every target (`--email`, `--webhook`, `--threshold`). |
 | [`add`](./apps/docs/src/content/docs/cli/add.md) | Attaches S3, DynamoDB, Redis, SQS, Bedrock, SES, or scheduled cron jobs without writing Terraform. |
 | [`domain`](./apps/docs/src/content/docs/cli/domain.md) | Attaches a custom domain with automated ACM TLS (Route 53 or external DNS). |
 | [`destroy`](./apps/docs/src/content/docs/cli/destroy.md) | Tears down AWS resources to stop billing (state bucket optionally retained). |

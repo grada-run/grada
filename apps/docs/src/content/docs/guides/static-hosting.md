@@ -43,7 +43,7 @@ The stack outputs `site_url` (plus `site_bucket`, `cloudfront_distribution_id`, 
 | `status` | Reports CloudFront distribution status (`Deployed` vs propagating) and the site URL instead of ECS health. |
 | `logs` | Container-oriented; behaves as on an unprovisioned ECS project (service-not-found guidance). |
 | `exec`, `rollback` | Fail fast with an unsupported-target error before any AWS lookup — static sites have no shell to attach to and no revisions to restore. |
-| `alerts` | ECS-only — exits with a clear error (there is no ALB to alarm on). |
+| `alerts` | Scaffolds a CloudFront `5xxErrorRate` alarm (SNS + optional chat webhook) pinned to `us-east-1`. |
 | `secrets` | No vault is provisioned; `push`, `pull`, and `audit` exit immediately with an unsupported-target error. Static sites needing secrets need an API backend. |
 | `db *` | No database can be provisioned; every command exits immediately with an unsupported-target error instead of probing RDS. |
 | `diagnose` | Nothing to inspect — fails fast with an unsupported-target error before any AWS lookup; use `status` instead. |
