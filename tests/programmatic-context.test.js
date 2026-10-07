@@ -26,6 +26,24 @@ vi.mock('../src/core/telemetry.js', async (importOriginal) => {
     return { ...base, setActiveCommandName: spies.setSpy, resetActiveCommandName: spies.resetSpy };
 });
 
+// runDoctor() probes live AWS credentials plus `<binary> --version` spawns.
+// The real SDK hangs on IMDS credential lookup in CI until the 15s auth
+// timeout, tripping Vitest's 5s test timeout — fake both so the doctor test
+// below returns instantly. Only doctor uses these two functions, so the
+// remaining tests in this file are unaffected.
+vi.mock('../src/utils/aws.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        checkAwsCredentials: vi.fn(async () => ({ accountId: '123456789012', region: 'us-east-2' })),
+    };
+});
+
+vi.mock('../src/utils/system.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, checkDependency: vi.fn(async () => true) };
+});
+
 describe('programmatic command context', () => {
     let consoleSpies;
     let exitSpy;
