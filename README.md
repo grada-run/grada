@@ -94,7 +94,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 
 | Command | What it does |
 | ------- | ------------ |
-| [`apply`](./apps/docs/src/content/docs/cli/apply.md) | Provisions your AWS infrastructure and prints the live URLs (`--dry-run` previews topology and cost). |
+| [`apply`](./apps/docs/src/content/docs/cli/apply.md) (`deploy`) | Provisions your AWS infrastructure and prints the live URLs (`--dry-run` previews topology and cost; refuses asleep environments without `--force`). |
 | [`secrets push` / `pull` / `audit`](./apps/docs/src/content/docs/cli/secrets.md) | Encrypts `.env` files into Secrets Manager, syncs them back, and diffs drift. |
 | [`doctor`](./apps/docs/src/content/docs/cli/doctor.md) | Verifies Docker, Terraform, the AWS CLI, and git are installed — and that AWS credentials are active. |
 | [`diagnose`](./apps/docs/src/content/docs/cli/diagnose.md) (`wtf`) | Explains a failing ECS deployment from the stopped task and its logs. |
@@ -108,10 +108,10 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`db import`](./apps/docs/src/content/docs/cli/db.md) | Streams a local dump or remote database into your private instance over an SSM tunnel. |
 | [`db backup` / `db restore`](./apps/docs/src/content/docs/cli/db.md) | Snapshot checkpoints and Terraform-pinned restores (cluster-aware for Aurora). |
 | [`gc`](./apps/docs/src/content/docs/cli/gc.md) | Deletes orphaned ECR images, log groups, and EIPs — dry-run first, explicit confirmation only. |
-| [`sleep` / `wake`](./apps/docs/src/content/docs/cli/sleep.md) | Pauses an environment to $0 compute and restores exact replica counts (`--skip-db`, `--no-wait`). |
+| [`sleep` / `wake`](./apps/docs/src/content/docs/cli/sleep.md) | Pauses an environment to $0 compute and restores exact replica counts (`--skip-db`, `--no-wait`, `--strict`). |
 | [`drift`](./apps/docs/src/content/docs/cli/drift.md) | Flags out-of-band AWS changes locally or daily in CI (`--setup`). |
 | [`alerts`](./apps/docs/src/content/docs/cli/alerts.md) | Scaffolds an SNS topic + alarm with email and chat-webhook delivery on every target (`--email`, `--webhook`, `--threshold`). |
-| [`add`](./apps/docs/src/content/docs/cli/add.md) | Attaches S3, DynamoDB, Redis, SQS, Bedrock, SES, or scheduled cron jobs without writing Terraform. |
+| [`add`](./apps/docs/src/content/docs/cli/add.md) | Attaches S3, DynamoDB, Redis, SQS, Bedrock, SES, scheduled cron jobs, or a relational database (`db:postgres`, `db:mysql`, `db:aurora-postgresql`) without writing Terraform. |
 | [`domain`](./apps/docs/src/content/docs/cli/domain.md) | Attaches a custom domain with automated ACM TLS (Route 53 or external DNS). |
 | [`destroy`](./apps/docs/src/content/docs/cli/destroy.md) | Tears down AWS resources to stop billing (state bucket optionally retained). |
 | [`eject`](./apps/docs/src/content/docs/cli/eject.md) | Strips `grada` metadata, leaving pure Terraform and Actions files. |
@@ -204,11 +204,15 @@ MCP registry listings (Smithery, mcp.so, Glama, Anthropic directory) are in prog
 ## 🛡️ Telemetry & Privacy
 By default, `grada` collects anonymous, hashed usage data to help improve the CLI (e.g., framework presets used, deployment success rates). **No codebase files, AWS credentials, or personal data are ever collected.**
 
-To opt out, simply append the flag:
+To opt out persistently on this machine (covers every run, including editor MCP servers):
+```bash
+grada telemetry off
+```
+To opt out of a single run, append the flag:
 ```bash
 npx grada-run --no-telemetry
 ```
-To opt out of every run at once, set `DO_NOT_TRACK=1` (or `DO_NOT_TRACK=true`) in your environment instead.
+To opt out via the environment instead, set `DO_NOT_TRACK=1`. Check the current state anytime with `grada telemetry status`.
 
 ---
 

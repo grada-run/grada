@@ -138,6 +138,7 @@ describe('runDoctor', () => {
                 'doctor_run',
                 expect.objectContaining({
                     success: true,
+                    auth_timed_out: false,
                     check_terraform: true,
                     check_aws_cli: true,
                     check_aws_auth: true,
@@ -148,6 +149,9 @@ describe('runDoctor', () => {
                     total_failed: 0,
                 })
             );
+            const [, timingProps] = vi.mocked(trackEvent).mock.calls[0];
+            expect(typeof timingProps.duration_ms).toBe('number');
+            expect(timingProps.duration_ms).toBeGreaterThanOrEqual(0);
             const [, successProps] = vi.mocked(trackEvent).mock.calls[0];
             expect(successProps).not.toHaveProperty('error_code');
             expect(successProps).not.toHaveProperty('reason');
@@ -430,12 +434,31 @@ describe('runDoctor', () => {
                     success: false,
                     error_code: 'AWS_CLI_UNCONFIGURED',
                     check_aws_auth: false,
+                    auth_timed_out: true,
                     failed_checks: ['aws_auth'],
                 })
             );
         } finally {
             restore();
             vi.useRealTimers();
+        }
+    });
+
+    it('marks fast credential failures as not timed out', async () => {
+        mockBinaries({ auth: false });
+        const { restore } = captureLog();
+        try {
+            await runDoctor();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'doctor_run',
+                expect.objectContaining({
+                    success: false,
+                    check_aws_auth: false,
+                    auth_timed_out: false,
+                })
+            );
+        } finally {
+            restore();
         }
     });
 

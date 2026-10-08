@@ -25,7 +25,7 @@ import { failCommand } from '../utils/command.js';
 import { getFrameworkWarning } from '../utils/warnings.js';
 import { provisionStateBucket } from '../utils/aws.js';
 import { generateTemplates } from '../utils/generator.js';
-import { handleExistingFiles } from '../utils/backup.js';
+import { handleExistingFiles, writeInitManifest } from '../utils/backup.js';
 import { estimateMonthlyCost, parseTerraformConfig, renderDryRunPreview } from '../utils/visualizer.js';
 import { getTargetDirectory, getProjectConfig, promptWorkerCommand } from '../utils/prompts.js';
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
@@ -425,7 +425,7 @@ export async function mainStack(input = {}) {
     const buildDir = detectedFramework?.buildDir || 'dist';
 
     // 6. Handle Backups & Provision Remote State
-    await handleExistingFiles(dirConfig.targetDir, isHeadless);
+    await handleExistingFiles(dirConfig.targetDir, isHeadless, { force: initOptions.force });
 
     const s = spinner();
     s.start('Provisioning infrastructure...');
@@ -502,6 +502,10 @@ export async function mainStack(input = {}) {
             console.log(color.green('✅ Scaffolded .github/workflows/drift.yml (scheduled IaC drift detection)'));
         }
     }
+
+    // 7b2. Record content hashes of everything generated above so a later
+    // re-run can distinguish pristine output from hand edits (F3).
+    writeInitManifest(dirConfig.targetDir);
 
     // 7c. Print-only stack preview when addons were scaffolded (default
     // no-addon output is untouched).

@@ -26,4 +26,15 @@ describe('CLI Executable', () => {
         expect(content).toContain('--target <ecs|lambda|static>');
         expect(content).toContain('Fargate vs Lambda');
     });
+
+    it('documents the telemetry opt-out in help text and routes the command', () => {
+        const cliPath = path.resolve(__dirname, '../bin/cli.js');
+        const content = fs.readFileSync(cliPath, 'utf8');
+
+        expect(content).toContain('telemetry off|on|status');
+        expect(content).toContain('--no-telemetry');
+        expect(content).toContain('DO_NOT_TRACK=1');
+        expect(content).toContain("positionalArgs[0] === 'telemetry'");
+        expect(content).toContain('runTelemetry');
+    });
 });

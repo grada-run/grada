@@ -10,6 +10,7 @@ Two layers of deployment safety: your infrastructure rolls back bad deployments 
 - Your ECS service ships with a deployment circuit breaker — if a new deployment fails its health checks, AWS automatically rolls it back without you lifting a finger.
 - `rollback` takes you back to a previous task definition revision on demand: pass a revision number, or pick from an interactive list showing each revision's container image and registration date.
 - In automation and CI (or with `--headless`), it defaults to the most recent older revision with no prompt.
+- On a fresh stack it says so precisely instead of failing opaquely: a service on its only revision reports the revision number and suggests deploying again to create rollback history; a never-deployed service points you to `grada apply`.
 - Resolves its inputs automatically: cluster (`<project-name>-cluster`, overridable via `ECS_CLUSTER`), service (`<project-name>-service`, overridable via `ECS_SERVICE`), and region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`). `--workspace` targets a PR-preview environment's namespaced service.
 - Watches the rollback deployment until it stabilizes (up to 5 minutes), and points you to `status` and `logs` if it fails or times out.
 - ECS only: on `--target lambda` projects the command exits with the Lambda-native alternative — redeploy a previous image with `aws lambda update-function-code` (list SHA tags via `aws ecr describe-images`). On `--target static` projects it exits with the same guard — static sites have no revisions, so push to redeploy.

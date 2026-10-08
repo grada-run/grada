@@ -12,6 +12,9 @@ jobs:
   build-and-publish:
     needs: [validate]
     runs-on: ubuntu-latest
+    # Our own test runs must never emit telemetry, whatever a step spawns.
+    env:
+      DO_NOT_TRACK: '1'
     permissions:
       contents: read
       id-token: write
@@ -28,9 +31,9 @@ jobs:
       - name: Upgrade NPM for OIDC
         run: npm install -g npm@latest
 
-      - name: Inject Telemetry Key
-        run: sed -i "s/___POSTHOG_INGESTION_KEY___/${{ secrets.POSTHOG_KEY }}/g" src/core/telemetry.js
-        
+      # NOTE: the PostHog ingestion key is a public client key baked into
+      # src/core/telemetry.js on purpose — every distribution channel ships
+      # working telemetry with no publish-time injection step.
       - name: Install dependencies
         run: npm install
 
@@ -47,7 +50,6 @@ jobs:
       - name: Render templates for IaC scanning
         env:
           CI_MOCK_AWS: 'true'
-          DO_NOT_TRACK: '1'
         run: |
           SCAN_ROOT=$(mktemp -d)
           mkdir -p "$SCAN_ROOT/ecs" "$SCAN_ROOT/lambda" "$SCAN_ROOT/static"

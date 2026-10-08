@@ -89,26 +89,30 @@ function dedupedCheckDependency(binary) {
 // hang into a clean `false` instead of a wedged `doctor` run.
 export const AWS_AUTH_TIMEOUT_MS = 15000;
 
-// SDK equivalent of `aws sts get-caller-identity`: true only when active,
+// SDK equivalent of `aws sts get-caller-identity`: ok only when active,
 // valid credentials resolve (honors CI_MOCK_AWS like every other caller).
 // Never throws, never hangs past AWS_AUTH_TIMEOUT_MS, and never surfaces
-// identity or error text — the caller only ever sees the boolean, so
-// missing credentials, timeouts, EACCES, and even non-Error rejections
-// all collapse to `false` and the telemetry payload still compiles.
+// identity or error text — missing credentials, EACCES, and even
+// non-Error rejections collapse to ok:false, while a hung credential
+// chain additionally reports timedOut:true so telemetry can tell "no
+// credentials" apart from "the SDK hung" (IMDS blackholes, SSO wrappers).
 async function checkAwsAuthSafe(timeoutMs = AWS_AUTH_TIMEOUT_MS) {
     let timer = null;
     try {
         return await Promise.race([
             Promise.resolve()
                 .then(() => checkAwsCredentials())
-                .then(() => true, () => false),
+                .then(
+                    () => ({ ok: true, timedOut: false }),
+                    () => ({ ok: false, timedOut: false })
+                ),
             new Promise((resolve) => {
-                timer = setTimeout(() => resolve(false), timeoutMs);
+                timer = setTimeout(() => resolve({ ok: false, timedOut: true }), timeoutMs);
                 if (timer && typeof timer.unref === 'function') timer.unref();
             }),
         ]);
     } catch {
-        return false;
+        return { ok: false, timedOut: false };
     } finally {
         if (timer !== null) clearTimeout(timer);
     }
@@ -120,10 +124,11 @@ async function checkAwsAuthSafe(timeoutMs = AWS_AUTH_TIMEOUT_MS) {
 // telemetry compiles.
 async function runCheckSafe(check) {
     try {
-        return {
-            ...check,
-            ok: check.binary ? await dedupedCheckDependency(check.binary) : await checkAwsAuthSafe(),
-        };
+        if (check.binary) {
+            return { ...check, ok: await dedupedCheckDependency(check.binary) };
+        }
+        const auth = await checkAwsAuthSafe();
+        return { ...check, ok: auth.ok, timedOut: auth.timedOut };
     } catch {
         return { ...check, ok: false };
     }
@@ -162,6 +167,7 @@ export async function runDoctor() {
 async function runDoctorMain() {
     intro(color.bgCyan(color.black(' grada ☁️  ')));
 
+    const startMs = Date.now();
     const s = spinner();
     s.start('Running pre-flight checks...');
 
@@ -234,6 +240,11 @@ async function runDoctorMain() {
     try {
         trackEvent('doctor_run', {
             success,
+            // Wall-clock cost of the checks plus whether the credential
+            // probe hit its timeout: a green run that took 14s and a red
+            // run that failed fast look identical without these two.
+            duration_ms: Date.now() - startMs,
+            auth_timed_out: results.some((check) => check.id === 'aws_auth' && check.timedOut === true),
             ...checkFlags,
             ...failureProps,
             passed_checks: passedChecks,

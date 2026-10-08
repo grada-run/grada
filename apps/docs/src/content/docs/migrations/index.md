@@ -13,7 +13,7 @@ Every migration answers the same two questions: **where does the app run** (comp
 | Vercel Static Export | `--target static` | Same framework guides + [Static-Site Hosting](/grada/guides/static-hosting/) |
 | Vercel full-stack / steady traffic | `--target ecs` | Same framework guides |
 | Heroku web dyno (+ worker dyno) | `--target ecs` | [Heroku Procfile](/grada/migrations/heroku-procfile-to-aws/) |
-| Heroku Postgres / Redis | `--needsDatabase` / `db:redis` | [Heroku Procfile](/grada/migrations/heroku-procfile-to-aws/) (`db import`) |
+| Heroku Postgres / Redis | `--needsDatabase` (or `add db:postgres` later) / `db:redis` | [Heroku Procfile](/grada/migrations/heroku-procfile-to-aws/) (`db import`) |
 | `docker-compose.yml` services | `--target ecs` (sidecars co-located) | [Docker Compose](/grada/guides/docker-compose/) |
 
 ## Storage and service mapping

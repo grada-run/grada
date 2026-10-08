@@ -10,6 +10,9 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # Our own test runs must never emit telemetry, whatever a step spawns.
+    env:
+      DO_NOT_TRACK: '1'
     strategy:
       matrix:
         framework: [nestjs, nextjs, nuxt, node, svelte, static, python, django, rails, go]
@@ -35,7 +38,6 @@ jobs:
       - name: Scaffold app (${{ matrix.framework }})
         env:
           CI_MOCK_AWS: 'true'
-          DO_NOT_TRACK: '1'
         run: |
           TMPROOT=$(mktemp -d)
           APP_DIR="$TMPROOT/test-app-${{ matrix.framework }}"
@@ -122,6 +124,9 @@ jobs:
 
   validate-addons:
     runs-on: ubuntu-latest
+    # Our own test runs must never emit telemetry, whatever a step spawns.
+    env:
+      DO_NOT_TRACK: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -144,7 +149,6 @@ jobs:
       - name: Scaffold backend with all addons
         env:
           CI_MOCK_AWS: 'true'
-          DO_NOT_TRACK: '1'
         run: |
           TMPROOT=$(mktemp -d)
           APP_DIR="$TMPROOT/test-app-addons"
@@ -180,6 +184,9 @@ jobs:
 
   validate-engines:
     runs-on: ubuntu-latest
+    # Our own test runs must never emit telemetry, whatever a step spawns.
+    env:
+      DO_NOT_TRACK: '1'
     strategy:
       matrix:
         db-engine: [mysql, aurora-postgresql]
@@ -205,7 +212,6 @@ jobs:
       - name: Scaffold app (${{ matrix.db-engine }})
         env:
           CI_MOCK_AWS: 'true'
-          DO_NOT_TRACK: '1'
         run: |
           TMPROOT=$(mktemp -d)
           APP_DIR="$TMPROOT/test-app-engine-${{ matrix.db-engine }}"
@@ -230,6 +236,9 @@ jobs:
         run: tflint
   validate-lambda:
     runs-on: ubuntu-latest
+    # Our own test runs must never emit telemetry, whatever a step spawns.
+    env:
+      DO_NOT_TRACK: '1'
     strategy:
       matrix:
         include:
@@ -276,7 +285,6 @@ jobs:
       - name: Scaffold lambda app (${{ matrix.name }})
         env:
           CI_MOCK_AWS: 'true'
-          DO_NOT_TRACK: '1'
         run: |
           TMPROOT=$(mktemp -d)
           APP_DIR="$TMPROOT/test-app-lambda-${{ matrix.name }}"

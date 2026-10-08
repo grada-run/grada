@@ -19,6 +19,9 @@ import {
     ensureSleepGitignore,
     computeAutoRestartAt,
     formatUtcTimestamp,
+    requireAwakeEnvironment,
+    resolveTargetIntercept,
+    formatSkipMessage,
     RDS_AUTO_RESTART_MS,
 } from '../src/utils/sleep-state.js';
 import { estimateSleepSavings } from '../src/utils/visualizer.js';
@@ -1098,5 +1101,45 @@ describe('runWake on --target static projects', () => {
         expect(exitSpy).not.toHaveBeenCalled();
         const output = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
         expect(output).toContain('is a static target — no compute or database to wake');
+    });
+});
+
+describe('requireAwakeEnvironment', () => {
+    it('returns the ledger entry when asleep, null when awake', () => {
+        const dir = makeTmp();
+        expect(requireAwakeEnvironment(dir, 'default')).toBeNull();
+        const entry = { env: 'default', services: { app: 1, worker: 0 } };
+        writeSleepState(dir, { default: entry });
+        expect(requireAwakeEnvironment(dir, 'default')).toEqual(entry);
+        expect(requireAwakeEnvironment(dir, 'staging')).toBeNull();
+    });
+});
+
+describe('resolveTargetIntercept', () => {
+    it.each([
+        ['static always intercepts', { computeTarget: 'static' }, 'static-target'],
+        ['lambda + skipDb intercepts', { computeTarget: 'lambda', skipDb: true }, 'lambda-skip-db'],
+        ['lambda with no database intercepts', { computeTarget: 'lambda', dbProbed: true, dbTarget: null }, 'lambda-no-database'],
+        ['lambda with a database proceeds', { computeTarget: 'lambda', dbProbed: true, dbTarget: { id: 'x' } }, null],
+        ['lambda with a failed probe proceeds', { computeTarget: 'lambda', dbProbed: false }, null],
+        ['ecs always proceeds', { computeTarget: 'ecs' }, null],
+    ])('%s', (_label, input, expected) => {
+        const result = resolveTargetIntercept(input);
+        expect(expected === null ? result : result?.reason).toEqual(expected);
+    });
+});
+
+describe('formatSkipMessage', () => {
+    it.each([
+        ['static-target', 'sleep', 'myapp is a static target — no compute or database to sleep. Nothing to do.'],
+        ['static-target', 'wake', 'myapp is a static target — no compute or database to wake. Nothing to do.'],
+        ['lambda-skip-db', 'sleep', 'Lambda compute is already scale-to-zero and --skip-db was passed — nothing to sleep.'],
+        ['lambda-skip-db', 'wake', 'Lambda compute is already scale-to-zero and --skip-db was passed — nothing to wake.'],
+        ['lambda-no-database', 'sleep', 'No databases found for myapp — and Lambda compute is already scale-to-zero. Nothing to do.'],
+        ['lambda-no-database', 'wake', 'No databases found for myapp — and Lambda compute needs no wake-up. Nothing to do.'],
+        ['already-awake', 'wake', 'myapp is already awake — nothing to restore. Nothing to do.'],
+    ])('%s/%s keeps the historical wording', (reason, verb, expected) => {
+        const message = stripVTControlCharacters(formatSkipMessage({ reason, appPrefix: 'myapp', verb }));
+        expect(message).toContain(expected);
     });
 });

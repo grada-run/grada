@@ -119,18 +119,34 @@ export function isActiveEnvValue(value) {
 }
 
 // Distinguishes real CI pipelines from local shells/agents that set CI=true.
-// Precedence: specific providers first, then generic CI, then none.
+// Precedence: specific providers first, then generic CI, then none. A bare
+// CI=true with no vendor marker reports generic_ci — treat that as
+// untrusted origin (unknown runner or a dev box), never as confirmed CI.
 export function detectCiProvider(env = process.env) {
     if (isActiveEnvValue(env.GITHUB_ACTIONS)) return 'github_actions';
     if (isActiveEnvValue(env.GITLAB_CI)) return 'gitlab_ci';
     if (isActiveEnvValue(env.CIRCLECI)) return 'circleci';
     if (isActiveEnvValue(env.JENKINS_URL)) return 'jenkins';
+    if (isActiveEnvValue(env.BUILDKITE)) return 'buildkite';
+    if (isActiveEnvValue(env.TF_BUILD)) return 'azure_pipelines';
+    if (isActiveEnvValue(env.BITBUCKET_BUILD_NUMBER)) return 'bitbucket';
+    if (isActiveEnvValue(env.TEAMCITY_VERSION)) return 'teamcity';
+    if (isActiveEnvValue(env.TRAVIS)) return 'travis_ci';
+    if (isActiveEnvValue(env.CODEBUILD_BUILD_ID)) return 'aws_codebuild';
     if (isActiveEnvValue(env.CI) || isActiveEnvValue(env.CONTINUOUS_INTEGRATION)) return 'generic_ci';
     return 'none';
 }
 
 export function isTestEnv(env = process.env) {
     return Boolean(env.VITEST || env.NODE_ENV === 'test');
+}
+
+// True only under our own test runner. VITEST is set by vitest itself and
+// inherited by any real CLI subprocess a test spawns — unlike NODE_ENV,
+// which staging bots legitimately set, it never appears in third-party
+// automation, so it is the structural "this is our test suite" signal.
+export function isRunningUnderVitest(env = process.env) {
+    return isActiveEnvValue(env.VITEST);
 }
 
 export function defaultTelemetryIdPath() {
@@ -210,9 +226,77 @@ export function resolveDistinctId({ ciProvider = detectCiProvider(), testEnv = i
     return resolved;
 }
 
+export function defaultConfigPath() {
+    return path.join(os.homedir(), '.grada', 'config.json');
+}
+
+export function resolveConfigPath(env = process.env) {
+    const override = env?.GRADA_CONFIG_PATH;
+    if (typeof override === 'string' && override.trim() !== '') return override;
+    return defaultConfigPath();
+}
+
+let cachedTelemetryPreference;
+
+// Reads the persistent `telemetry` preference: true/false when the config
+// file states a boolean, null when the file is missing, malformed, or
+// silent. Never throws — a broken config reads as "no preference" (the
+// hard switch stays DO_NOT_TRACK) so telemetry can never fail a command.
+export function readTelemetryPreference({ configPath, readFile = fs.readFileSync } = {}) {
+    try {
+        const parsed = JSON.parse(readFile(configPath ?? resolveConfigPath(), 'utf-8'));
+        if (parsed && typeof parsed === 'object' && typeof parsed.telemetry === 'boolean') {
+            return parsed.telemetry;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+export function resetTelemetryPreferenceCache() {
+    cachedTelemetryPreference = undefined;
+}
+
+function telemetryPreference() {
+    if (cachedTelemetryPreference === undefined) {
+        cachedTelemetryPreference = readTelemetryPreference();
+    }
+    return cachedTelemetryPreference;
+}
+
+// Persists the user's telemetry preference, preserving any other config
+// keys. Throws on filesystem failure so the `telemetry` command can report
+// it — unlike the sending path, an explicit user action must fail loudly.
+export function writeTelemetryPreference(enabled, { configPath } = {}) {
+    const target = configPath ?? resolveConfigPath();
+    let current = {};
+    try {
+        const parsed = JSON.parse(fs.readFileSync(target, 'utf-8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) current = parsed;
+    } catch {
+        // Missing or malformed: start fresh rather than failing the opt-out.
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify({ ...current, telemetry: enabled === true })}\n`, 'utf-8');
+    resetTelemetryPreferenceCache();
+}
+
+// The effective kill switch, first match wins: an explicit DO_NOT_TRACK
+// beats everything (CI and harness silence can never be overridden by a
+// stale config), then our own test runner, then the persistent preference.
+// Always ambient: tests pin it via process.env plus the cache reset below.
+export function telemetryState() {
+    if (isActiveEnvValue(process.env.DO_NOT_TRACK)) return { enabled: false, source: 'env' };
+    if (isRunningUnderVitest()) return { enabled: false, source: 'vitest' };
+    if (telemetryPreference() === false) return { enabled: false, source: 'config' };
+    return { enabled: true, source: 'default' };
+}
+
 export function trackEvent(eventName, properties) {
-    // 1. Respect privacy standards
-    if (process.env.DO_NOT_TRACK === '1' || process.env.DO_NOT_TRACK === 'true') {
+    // 1. Respect privacy standards: an explicit DO_NOT_TRACK, our own test
+    // runner, or a persistent user opt-out each suppress silently.
+    if (!telemetryState().enabled) {
         return;
     }
 

@@ -1,6 +1,10 @@
 import fsSync from 'fs';
 import path from 'path';
+import color from 'picocolors';
+import { outro } from '@clack/prompts';
 import { normalizeOptions } from './args.js';
+import { failCommand } from './command.js';
+import { trackSuccess } from '../core/telemetry.js';
 import { resolveProjectName, resolveWorkspaceSuffix, resolveCluster, resolveService, resolveCwd } from './resolvers.js';
 import { resolveDbIdentifier, resolveDbClusterIdentifier } from './rds.js';
 
@@ -97,6 +101,91 @@ export function removeSleepStateEntry(cwd = process.cwd(), envKey = 'default') {
     delete state[envKey];
     writeSleepState(cwd, state);
     return true;
+}
+
+// Shared awake gate for commands that must not run against an asleep
+// environment (apply). Pure over the ledger: returns the env's ledger
+// entry when asleep, null when awake. Callers own prompting/exit.
+export function requireAwakeEnvironment(cwd = process.cwd(), envKey = 'default') {
+    const state = readSleepState(cwd);
+    const entry = state?.[envKey];
+    return entry && typeof entry === 'object' ? entry : null;
+}
+
+// Pure target-intercept decision shared by sleep/wake: static targets
+// never have anything to do; Lambda short-circuits on --skip-db or when
+// the read-only RDS probe found no database. Returns null when the
+// command must proceed, otherwise `{ reason }`.
+export function resolveTargetIntercept({ computeTarget, skipDb = false, dbTarget = null, dbProbed = false } = {}) {
+    if (computeTarget === 'static') return { reason: 'static-target' };
+    if (computeTarget === 'lambda') {
+        if (skipDb) return { reason: 'lambda-skip-db' };
+        if (dbProbed && !dbTarget) return { reason: 'lambda-no-database' };
+    }
+    return null;
+}
+
+// Single skip-message vocabulary. Strings are byte-identical to the
+// historical per-command intercepts; `verb` is 'sleep' or 'wake'.
+export function formatSkipMessage({ reason, appPrefix, verb }) {
+    if (reason === 'static-target') {
+        return `\n  ${color.cyan(appPrefix)} is a static target — no compute or database to ${verb}. Nothing to do.\n`;
+    }
+    if (reason === 'lambda-skip-db') {
+        return `\n  Lambda compute is already scale-to-zero and ${color.cyan('--skip-db')} was passed — nothing to ${verb}.\n`;
+    }
+    if (reason === 'lambda-no-database') {
+        const tail = verb === 'wake'
+            ? 'and Lambda compute needs no wake-up. Nothing to do.\n'
+            : 'and Lambda compute is already scale-to-zero. Nothing to do.\n';
+        return `\n  No databases found for ${color.cyan(appPrefix)} — ${tail}`;
+    }
+    if (reason === 'already-awake') {
+        return `\n  ${color.cyan(appPrefix)} is already awake — nothing to restore. Nothing to do.\n`;
+    }
+    return `\n  Nothing to do.\n`;
+}
+
+const SKIP_TELEMETRY_BASE = {
+    sleep: { ecs_scaled: 0, db_stopped: false, db_kind: 'none', cron_paused: false, scaling_suspended: false },
+    wake: { ecs_restored: 0, db_started: false, waited: false, cron_resumed: false, scaling_resumed: false },
+};
+
+const SKIP_RESULT_BASE = {
+    sleep: { ecsScaled: 0, dbStopped: false },
+    wake: { ecsRestored: 0, dbStarted: false, waited: false, cronResumed: false, scalingResumed: false },
+};
+
+// Shared skip reporting for sleep/wake intercepts: prints the standard
+// message, records a successful run with the `skipped` reason, and
+// returns the standard result. Under `strict`, skips exit 2 (distinct
+// from failure's 1) while telemetry still records success —
+// strictness is a caller contract, not a command failure.
+export async function reportSleepWakeSkip({ command, reason, target, projectName, region, strict = false }) {
+    const message = formatSkipMessage({ reason, appPrefix: target.appPrefix, verb: command });
+    console.log(message);
+    await trackSuccess(`${command}_run`, {
+        projectName,
+        env_kind: target.envKind,
+        ...SKIP_TELEMETRY_BASE[command],
+        skipped: reason,
+    });
+    outro(color.green('Done.'));
+    const result = {
+        ok: true,
+        env: target.envKey,
+        cluster: target.cluster,
+        region,
+        ...SKIP_RESULT_BASE[command],
+        skipped: reason,
+    };
+    if (strict !== true && strict !== 'true') return result;
+    return failCommand({
+        print: () => {},
+        exitCode: 2,
+        reason,
+        resultExtra: { ...result, ok: false, skipped: reason },
+    });
 }
 
 // Keeps the advisory sleep ledger out of git. Returns true when the file was

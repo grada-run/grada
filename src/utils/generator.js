@@ -164,6 +164,51 @@ resource "random_password" "db_password" {
     return content.replace(/\n{3,}/g, '\n\n');
 }
 
+// Shared engine reference table for relational databases, used by both
+// init-time generation and post-init `add db:*` so the two can never
+// diverge on template choice, resource addresses, ports, or attribute
+// names. Unknown engines fall back to postgres (mirrors init).
+export function resolveDbEngineRefs(engine) {
+    const normalized = engine === 'mysql' || engine === 'aurora-postgresql' ? engine : 'postgres';
+    const isCluster = normalized === 'aurora-postgresql';
+    return {
+        engine: normalized,
+        isCluster,
+        dbRef: isCluster ? 'aws_rds_cluster.postgres' : 'aws_db_instance.postgres',
+        dbHostAttr: isCluster ? 'endpoint' : 'address',
+        dbNameAttr: isCluster ? 'database_name' : 'db_name',
+        dbPort: normalized === 'mysql' ? '3306' : '5432',
+        template: normalized === 'postgres' ? 'terraform/database.tf' : `terraform/database-${normalized}.tf`,
+    };
+}
+
+// Container/Lambda environment + secret entries for `engine`. Env
+// entries use inject*EnvVars value encoding (a lone "${...}" renders
+// as a bare HCL reference, anything else stays quoted); secrets carry
+// literal HCL `valueFrom` fragments. Lambda carries the DB user and
+// password as plain variables (no Secrets Manager VPC endpoint).
+export function buildDbEntries(engine, target = 'ecs') {
+    const refs = resolveDbEngineRefs(engine);
+    const env = [
+        { name: 'DB_HOST', value: `\${${refs.dbRef}.${refs.dbHostAttr}}` },
+        { name: 'DB_PORT', value: refs.dbPort },
+        { name: 'DB_NAME', value: `\${${refs.dbRef}.${refs.dbNameAttr}}` },
+    ];
+    if (refs.engine !== 'postgres') env.push({ name: 'DB_ENGINE', value: refs.engine });
+    if (target === 'lambda') {
+        env.push({ name: 'DB_USER', value: 'dbadmin' });
+        env.push({ name: 'DB_PASSWORD', value: '${random_password.db_password.result}' });
+        return { env, secrets: [] };
+    }
+    return {
+        env,
+        secrets: [
+            { name: 'DB_USER', valueFrom: `\${${refs.dbRef}.master_user_secret[0].secret_arn}:username::` },
+            { name: 'DB_PASSWORD', valueFrom: `\${${refs.dbRef}.master_user_secret[0].secret_arn}:password::` },
+        ],
+    };
+}
+
 // Adds the `random` provider to a rendered backend.tf (Lambda + database
 // projects only, for `random_password.db_password`). No-op when present.
 export function addRandomProvider(backendTfContent) {
@@ -261,19 +306,14 @@ export async function generateTemplates(targetDir, config) {
     // compute to connect, so a database is never generated for them (init
     // warns and drops the request; this guard covers direct API callers).
     if (config.NEEDS_DATABASE && !isStatic) {
-        const dbEngine = config.DB_ENGINE === 'mysql' || config.DB_ENGINE === 'aurora-postgresql'
-            ? config.DB_ENGINE
-            : 'postgres';
-        const dbTemplate = dbEngine === 'postgres'
-            ? 'terraform/database.tf'
-            : `terraform/database-${dbEngine}.tf`;
-        filesToProcess.push({ src: dbTemplate, dest: 'terraform/database.tf' });
+        const dbRefs = resolveDbEngineRefs(config.DB_ENGINE);
+        const dbEngine = dbRefs.engine;
+        filesToProcess.push({ src: dbRefs.template, dest: 'terraform/database.tf' });
 
-        const isCluster = dbEngine === 'aurora-postgresql';
-        const dbRef = isCluster ? 'aws_rds_cluster.postgres' : 'aws_db_instance.postgres';
-        const dbHostAttr = isCluster ? 'endpoint' : 'address';
-        const dbNameAttr = isCluster ? 'database_name' : 'db_name';
-        const dbPort = dbEngine === 'mysql' ? '3306' : '5432';
+        const dbRef = dbRefs.dbRef;
+        const dbHostAttr = dbRefs.dbHostAttr;
+        const dbNameAttr = dbRefs.dbNameAttr;
+        const dbPort = dbRefs.dbPort;
 
         if (isLambda) {
             // Lambda `environment.variables` map shape. The password flows as

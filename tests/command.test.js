@@ -38,6 +38,7 @@ describe('failCommand', () => {
         expect(trackEvent).toHaveBeenCalledWith('add_run', {
             capability: 'x',
             error_code: 'BAD',
+            reason: 'bad-input',
             success: false,
         });
         expect(flushTelemetry).toHaveBeenCalled();
@@ -79,10 +80,42 @@ describe('failCommand', () => {
         expect(trackEvent).toHaveBeenCalledWith('db_migrate_run', {
             cmd_source: 'explicit',
             error_code: 'MIGRATION_TASK_FAILED',
+            reason: 'migration-task-failed',
             exit_code: 3,
             success: false,
         });
         expect(exitSpy).toHaveBeenCalledWith(3);
+    });
+
+    it('derives the telemetry reason from the error code without touching the result', async () => {
+        const result = await failCommand({
+            message: 'failed',
+            event: 'gc_run',
+            errorCode: 'SOME_NEW_FAILURE',
+            noExit: true,
+        });
+        expect(trackEvent).toHaveBeenCalledWith('gc_run', {
+            error_code: 'SOME_NEW_FAILURE',
+            reason: 'some-new-failure',
+            success: false,
+        });
+        expect(result).toEqual({ ok: false, exitCode: 1 });
+    });
+
+    it('lets extra override the stamped reason', async () => {
+        await failCommand({
+            message: 'failed',
+            event: 'gc_run',
+            errorCode: 'SOME_FAILURE',
+            reason: 'some-failure',
+            extra: { reason: 'custom-reason' },
+            noExit: true,
+        });
+        expect(trackEvent).toHaveBeenCalledWith('gc_run', {
+            error_code: 'SOME_FAILURE',
+            reason: 'custom-reason',
+            success: false,
+        });
     });
 
     it('failProjectNotInitialized emits the structured not-initialized failure', async () => {
@@ -90,6 +123,7 @@ describe('failCommand', () => {
         expect(result).toEqual({ ok: false, reason: 'project-not-initialized' });
         expect(trackEvent).toHaveBeenCalledWith('logs_streamed', {
             error_code: 'PROJECT_NOT_INITIALIZED',
+            reason: 'project-not-initialized',
             success: false,
         });
         expect(flushTelemetry).toHaveBeenCalled();

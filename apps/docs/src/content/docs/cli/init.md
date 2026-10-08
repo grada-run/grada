@@ -46,6 +46,7 @@ Not sure which to pick? Choose `ecs` for steady or latency-sensitive traffic, lo
 | Flag | Description |
 | ---- | ----------- |
 | `--headless` | Bypass all interactive prompts (for CI/CD and automation). |
+| `--force` | Re-run over modified files: back them up and regenerate. Headless re-runs refuse without it (`MODIFIED_TREE`); interactive re-runs list the modified files first. See [Re-running Init Safely](/grada/guides/rerun-init/). |
 | `--framework=<name>` | `node`, `nestjs`, `nextjs`, `nuxt`, `svelte`, `python`, `django`, `rails`, `go`, `static`. |
 | `--region=<region>` | AWS region (e.g. `us-east-1`). |
 | `--port=<port>` | Container port your app listens on. |

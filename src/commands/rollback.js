@@ -45,6 +45,21 @@ function formatRegisteredAt(registeredAt) {
     return '';
 }
 
+// Discovers ACTIVE revisions older than the deployed one, newest first.
+// Pure over the injected client so the filtering is unit-testable
+// without the prompt flow.
+export async function discoverEligibleRevisions(ecsClient, family, currentRevNum) {
+    const listResp = await ecsClient.send(new ListTaskDefinitionsCommand({
+        familyPrefix: family,
+        status: 'ACTIVE',
+        sort: 'DESC',
+        maxResults: 10,
+    }));
+    return (listResp.taskDefinitionArns || []).filter(
+        (arn) => Number(arn.split(':').pop()) < currentRevNum
+    );
+}
+
 export async function runRollback(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
@@ -150,20 +165,12 @@ export async function runRollback(input = {}) {
             s.stop(`Resolved revision ${targetRevisionNum}.`);
         } else {
             // Case B: discover eligible older revisions.
-            const listResp = await ecsClient.send(new ListTaskDefinitionsCommand({
-                familyPrefix: family,
-                status: 'ACTIVE',
-                sort: 'DESC',
-                maxResults: 10,
-            }));
-            const eligibleArns = (listResp.taskDefinitionArns || []).filter(
-                (arn) => Number(arn.split(':').pop()) < currentRevNum
-            );
+            const eligibleArns = await discoverEligibleRevisions(ecsClient, family, currentRevNum);
 
             if (eligibleArns.length === 0) {
                 s.stop(color.yellow('No previous revisions.'));
                 return failCommand({
-                    message: `\n⚠ No previous task definition revisions found for family ${family}. Cannot roll back.\n`,
+                    message: `\n⚠ Family ${family} is on revision ${currentRevNum} with no previous ACTIVE revisions — nothing to roll back to.\n  Deploy again to create rollback history.\n`,
                     tone: 'yellow',
                     event: 'rollback_run',
                     telemetry: { projectName, error_code: 'NO_PRIOR_REVISIONS' },

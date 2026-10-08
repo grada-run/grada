@@ -15,6 +15,8 @@ import {
     resolveSleepTarget,
     readSleepState,
     removeSleepStateEntry,
+    resolveTargetIntercept,
+    reportSleepWakeSkip,
 } from '../utils/sleep-state.js';
 import {
     readCronScheduleName,
@@ -32,7 +34,7 @@ export function parseWakeArgs(argv = []) {
     if (args[0] === 'wake') args.shift();
     const { options, rest } = parseFlags(args, {
         string: ['project-name', 'cluster', 'service', 'db-identifier', 'region', 'workspace'],
-        boolean: ['skip-db', 'wait', 'no-wait'],
+        boolean: ['skip-db', 'wait', 'no-wait', 'strict'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.env = positionals[0];
@@ -77,31 +79,15 @@ export async function runWake(input = {}) {
 
     // Scale-to-zero intercept: static targets have no compute or database,
     // so there is nothing to wake. Runs before any state read or AWS call.
-    if (isStatic) {
-        console.log(`\n  ${color.cyan(target.appPrefix)} is a static target — no compute or database to wake. Nothing to do.\n`);
-        await trackSuccess('wake_run', {
+    if (resolveTargetIntercept({ computeTarget })) {
+        return reportSleepWakeSkip({
+            command: 'wake',
+            reason: 'static-target',
+            target,
             projectName,
-            env_kind: target.envKind,
-            ecs_restored: 0,
-            db_started: false,
-            waited: false,
-            cron_resumed: false,
-            scaling_resumed: false,
-            skipped: 'static-target',
-        });
-        outro(color.green('Done.'));
-        return {
-            ok: true,
-            env: target.envKey,
-            cluster: target.cluster,
             region,
-            ecsRestored: 0,
-            dbStarted: false,
-            waited: false,
-            cronResumed: false,
-            scalingResumed: false,
-            skipped: 'static-target',
-        };
+            strict: options.strict,
+        });
     }
 
     // FinOps Preservation (mirrors sleep): Lambda compute needs no
@@ -112,31 +98,16 @@ export async function runWake(input = {}) {
     let lambdaDbTarget = null;
     let lambdaDbProbed = false;
     if (isLambda) {
-        if (skipDb) {
-            console.log(`\n  Lambda compute is already scale-to-zero and ${color.cyan('--skip-db')} was passed — nothing to wake.\n`);
-            await trackSuccess('wake_run', {
+        const skipDbIntercept = resolveTargetIntercept({ computeTarget, skipDb });
+        if (skipDbIntercept) {
+            return reportSleepWakeSkip({
+                command: 'wake',
+                reason: skipDbIntercept.reason,
+                target,
                 projectName,
-                env_kind: target.envKind,
-                ecs_restored: 0,
-                db_started: false,
-                waited: false,
-                cron_resumed: false,
-                scaling_resumed: false,
-                skipped: 'lambda-skip-db',
-            });
-            outro(color.green('Done.'));
-            return {
-                ok: true,
-                env: target.envKey,
-                cluster: target.cluster,
                 region,
-                ecsRestored: 0,
-                dbStarted: false,
-                waited: false,
-                cronResumed: false,
-                scalingResumed: false,
-                skipped: 'lambda-skip-db',
-            };
+                strict: options.strict,
+            });
         }
         try {
             lambdaDbTarget = await findDbTarget(rdsClient, {
@@ -147,31 +118,21 @@ export async function runWake(input = {}) {
         } catch {
             lambdaDbProbed = false;
         }
-        if (lambdaDbProbed && !lambdaDbTarget) {
-            console.log(`\n  No databases found for ${color.cyan(target.appPrefix)} — and Lambda compute needs no wake-up. Nothing to do.\n`);
-            await trackSuccess('wake_run', {
+        const noDbIntercept = resolveTargetIntercept({
+            computeTarget,
+            skipDb,
+            dbTarget: lambdaDbTarget,
+            dbProbed: lambdaDbProbed,
+        });
+        if (noDbIntercept) {
+            return reportSleepWakeSkip({
+                command: 'wake',
+                reason: noDbIntercept.reason,
+                target,
                 projectName,
-                env_kind: target.envKind,
-                ecs_restored: 0,
-                db_started: false,
-                waited: false,
-                cron_resumed: false,
-                scaling_resumed: false,
-                skipped: 'lambda-no-database',
-            });
-            outro(color.green('Done.'));
-            return {
-                ok: true,
-                env: target.envKey,
-                cluster: target.cluster,
                 region,
-                ecsRestored: 0,
-                dbStarted: false,
-                waited: false,
-                cronResumed: false,
-                scalingResumed: false,
-                skipped: 'lambda-no-database',
-            };
+                strict: options.strict,
+            });
         }
     }
 
@@ -184,6 +145,53 @@ export async function runWake(input = {}) {
     // rdsClient was resolved above for the Lambda probe.
     const runSync = options.spawnSyncImpl || spawnSync;
 
+    // Already-awake fast path: with no ledger entry the environment was
+    // never put to sleep by this CLI (or was already woken). Probe live
+    // state instead of blindly restoring 1/1 defaults — a second wake
+    // must not issue UpdateService calls. Only a missing ledger reaches
+    // this probe, so normal ledger-driven wakes are untouched. When
+    // nothing is found at all, fall through to the main flow so the
+    // NOTHING_TO_WAKE guidance is preserved.
+    let probedServices = null;
+    let probedDb = null;
+    let probedDbSettled = false;
+    if (!entry) {
+        const appSvc = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.appService);
+        const workerSvc = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.workerService);
+        probedServices = { app: appSvc, worker: workerSvc };
+        if (!skipDb) {
+            try {
+                probedDb = lambdaDbProbed
+                    ? lambdaDbTarget
+                    : await findDbTarget(rdsClient, {
+                        dbIdentifier: target.dbIdentifier,
+                        dbClusterIdentifier: target.dbClusterIdentifier,
+                    });
+                probedDbSettled = true;
+            } catch {
+                probedDbSettled = false;
+            }
+        } else {
+            probedDbSettled = true;
+        }
+        const foundServices = [appSvc, workerSvc].filter(Boolean);
+        const foundDb = probedDbSettled && probedDb;
+        if (probedDbSettled && (foundServices.length > 0 || foundDb)) {
+            const servicesAwake = foundServices.every((service) => (service.desiredCount ?? 0) > 0);
+            const dbAwake = !foundDb || foundDb.status !== 'stopped';
+            if (servicesAwake && dbAwake) {
+                return reportSleepWakeSkip({
+                    command: 'wake',
+                    reason: 'already-awake',
+                    target,
+                    projectName,
+                    region,
+                    strict: options.strict,
+                });
+            }
+        }
+    }
+
     const s = spinner();
     s.start(`Waking ${target.envKey}...`);
 
@@ -193,14 +201,16 @@ export async function runWake(input = {}) {
         let dbTarget = null;
         let dbStarted = false;
         if (!skipDb) {
-            // Lambda already probed above — reuse it so a wake run
-            // describes RDS exactly once.
-            dbTarget = lambdaDbProbed
-                ? lambdaDbTarget
-                : await findDbTarget(rdsClient, {
-                dbIdentifier: target.dbIdentifier,
-                dbClusterIdentifier: target.dbClusterIdentifier,
-            });
+            // Probes above are reused so a wake run describes RDS exactly
+            // once: the no-ledger probe first, then the Lambda pre-probe.
+            dbTarget = probedDbSettled
+                ? probedDb
+                : lambdaDbProbed
+                    ? lambdaDbTarget
+                    : await findDbTarget(rdsClient, {
+                        dbIdentifier: target.dbIdentifier,
+                        dbClusterIdentifier: target.dbClusterIdentifier,
+                    });
             if (dbTarget && dbTarget.status === 'stopped') {
                 if (dbTarget.kind === 'cluster') {
                     await rdsClient.send(new StartDBClusterCommand({ DBClusterIdentifier: dbTarget.id }));
@@ -254,12 +264,16 @@ export async function runWake(input = {}) {
         const desiredApp = isLambda ? (entry?.services?.app ?? 0) : Math.max(1, entry?.services?.app ?? 1);
         const desiredWorker = isLambda ? (entry?.services?.worker ?? 0) : Math.max(1, entry?.services?.worker ?? 1);
         const restored = [];
-        for (const [serviceName, desired] of [
-            [target.appService, desiredApp],
-            [target.workerService, desiredWorker],
+        for (const [key, serviceName, desired] of [
+            ['app', target.appService, desiredApp],
+            ['worker', target.workerService, desiredWorker],
         ]) {
             if (desired <= 0) continue;
-            const service = await fetchActiveService(ecsClient, target.cluster, serviceName);
+            // The no-ledger probe above already fetched both services —
+            // reuse it instead of describing them a second time.
+            const service = probedServices
+                ? probedServices[key]
+                : await fetchActiveService(ecsClient, target.cluster, serviceName);
             if (!service) continue;
             await ecsClient.send(new UpdateServiceCommand({
                 cluster: target.cluster,

@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Our own test runs must never emit telemetry, whatever a step spawns.
+    env:
+      DO_NOT_TRACK: '1'
     steps:
       - uses: actions/checkout@v4
       
@@ -31,7 +34,6 @@ jobs:
       - name: Render templates for IaC scanning
         env:
           CI_MOCK_AWS: 'true'
-          DO_NOT_TRACK: '1'
         run: |
           SCAN_ROOT=$(mktemp -d)
           mkdir -p "$SCAN_ROOT/ecs" "$SCAN_ROOT/lambda" "$SCAN_ROOT/static"

@@ -42,6 +42,7 @@ You can append any of these flags to customize the generated architecture. These
 | `--from-email=<email>` | Default SES sender address. | `noreply@<domain>` |
 | `--setup-ci-migrate` | Wire the pre-deploy database migration gate into the generated workflow when a database and migration command are detected. | `false` |
 | `--setup-ci-drift` | Scaffold `.github/workflows/drift.yml`: a daily 06:00 UTC `terraform plan` check that opens (or updates) a GitHub Issue labeled `iac-drift` on drift and closes it when resolved. | `false` |
+| `--force` | Re-run over modified files: back them up and regenerate. Without it, headless re-runs over hand edits fail with `MODIFIED_TREE`, and re-runs over ejected projects fail with `EJECTED_PROJECT`. | `false` |
 
 *(Note: Boolean flags like `--needsDatabase` and `--enablePrPreviews` can be passed alone or as `--flag=true`).*
 
@@ -76,9 +77,12 @@ npx grada-run --headless --framework=nestjs --needsDatabase \
 npx grada-run apply --auto-approve   # provision without the preview confirmation
 npx grada-run destroy --yes          # tear down compute and delete the state bucket
 npx grada-run eject --yes            # strip CLI metadata without confirming
+npx grada-run sleep --strict         # exit 2 (not 0) when there is nothing to pause
 ```
 
 Each command also accepts `--headless` directly (implying the approval flag). Without an approval flag, a non-interactive invocation cancels with no changes rather than destroying anything.
+
+Two gates commonly bite scripted pipelines: `apply` fails with `SLEEPING_ENVIRONMENT` on an asleep environment (wake first, or pass `--force`), and re-running setup over modified files fails with `MODIFIED_TREE` (pass `--force` to back up and regenerate).
 
 ## See also
 

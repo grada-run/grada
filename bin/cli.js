@@ -5,7 +5,7 @@ import { destroyStack } from '../src/commands/destroy.js';
 import { runDoctor } from '../src/commands/doctor.js';
 import { pushSecrets, pullSecrets, auditSecrets } from '../src/commands/secrets.js';
 import { ejectStack } from '../src/commands/eject.js';
-import { applyStack } from '../src/commands/apply.js';
+import { applyStack, parseApplyArgs } from '../src/commands/apply.js';
 import { runDiagnose } from '../src/commands/diagnose.js';
 import { syncAi } from '../src/commands/sync-ai.js';
 import { runLogs, parseLogsArgs } from '../src/commands/logs.js';
@@ -21,6 +21,7 @@ import { runWake, parseWakeArgs } from '../src/commands/wake.js';
 import { runDrift, parseDriftArgs } from '../src/commands/drift.js';
 import { runAlerts, parseAlertsArgs } from '../src/commands/alerts.js';
 import { runMcp, parseMcpArgs } from '../src/commands/mcp.js';
+import { runTelemetry } from '../src/commands/telemetry.js';
 import { parseCliArgs } from '../src/core/parser.js';
 
 const HELP_TEXT = [
@@ -31,7 +32,8 @@ const HELP_TEXT = [
     '',
     'Commands:',
     '  init                 Provision infrastructure and CI/CD pipelines',
-    '  apply                Apply infrastructure changes (--auto-approve)',
+    '  apply                Apply infrastructure changes (--auto-approve, --force)',
+    '  deploy               Alias of apply',
     '  destroy              Tear down infrastructure (--yes)',
     '  doctor               Run pre-flight dependency checks',
     '  logs [service]       Stream CloudWatch logs (--tail, -f/--follow, --error, --since, --region)',
@@ -45,8 +47,8 @@ const HELP_TEXT = [
     '  db backup            Create an RDS snapshot checkpoint (--id, --timeout, --no-wait)',
     '  db restore           Restore the database from a snapshot ([snapshot-id], --yes)',
     '  gc                   Discover and delete orphaned ECR images, log groups, and Elastic IPs (--region)',
-    '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes)',
-    '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait)',
+    '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes, --strict)',
+    '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait, --strict)',
     '  drift                Detect Terraform drift locally or scaffold scheduled checks (--setup)',
     '  alerts               Scaffold SNS + alarm notifications for any target (--email, --webhook, --threshold, --force)',
     '  add <capability>     Provision a modular addon (storage:s3, db:dynamodb, db:redis, queue:sqs, ai:bedrock, email:ses, cron) [--model <id>, --list-models, --refresh]',
@@ -58,9 +60,14 @@ const HELP_TEXT = [
     '  eject                Eject to self-managed configs (--yes)',
     '  sync-ai              Sync AI assistant rules',
     '  mcp [--install <editor>] [--transport stdio|http]  Start the MCP server (stdio default; http serves /mcp for tunnels), or write IDE config (windsurf, zed, cursor, vscode, claude-desktop, gemini-cli)',
+    '  telemetry off|on|status  Persistently disable, enable, or inspect anonymous usage telemetry',
     '',
     'Init options:',
     '  --target <ecs|lambda|static>  Compute architecture: always-on Fargate + ALB (~$31/mo flat, best for steady traffic), scale-to-zero Lambda + API Gateway ($0/mo idle, best for sporadic traffic), or zero-compute S3 + CloudFront (static sites only). Tradeoffs: Stack Architecture guide → Fargate vs Lambda.',
+    '  --force  Re-run over modified files: back them up and regenerate (headless re-runs refuse without it)',
+    '',
+    'Global options:',
+    '  --no-telemetry  Disable telemetry for this run only (persistent: grada telemetry off; every run: DO_NOT_TRACK=1)',
 ];
 
 const rawArgs = process.argv.slice(2);
@@ -72,6 +79,11 @@ if (parsed.hasNoTelemetry) {
 process.env.CLI_COMMAND = parsed.baseCommand;
 
 const { positionalArgs, isHeadless, isDryRun, isPreconfigured, autoApprove, yes: confirmYes, headlessOptions, initOptions } = parsed;
+
+// Command aliases resolved before dispatch, so future aliases are one
+// line. Telemetry keeps the literal typed command (parsed.baseCommand).
+const COMMAND_ALIASES = { deploy: 'apply' };
+const dispatchCommand = COMMAND_ALIASES[positionalArgs[0]] ?? positionalArgs[0];
 
 function parseRegionFlag(args) {
     for (let i = 0; i < args.length; i++) {
@@ -108,8 +120,8 @@ if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     const envFile = positionalArgs[2] || '.env';
     const projectName = path.basename(process.cwd());
     runCommand(auditSecrets(envFile, projectName, { region: parseRegionFlag(rawArgs) }));
-} else if (positionalArgs[0] === 'apply') {
-    runCommand(applyStack({ isDryRun, ...(autoApprove ? { autoApprove: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
+} else if (dispatchCommand === 'apply') {
+    runCommand(applyStack({ ...parseApplyArgs(rawArgs), isDryRun, ...(autoApprove ? { autoApprove: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'doctor') {
     runCommand(runDoctor());
 } else if (positionalArgs[0] === 'destroy') {
@@ -146,6 +158,8 @@ if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     runCommand(runAlerts({ ...parseAlertsArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'mcp') {
     runCommand(runMcp(parseMcpArgs(rawArgs)));
+} else if (positionalArgs[0] === 'telemetry') {
+    runCommand(runTelemetry({ subcommand: positionalArgs[1], ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h')) {
     console.log(HELP_TEXT.join('\n'));
 } else {

@@ -47,6 +47,7 @@ describe('CLI Argument Parser', () => {
         expect(headless.isPreconfigured).toBe(true);
         expect(headless.initOptions).toEqual({
             with: [],
+            force: false,
             model: null,
             domain: null,
             zoneId: null,
@@ -56,6 +57,7 @@ describe('CLI Argument Parser', () => {
             setupCiMigrate: false,
             setupCiDrift: false,
         });
+        expect(parseCliArgs(['--force']).initOptions.force).toBe(true);
 
         const interactive = parseCliArgs(['init', '--with', 'db:redis']);
         expect(interactive.isPreconfigured).toBe(false);

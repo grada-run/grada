@@ -69,6 +69,7 @@ export default defineConfig({
             { label: 'drift', slug: 'cli/drift' },
             { label: 'alerts', slug: 'cli/alerts' },
             { label: 'mcp', slug: 'cli/mcp' },
+            { label: 'telemetry', slug: 'cli/telemetry' },
           ],
         },
         {

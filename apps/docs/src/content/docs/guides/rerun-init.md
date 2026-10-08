@@ -7,6 +7,10 @@ sidebar:
 
 Re-running `npx grada-run` to change region, size, or framework is safe and predictable: setup never merges with your existing generated files. It backs them up, regenerates from scratch, and tells you exactly what moved.
 
+## The generation manifest
+
+Every run records content hashes of what it generated in `.grada/manifest.json` (gitignored), so a re-run can tell pristine output from your hand edits (or addon wiring added later via `grada add`).
+
 ## The conflict prompt
 
 When setup finds any of `terraform/`, `Dockerfile`, or `.github/workflows/deploy.yml` in the target directory (`src/utils/backup.js`), it lists the conflicts and offers two choices:
@@ -14,7 +18,13 @@ When setup finds any of `terraform/`, `Dockerfile`, or `.github/workflows/deploy
 - **Backup & Regenerate** — each conflicting path is renamed with a timestamp suffix (e.g. `terraform.bak.1726771200000`), then fresh files are generated.
 - **Cancel** — exits immediately with no changes.
 
-In `--headless` mode there is no prompt: existing files are backed up automatically. Either way, nothing is ever merged or partially overwritten.
+When files differ from the manifest, the prompt names them (`Modified since generation: terraform/main.tf, Dockerfile`), so you know exactly what is at stake before you answer.
+
+In `--headless` mode there is no prompt: unmodified trees regenerate silently (idempotent), but modified trees fail with `MODIFIED_TREE` instead of clobbering your edits — re-run with `--force` to back up and regenerate. Either way, nothing is ever merged or partially overwritten. Projects created before manifests existed keep the historical auto-backup behavior.
+
+## Ejected projects
+
+Re-running setup on an [ejected](/grada/cli/eject/) project would re-apply managed metadata to your vanilla Terraform, so it needs an explicit opt-in: interactive runs confirm first, headless runs fail with `EJECTED_PROJECT` unless `--force` is passed.
 
 ## Backups stay local
 

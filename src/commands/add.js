@@ -5,8 +5,10 @@ import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, select, text, spinner, log, cancel, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, isActiveEnvValue, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf, isComputeTarget, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf, isComputeTarget, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
+import { resolveDbEngineRefs, buildDbEntries, convertDatabaseTfForLambda, addRandomProvider } from '../utils/generator.js';
 import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars } from '../utils/addons.js';
+import { stripTerraformMetadata, readEjectedMarker } from '../utils/terraform-metadata.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, isValidFromEmail, parseDomainTf } from '../utils/domains.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
@@ -57,6 +59,15 @@ export function sanitizeCronName(raw) {
 }
 
 const TEMPLATES_DIR = path.join(__dirname, '../../templates/terraform/addons');
+const TERRAFORM_TEMPLATES_ROOT = path.join(__dirname, '../../templates');
+
+// Post-init relational capabilities. Deliberately outside ADDON_REGISTRY:
+// RDS is costed and displayed via hasDb, not as an addon.
+export const DB_ADD_ENGINES = {
+    'db:postgres': 'postgres',
+    'db:mysql': 'mysql',
+    'db:aurora-postgresql': 'aurora-postgresql',
+};
 
 export function parseAddArgs(argv = []) {
     const args = normalizeArgv(argv);
@@ -247,6 +258,183 @@ export function injectLambdaEnvVars(tfContent, envEntries = [], options = {}) {
         upsertBlock = upsertLambdaVarInBlock(upsertBlock, name, value);
     }
     return updated.slice(0, upsertBounds.openIdx) + upsertBlock + updated.slice(upsertBounds.closeIdx + 1);
+}
+
+// Scans for the `concat(` call of a `secrets = concat(...)` assignment,
+// skipping strings and comments the way hcl.js does. Returns the index
+// just past the opening paren, or -1.
+function findSecretsConcatStart(block) {
+    const text = String(block ?? '');
+    let i = 0;
+    const skipString = (idx) => {
+        let j = idx + 1;
+        while (j < text.length) {
+            if (text[j] === '\\') { j += 2; continue; }
+            if (text[j] === '"') return j + 1;
+            j++;
+        }
+        return j;
+    };
+    const skipLineComment = (idx) => {
+        const end = text.indexOf('\n', idx);
+        return end === -1 ? text.length : end + 1;
+    };
+    const skipTrivia = (idx) => {
+        let j = idx;
+        while (j < text.length) {
+            const ch = text[j];
+            if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') { j++; continue; }
+            if (ch === '#') { j = skipLineComment(j); continue; }
+            if (ch === '/' && text[j + 1] === '/') { j = skipLineComment(j); continue; }
+            if (ch === '/' && text[j + 1] === '*') {
+                const end = text.indexOf('*/', j + 2);
+                j = end === -1 ? text.length : end + 2;
+                continue;
+            }
+            return j;
+        }
+        return j;
+    };
+    while (i < text.length) {
+        const ch = text[i];
+        if (ch === '"') { i = skipString(i); continue; }
+        if (ch === '#' || (ch === '/' && (text[i + 1] === '/' || text[i + 1] === '*'))) {
+            i = skipTrivia(i);
+            continue;
+        }
+        if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_-]/.test(text[i - 1]))) {
+            let end = i + 1;
+            while (end < text.length && /[A-Za-z0-9_-]/.test(text[end])) end++;
+            if (text.slice(i, end) === 'secrets') {
+                let j = skipTrivia(end);
+                if (text[j] !== '=') { i = end; continue; }
+                j = skipTrivia(j + 1);
+                if (!text.startsWith('concat', j)) { i = end; continue; }
+                j = skipTrivia(j + 'concat'.length);
+                if (text[j] === '(') return j + 1;
+            }
+            i = end;
+            continue;
+        }
+        i++;
+    }
+    return -1;
+}
+
+// Finds the last top-level `[...]` array inside a `concat(...)` call
+// starting at `fromIdx` (just past the opening paren) — the TASK_SECRETS
+// slot. Returns `{ openIdx, closeIdx }` or null.
+function lastConcatArray(block, fromIdx) {
+    const text = String(block ?? '');
+    let pair = null;
+    let i = fromIdx;
+    let parenDepth = 1;
+    const skipString = (idx) => {
+        let j = idx + 1;
+        while (j < text.length) {
+            if (text[j] === '\\') { j += 2; continue; }
+            if (text[j] === '"') return j + 1;
+            j++;
+        }
+        return j;
+    };
+    // Balances one `[...]` pair starting at `openIdx`, skipping strings;
+    // returns the closing index or -1.
+    const matchBracket = (openIdx) => {
+        let depth = 0;
+        let j = openIdx;
+        while (j < text.length) {
+            const ch = text[j];
+            if (ch === '"') { j = skipString(j); continue; }
+            if (ch === '[') depth++;
+            else if (ch === ']') {
+                depth--;
+                if (depth === 0) return j;
+            }
+            j++;
+        }
+        return -1;
+    };
+    while (i < text.length && parenDepth > 0) {
+        const ch = text[i];
+        if (ch === '"') { i = skipString(i); continue; }
+        if (ch === '#') {
+            const end = text.indexOf('\n', i);
+            i = end === -1 ? text.length : end + 1;
+            continue;
+        }
+        if (ch === '(') { parenDepth++; i++; continue; }
+        if (ch === ')') {
+            parenDepth--;
+            if (parenDepth === 0) break;
+            i++;
+            continue;
+        }
+        if (ch === '[') {
+            const close = matchBracket(i);
+            if (close === -1) return pair;
+            pair = { openIdx: i, closeIdx: close };
+            i = close + 1;
+            continue;
+        }
+        i++;
+    }
+    return pair;
+}
+
+function findSecretsArrayBounds(content, resource) {
+    const block = content.slice(resource.openIdx, resource.closeIdx + 1);
+    const concatStart = findSecretsConcatStart(block);
+    if (concatStart !== -1) {
+        const pair = lastConcatArray(block, concatStart);
+        if (!pair) return null;
+        return { openIdx: resource.openIdx + pair.openIdx, closeIdx: resource.openIdx + pair.closeIdx };
+    }
+    // Fallback for hand-shaped `secrets = [...]` blocks without concat.
+    const direct = findArrayBounds(block, 'secrets');
+    if (!direct) return null;
+    return { openIdx: resource.openIdx + direct.openIdx, closeIdx: resource.openIdx + direct.closeIdx };
+}
+
+// Inserts { name, valueFrom } entries into the `secrets` array of
+// `aws_ecs_task_definition."<taskDefinitionName>"`, rendered in the JSON
+// spelling init uses. Same-name entries are replaced in place when their
+// value differs (engine switches); identical entries are left untouched
+// so reruns stay idempotent. Returns the content unchanged when the
+// resource or array cannot be found.
+export function injectContainerSecrets(tfContent, secretEntries = [], taskDefinitionName = 'app') {
+    if (!Array.isArray(secretEntries) || secretEntries.length === 0) return tfContent;
+    const content = String(tfContent ?? '');
+    const resource = findResourceBlock(content, 'aws_ecs_task_definition', taskDefinitionName);
+    if (!resource) return content;
+    const bounds = findSecretsArrayBounds(content, resource);
+    if (!bounds) return content;
+    const inner = content.slice(bounds.openIdx + 1, bounds.closeIdx);
+    let updatedInner = inner;
+    const missing = [];
+    for (const { name, valueFrom } of secretEntries) {
+        const rendered = `{ "name": "${name}", "valueFrom": "${valueFrom}" }`;
+        if (updatedInner.includes(rendered)) continue;
+        const namePattern = new RegExp(`(?:"name"|name)\\s*[:=]\\s*"${escapeRegExp(name)}"`);
+        const match = namePattern.exec(updatedInner);
+        if (!match) {
+            missing.push(rendered);
+            continue;
+        }
+        const objBounds = enclosingBraceBounds(updatedInner, match.index);
+        if (!objBounds) {
+            missing.push(rendered);
+            continue;
+        }
+        updatedInner = updatedInner.slice(0, objBounds.openIdx) + rendered + updatedInner.slice(objBounds.closeIdx + 1);
+    }
+    if (missing.length > 0) {
+        const stripped = updatedInner.replace(/\s+$/, '');
+        const glue = stripped === '' || stripped.endsWith(',') ? '' : ',';
+        updatedInner = `${stripped}${glue}\n          ${missing.join(',\n          ')}\n        `;
+    }
+    if (updatedInner === inner) return content;
+    return content.slice(0, bounds.openIdx + 1) + updatedInner + content.slice(bounds.closeIdx);
 }
 
 // `vpc_config` attaching the Lambda function to the VPC subnets so it can
@@ -709,6 +897,7 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
                 }
             }
         }
+        let selectedInteractively = false;
         if (domain === null) {
             if (!isInteractive) {
                 return {
@@ -721,6 +910,7 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
             }
             const answer = await text({ message: 'Enter the domain for Amazon SES (e.g. example.com):' });
             if (isCancel(answer)) return { ok: false, cancelled: true };
+            selectedInteractively = true;
             if (typeof answer !== 'string' || !answer.trim()) {
                 return {
                     ok: false,
@@ -768,7 +958,14 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
             },
             envVars: resolveAddonEnvVars(capability, { region, sesFromEmail: fromEmail }),
             upsertKeys,
-            meta: { domain, zoneId, fromEmail },
+            meta: {
+                domain,
+                zoneId,
+                fromEmail,
+                explicitDomain: explicitDomain !== undefined,
+                explicitFromEmail: explicitFromEmail !== undefined,
+                selectedInteractively,
+            },
         };
     }
 
@@ -866,6 +1063,24 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
     };
 }
 
+// Re-run gate for Day-2 switching: capabilities with upsert keys
+// (ADDON_UPSERT_KEYS) may re-run without --force when the user
+// explicitly supplied new values for them; everything else needs
+// --force. Note db:redis has upsert keys but no value flags, so it
+// always needs --force (region-only changes too).
+export function canUpsertAddon(capability, meta = {}) {
+    const keys = ADDON_UPSERT_KEYS[capability];
+    if (!Array.isArray(keys) || keys.length === 0) return false;
+    const explicit = normalizeOptions(meta);
+    if (capability === 'ai:bedrock') {
+        return Boolean(explicit.explicitModel || explicit.selectedInteractively);
+    }
+    if (capability === 'email:ses') {
+        return Boolean(explicit.explicitDomain || explicit.explicitFromEmail || explicit.selectedInteractively);
+    }
+    return false;
+}
+
 // Renders the model catalog as scannable provider sections: one header line
 // per provider plus a `• id — hint` bullet per model. Returns one block per
 // provider (callers log each block once, keeping bullets contiguous instead
@@ -921,12 +1136,17 @@ async function runAddMain(input = {}) {
 
     intro(color.bgCyan(color.black(' grada add 🧩 ')));
 
-    if (!addon) {
+    // Post-init relational capabilities bypass the registry (they take a
+    // dedicated pipeline after the terraform guard below).
+    if (!addon && !DB_ADD_ENGINES[capability]) {
         return failCommand({
             noExit,
             print: () => {
                 console.log(color.red(`\n✖ Unknown capability "${capability || 'none'}".`));
                 console.log(`  Supported capabilities: ${color.cyan(Object.keys(ADDON_REGISTRY).join(', '))}\n`);
+                if (/^db:/i.test(capability || '')) {
+                    console.log(color.dim('  Relational databases: db:postgres, db:mysql, db:aurora-postgresql (see also db:dynamodb, db:redis).\n'));
+                }
             },
             event: 'add_run',
             telemetry: { capability: capability || 'none', error_code: 'UNSUPPORTED_CAPABILITY' },
@@ -994,6 +1214,16 @@ async function runAddMain(input = {}) {
         });
     }
 
+    // Post-init relational databases take a dedicated pipeline (they are
+    // not registry addons): render database.tf and wire the container.
+    const dbEngine = DB_ADD_ENGINES[capability];
+    if (dbEngine) {
+        return runAddDatabase(
+            { cwd, projectName, region: resolveRegion(options, cwd), force, noExit },
+            dbEngine
+        );
+    }
+
     // Long-running workers require ECS: the generator never renders
     // worker.tf for Lambda/static targets, so warn now instead of
     // provisioning a queue that nothing will ever drain.
@@ -1017,27 +1247,28 @@ async function runAddMain(input = {}) {
     if (!resolved.ok) return failResolved(resolved);
 
     const targetPath = path.join(cwd, 'terraform', addon.file);
-    if (fsSync.existsSync(targetPath) && !force) {
-        const canSwitchBedrock = capability === 'ai:bedrock' && (resolved.meta.explicitModel || resolved.meta.selectedInteractively);
-        if (!canSwitchBedrock) {
-            return failCommand({
-                noExit,
-                message: `\n⚠ terraform/${addon.file} already exists. Pass --force to overwrite.\n`,
-                tone: 'yellow',
-                event: 'add_run',
-                telemetry: { projectName, capability, error_code: 'ADDON_ALREADY_EXISTS' },
-                reason: 'addon-already-exists',
-                resultExtra: { capability, projectName, region },
-                exitCode: null,
-            });
-        }
+    const addonExists = fsSync.existsSync(targetPath);
+    if (addonExists && !force && !canUpsertAddon(capability, resolved.meta)) {
+        return failCommand({
+            noExit,
+            message: `\n⚠ terraform/${addon.file} already exists. Pass --force to overwrite.\n`,
+            tone: 'yellow',
+            event: 'add_run',
+            telemetry: { projectName, capability, error_code: 'ADDON_ALREADY_EXISTS' },
+            reason: 'addon-already-exists',
+            resultExtra: { capability, projectName, region },
+            exitCode: null,
+        });
     }
 
     const scaffolded = await scaffoldAddon(capability, resolved, { cwd, region });
     const envVars = scaffolded.envVars;
     const envInjected = scaffolded.envInjected;
 
-    console.log(color.green(`\n✅ Created terraform/${addon.file}${envInjected ? ' and injected container environment variables' : ''}.`));
+    if (scaffolded.ejected) {
+        console.log(color.yellow(`\n⚠️  This project was ejected from grada — rendering terraform/${addon.file} without managed headers to match the vanilla tree.`));
+    }
+    console.log(color.green(`\n✅ ${addonExists ? 'Updated' : 'Created'} terraform/${addon.file}${envInjected ? ' and injected container environment variables' : ''}.`));
     if (scaffolded.workerEnvInjected) {
         console.log(`  ${color.dim('worker:')} injected container environment variables into terraform/worker.tf`);
     }
@@ -1058,8 +1289,145 @@ async function runAddMain(input = {}) {
     outro(
         `Run ${color.green('grada apply')} (or commit and push to trigger CI) to provision ${capability}.${envSuffix}`
     );
-    await trackSuccess('add_run', { projectName, capability });
+    await trackSuccess('add_run', { projectName, capability, ...(scaffolded.ejected ? { ejected: true } : {}) });
     return { ok: true, capability, projectName, region, file: `terraform/${addon.file}`, envInjected };
+}
+
+// Quiet database scaffolding pipeline for post-init `add db:*`:
+// renders terraform/database.tf from the engine template, converts it
+// for Lambda targets, and wires DB_HOST/DB_PORT/DB_NAME (+ secrets on
+// ECS) into main.tf and worker.tf. Prints nothing, emits no telemetry,
+// and never exits — runAddDatabase owns banners, telemetry, and failure
+// handling.
+export async function scaffoldDatabase(engine, { cwd } = {}) {
+    const refs = resolveDbEngineRefs(engine);
+    const projectDir = cwd || process.cwd();
+    const mainTfPath = path.join(projectDir, 'terraform', 'main.tf');
+    const workerTfPath = path.join(projectDir, 'terraform', 'worker.tf');
+    const databaseTfPath = path.join(projectDir, 'terraform', 'database.tf');
+    const backendTfPath = path.join(projectDir, 'terraform', 'backend.tf');
+
+    const mainTfContent = await fs.readFile(mainTfPath, 'utf-8');
+    const isLambda = detectComputeTargetFromMainTf(mainTfContent) === 'lambda';
+
+    let rendered = fsSync.readFileSync(path.join(TERRAFORM_TEMPLATES_ROOT, refs.template), 'utf-8');
+    if (isLambda) rendered = convertDatabaseTfForLambda(rendered);
+    // Database templates ship headerless, so ejected trees need no
+    // stripping — only the warning and telemetry below.
+    const ejected = Boolean(readEjectedMarker(projectDir));
+    await fs.mkdir(path.dirname(databaseTfPath), { recursive: true });
+    await fs.writeFile(databaseTfPath, rendered);
+
+    let randomInjected = false;
+    if (isLambda) {
+        const backendTf = readFileSafe(backendTfPath);
+        if (backendTf) {
+            const withRandom = addRandomProvider(backendTf);
+            randomInjected = withRandom !== backendTf;
+            if (randomInjected) await fs.writeFile(backendTfPath, withRandom);
+        }
+    }
+
+    const { env, secrets } = buildDbEntries(refs.engine, isLambda ? 'lambda' : 'ecs');
+    // DB values are deterministic per engine: upsert keys make engine
+    // switches (postgres -> aurora) replace stale values in place while
+    // identical reruns stay untouched.
+    const injectOptions = { upsertKeys: env.map((entry) => entry.name) };
+    let updated = isLambda
+        ? injectLambdaEnvVars(mainTfContent, env, injectOptions)
+        : injectContainerSecrets(injectContainerEnvVars(mainTfContent, env, 'app', injectOptions), secrets, 'app');
+    let vpcInjected = false;
+    if (isLambda) {
+        const withVpc = ensureLambdaVpcConfig(updated);
+        vpcInjected = withVpc !== updated;
+        updated = withVpc;
+    }
+    const envInjected = updated !== mainTfContent;
+    if (envInjected) await fs.writeFile(mainTfPath, updated);
+
+    let workerEnvInjected = false;
+    if (!isLambda && fsSync.existsSync(workerTfPath)) {
+        const workerTfContent = await fs.readFile(workerTfPath, 'utf-8');
+        const updatedWorker = injectContainerSecrets(
+            injectContainerEnvVars(workerTfContent, env, 'worker', injectOptions),
+            secrets,
+            'worker'
+        );
+        workerEnvInjected = updatedWorker !== workerTfContent;
+        if (workerEnvInjected) await fs.writeFile(workerTfPath, updatedWorker);
+    }
+
+    await syncDocCostEstimate(projectDir);
+
+    return {
+        file: 'database.tf',
+        engine: refs.engine,
+        envInjected,
+        workerEnvInjected,
+        vpcInjected,
+        randomInjected,
+        ejected,
+    };
+}
+
+// Post-init `add db:postgres|mysql|aurora-postgresql`: guards, then the
+// scaffoldDatabase pipeline with banners and telemetry.
+export async function runAddDatabase({ cwd, projectName, region, force = false, noExit = false }, engine) {
+    const capability = `db:${engine}`;
+    const targetGuard = guardComputeTarget({
+        cwd,
+        command: `add ${capability}`,
+        supported: ['ecs', 'lambda'],
+        hint: 'Static sites provision no database — static sites needing data need an API backend.',
+    });
+    if (targetGuard) {
+        return failCommand({
+            noExit,
+            message: targetGuard.message,
+            hint: targetGuard.hint,
+            event: 'add_run',
+            telemetry: { projectName, capability, error_code: targetGuard.errorCode },
+            reason: targetGuard.reason,
+            resultExtra: { capability, projectName, region },
+        });
+    }
+    const databaseTfPath = path.join(cwd, 'terraform', 'database.tf');
+    const databaseExists = fsSync.existsSync(databaseTfPath);
+    if (databaseExists && !force) {
+        return failCommand({
+            noExit,
+            message: '\n⚠ terraform/database.tf already exists. Pass --force to overwrite.\n',
+            tone: 'yellow',
+            event: 'add_run',
+            telemetry: { projectName, capability, error_code: 'ADDON_ALREADY_EXISTS' },
+            reason: 'addon-already-exists',
+            resultExtra: { capability, projectName, region },
+            exitCode: null,
+        });
+    }
+    const mainTfContent = readFileSafe(path.join(cwd, 'terraform', 'main.tf')) ?? '';
+    if (!force && /aws_db_instance\.postgres|aws_rds_cluster\.postgres/.test(mainTfContent)) {
+        return failCommand({
+            noExit,
+            message: '\n⚠ main.tf already references a Postgres database. Pass --force to overwrite.\n',
+            tone: 'yellow',
+            event: 'add_run',
+            telemetry: { projectName, capability, error_code: 'DB_ALREADY_REFERENCED' },
+            reason: 'db-already-referenced',
+            resultExtra: { capability, projectName, region },
+            exitCode: null,
+        });
+    }
+    const scaffolded = await scaffoldDatabase(engine, { cwd });
+    if (scaffolded.ejected) {
+        console.log(color.yellow('\n⚠️  This project was ejected from grada — rendering an unmanaged-compatible terraform/database.tf.'));
+    }
+    console.log(color.green(`\n✅ ${databaseExists ? 'Updated' : 'Created'} terraform/database.tf and injected database environment variables.`));
+    outro(
+        `Run ${color.green('grada apply')} (or commit and push to trigger CI) to provision ${capability}. Available in your container as DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.`
+    );
+    await trackSuccess('add_run', { projectName, capability, ...(scaffolded.ejected ? { ejected: true } : {}) });
+    return { ok: true, capability, projectName, region, file: 'terraform/database.tf', envInjected: scaffolded.envInjected };
 }
 
 // Quiet addon scaffolding pipeline shared by `runAdd` and `mainStack`
@@ -1084,10 +1452,15 @@ export async function scaffoldAddon(capability, resolvedOpts, { cwd, region } = 
     const isLambda = detectComputeTargetFromMainTf(mainTfContent) === 'lambda';
     const templateName = capability === 'cron' && isLambda ? 'cron-lambda.tf' : addon.template;
     const templateRaw = fsSync.readFileSync(path.join(TEMPLATES_DIR, templateName), 'utf-8');
-    const rendered = renderAddonTemplate(templateRaw, opts.templateVars || {}, {
+    const renderedRaw = renderAddonTemplate(templateRaw, opts.templateVars || {}, {
         WORKER_AUTOSCALING_BLOCK: renderWorkerAutoscalingBlock(hasWorker === true),
         ...(opts.conditionalBlocks || {}),
     });
+    // Ejected projects own vanilla Terraform: strip managed headers from
+    // the new file so the tree stays consistently unmanaged. Billing docs
+    // and resources are untouched.
+    const ejected = Boolean(readEjectedMarker(projectDir));
+    const rendered = ejected ? `${stripTerraformMetadata(renderedRaw).trim()}\n` : renderedRaw;
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     await fs.writeFile(targetPath, rendered);
 
@@ -1129,6 +1502,7 @@ export async function scaffoldAddon(capability, resolvedOpts, { cwd, region } = 
         envInjected,
         workerEnvInjected,
         vpcInjected,
+        ejected,
     };
 }
 

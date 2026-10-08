@@ -62,6 +62,22 @@ describe('Terraform is installed before grada renders (init shells to terraform 
     });
 });
 
+describe('Our own CI never emits telemetry (job-level DO_NOT_TRACK)', () => {
+    for (const workflow of ['.github/workflows/test.yml', '.github/workflows/publish.yml', '.github/workflows/iac-validation.yml']) {
+        it(`${workflow} silences every runner job above its steps`, () => {
+            const yml = readRepo(workflow);
+            const jobs = yml.split('runs-on: ubuntu-latest').slice(1);
+            expect(jobs.length).toBeGreaterThan(0);
+            for (const job of jobs) {
+                const silenced = job.indexOf("DO_NOT_TRACK: '1'");
+                const steps = job.indexOf('steps:');
+                expect(silenced).toBeGreaterThanOrEqual(0);
+                expect(silenced).toBeLessThan(steps);
+            }
+        });
+    }
+});
+
 describe('Docker templates run as non-root (DS-0002)', () => {
     const dir = path.join(process.cwd(), 'templates', 'docker');
     const files = fs.readdirSync(dir).filter((f) => f.endsWith('.Dockerfile'));

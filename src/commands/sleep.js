@@ -19,6 +19,8 @@ import {
     ensureSleepGitignore,
     computeAutoRestartAt,
     formatUtcTimestamp,
+    resolveTargetIntercept,
+    reportSleepWakeSkip,
 } from '../utils/sleep-state.js';
 import {
     readCronScheduleName,
@@ -36,7 +38,7 @@ export function parseSleepArgs(argv = []) {
     if (args[0] === 'sleep') args.shift();
     const { options, rest } = parseFlags(args, {
         string: ['project-name', 'cluster', 'service', 'db-identifier', 'region', 'workspace'],
-        boolean: ['skip-db', 'wait', 'no-wait', 'yes', 'force', 'headless'],
+        boolean: ['skip-db', 'wait', 'no-wait', 'yes', 'force', 'headless', 'strict'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.env = positionals[0];
@@ -85,28 +87,15 @@ export async function runSleep(input = {}) {
     // Scale-to-zero intercept: static targets have no compute or database,
     // so there is nothing to sleep. Runs before the confirm gate and any
     // AWS call — prompting to take "production offline" would be nonsense.
-    if (isStatic) {
-        console.log(`\n  ${color.cyan(target.appPrefix)} is a static target — no compute or database to sleep. Nothing to do.\n`);
-        await trackSuccess('sleep_run', {
+    if (resolveTargetIntercept({ computeTarget })) {
+        return reportSleepWakeSkip({
+            command: 'sleep',
+            reason: 'static-target',
+            target,
             projectName,
-            env_kind: target.envKind,
-            ecs_scaled: 0,
-            db_stopped: false,
-            db_kind: 'none',
-            cron_paused: false,
-            scaling_suspended: false,
-            skipped: 'static-target',
-        });
-        outro(color.green('Done.'));
-        return {
-            ok: true,
-            env: target.envKey,
-            cluster: target.cluster,
             region,
-            ecsScaled: 0,
-            dbStopped: false,
-            skipped: 'static-target',
-        };
+            strict: options.strict,
+        });
     }
 
     // FinOps Preservation: Lambda compute is already scale-to-zero, but a
@@ -120,28 +109,16 @@ export async function runSleep(input = {}) {
     let lambdaDbTarget = null;
     let lambdaDbProbed = false;
     if (isLambda) {
-        if (skipDb) {
-            console.log(`\n  Lambda compute is already scale-to-zero and ${color.cyan('--skip-db')} was passed — nothing to sleep.\n`);
-            await trackSuccess('sleep_run', {
+        const skipDbIntercept = resolveTargetIntercept({ computeTarget, skipDb });
+        if (skipDbIntercept) {
+            return reportSleepWakeSkip({
+                command: 'sleep',
+                reason: skipDbIntercept.reason,
+                target,
                 projectName,
-                env_kind: target.envKind,
-                ecs_scaled: 0,
-                db_stopped: false,
-                db_kind: 'none',
-                cron_paused: false,
-                scaling_suspended: false,
-                skipped: 'lambda-skip-db',
-            });
-            outro(color.green('Done.'));
-            return {
-                ok: true,
-                env: target.envKey,
-                cluster: target.cluster,
                 region,
-                ecsScaled: 0,
-                dbStopped: false,
-                skipped: 'lambda-skip-db',
-            };
+                strict: options.strict,
+            });
         }
         try {
             lambdaDbTarget = await findDbTarget(rdsClient, {
@@ -152,28 +129,21 @@ export async function runSleep(input = {}) {
         } catch {
             lambdaDbProbed = false;
         }
-        if (lambdaDbProbed && !lambdaDbTarget) {
-            console.log(`\n  No databases found for ${color.cyan(target.appPrefix)} — and Lambda compute is already scale-to-zero. Nothing to do.\n`);
-            await trackSuccess('sleep_run', {
+        const noDbIntercept = resolveTargetIntercept({
+            computeTarget,
+            skipDb,
+            dbTarget: lambdaDbTarget,
+            dbProbed: lambdaDbProbed,
+        });
+        if (noDbIntercept) {
+            return reportSleepWakeSkip({
+                command: 'sleep',
+                reason: noDbIntercept.reason,
+                target,
                 projectName,
-                env_kind: target.envKind,
-                ecs_scaled: 0,
-                db_stopped: false,
-                db_kind: 'none',
-                cron_paused: false,
-                scaling_suspended: false,
-                skipped: 'lambda-no-database',
-            });
-            outro(color.green('Done.'));
-            return {
-                ok: true,
-                env: target.envKey,
-                cluster: target.cluster,
                 region,
-                ecsScaled: 0,
-                dbStopped: false,
-                skipped: 'lambda-no-database',
-            };
+                strict: options.strict,
+            });
         }
     }
 

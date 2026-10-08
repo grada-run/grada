@@ -16,6 +16,7 @@ const { mockSpawn } = vi.hoisted(() => ({
 
 vi.mock('child_process', () => ({
   spawn: mockSpawn,
+  exec: vi.fn(),
   execSync: vi.fn(),
   spawnSync: vi.fn(),
 }));
@@ -296,7 +297,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     );
   });
 
-  it('warns when the environment is asleep but still applies', async () => {
+  it('warns on dry-run when the environment is asleep and still previews (real applies gate instead)', async () => {
     writeProject({
       '.deploy-stack/sleep-state.json': JSON.stringify({ default: { env: 'default' } }),
     });

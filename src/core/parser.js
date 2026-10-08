@@ -97,6 +97,7 @@ export function parseCliArgs(processArgs) {
 
     const initOptions = {
         with: parseWithFlag(),
+        force: getBoolFlag('force') === true,
         model: getValueFlag('model'),
         domain: getValueFlag('domain'),
         zoneId: getValueFlag('zone-id'),

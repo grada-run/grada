@@ -1,18 +1,28 @@
 import path from 'path';
 import fs from 'fs';
-import { intro, outro, spinner, log, cancel, confirm, isCancel } from '@clack/prompts';
+import { intro, outro, spinner, log, cancel, confirm } from '@clack/prompts';
 import color from 'picocolors';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
 import { failCommand, shouldAutoApprove } from '../utils/command.js';
-import { normalizeOptions } from '../utils/args.js';
+import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { spawnSync } from 'child_process';
-import { provisionStateBucket } from '../utils/aws.js';
 import { runTerraformCommand, getTerraformOutputs } from '../utils/terraform.js';
-import { readSleepState, resolveSleepTarget } from '../utils/sleep-state.js';
+import { requireAwakeEnvironment, resolveSleepTarget } from '../utils/sleep-state.js';
+import { promptStateBucketRecovery, recreateStateBucket } from '../utils/recovery.js';
 import { resolveProjectName } from '../utils/resolvers.js';
 import { ensureLambdaSeedImage } from '../utils/lambda-ecr.js';
+import { runWake } from './wake.js';
+
+export function parseApplyArgs(argv = []) {
+    const args = normalizeArgv(argv);
+    if (args[0] === 'apply' || args[0] === 'deploy') args.shift();
+    const { options } = parseFlags(args, {
+        boolean: ['force'],
+    });
+    return { force: false, ...options };
+}
 
 export async function applyStack(input = {}) {
     const options = normalizeOptions(input);
@@ -31,13 +41,57 @@ export async function applyStack(input = {}) {
         });
     }
 
-    // 1b. Warn when this environment is asleep: apply resets the app
-    // desired count while the database stays stopped, so fresh tasks would
-    // crash-loop. Advisory only — the apply still proceeds.
-    const sleepState = readSleepState(targetDir);
+    // 1b. Refuse to apply against an asleep environment: apply resets
+    // the app desired count while the database stays stopped, so fresh
+    // tasks would crash-loop. Headless fails fast; interactive offers to
+    // wake first; --force proceeds with the override in telemetry.
     const sleepTarget = resolveSleepTarget({}, targetDir);
-    if (sleepState[sleepTarget.envKey]) {
-        log.warn(color.yellow(`⚠ Environment "${sleepTarget.envKey}" is asleep. Run ${color.green('npx grada-run wake')} first, or this apply will start tasks against a stopped database.`));
+    const asleepEntry = requireAwakeEnvironment(targetDir, sleepTarget.envKey);
+    if (asleepEntry) {
+        // Dry runs change nothing, so they keep the historical advisory
+        // warning instead of the gate below.
+        if (options.isDryRun) {
+            log.warn(color.yellow(`⚠ Environment "${sleepTarget.envKey}" is asleep. This preview changes nothing; run ${color.green('npx grada-run wake')} before a real apply.`));
+        } else if (options.force === true || options.force === 'true') {
+            log.warn(color.yellow(`⚠ Environment "${sleepTarget.envKey}" is asleep and --force was passed. Tasks will start against a stopped database until you run ${color.green('npx grada-run wake')}.`));
+            trackEvent('forced_apply_while_asleep', {
+                projectName: path.basename(targetDir),
+                env: sleepTarget.envKey,
+            });
+            await flushTelemetry();
+        } else if (shouldAutoApprove(options)) {
+            return failCommand({
+                message: `\n✖ Environment "${sleepTarget.envKey}" is asleep. Apply would start tasks against a stopped database.`,
+                hint: `  Run npx grada-run wake first, or re-run with --force to proceed anyway.\n`,
+                event: 'infrastructure_applied',
+                telemetry: { projectName: path.basename(targetDir) },
+                errorCode: 'SLEEPING_ENVIRONMENT',
+                reason: 'sleeping-environment',
+                resultExtra: { env: sleepTarget.envKey },
+            });
+        } else {
+            const wakeFirst = await confirm({
+                message: `Environment "${sleepTarget.envKey}" is asleep. Wake it now and continue with apply?`,
+                initialValue: true,
+            });
+            if (wakeFirst !== true) {
+                cancel('Apply aborted. The environment is still asleep.');
+                return { ok: false, reason: 'cancelled', env: sleepTarget.envKey };
+            }
+            const wakeImpl = options.wakeImpl || runWake;
+            const woken = await wakeImpl({ cwd: targetDir, env: sleepTarget.envKey });
+            if (!woken || woken.ok !== true) {
+                return failCommand({
+                    message: '\n✖ Wake did not complete — apply aborted.',
+                    hint: '  Resolve the wake failure, then re-run apply.\n',
+                    event: 'infrastructure_applied',
+                    telemetry: { projectName: path.basename(targetDir) },
+                    errorCode: 'WAKE_FAILED',
+                    reason: 'wake-failed',
+                    resultExtra: { env: sleepTarget.envKey, wakeReason: woken?.reason ?? null },
+                });
+            }
+        }
     }
 
     // 2. Read the actual AWS configuration from disk (CPU, Memory, Region, Database)
@@ -142,12 +196,9 @@ export async function applyStack(input = {}) {
 
             trackEvent('recovery_prompted', { type: 'state_bucket_missing' });
 
-            const shouldRecreate = shouldAutoApprove(options) ? true : await confirm({
-                message: 'Do you want to automatically recreate the state bucket and resume provisioning?',
-                initialValue: true
-            });
+            const shouldRecreate = await promptStateBucketRecovery({ autoApprove: shouldAutoApprove(options) });
 
-            if (isCancel(shouldRecreate) || !shouldRecreate) {
+            if (!shouldRecreate) {
                 return failCommand({
                     print: () => cancel('Apply aborted. State bucket remains missing.'),
                     event: 'recovery_declined',
@@ -158,19 +209,12 @@ export async function applyStack(input = {}) {
             trackEvent('recovery_accepted', { type: 'state_bucket_missing' });
 
             try {
-                // 1. Destroy corrupted local cache
-                const dotTerraformPath = path.join(tfDir, '.terraform');
-                if (fs.existsSync(dotTerraformPath)) {
-                    fs.rmSync(dotTerraformPath, { recursive: true, force: true });
-                }
-
-                // 2. Recreate bucket
                 const actualProjectName = path.basename(process.cwd());
                 const targetRegion = detectedConfig.region || process.env.AWS_REGION || 'us-east-2';
 
                 const recSpinner = spinner();
                 recSpinner.start('Recreating S3 state bucket in AWS...');
-                await provisionStateBucket(targetRegion, actualProjectName);
+                await recreateStateBucket({ tfDir, region: targetRegion, projectName: actualProjectName });
                 recSpinner.stop('✅ State bucket recreated.');
 
                 trackEvent('recovery_successful', { type: 'state_bucket_missing' });

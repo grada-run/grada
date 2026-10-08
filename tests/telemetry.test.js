@@ -3,20 +3,54 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName } from '../src/core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath } from '../src/core/telemetry.js';
 
 const SHA256_UNKNOWN_PREFIX = crypto.createHash('sha256').update('unknown').digest('hex').substring(0, 16);
 
+// Hermetic telemetry env for send-path tests: our own runner (VITEST) now
+// suppresses emission, and the identity/config files must never resolve to
+// the developer's real home. Every send-path suite isolates on entry and
+// restores on exit; tests pinning a suppressor set it explicitly.
+let savedTelemetryEnv = null;
+let telemetryScratchDir = null;
+
+function isolateTelemetryEnv() {
+    savedTelemetryEnv = {
+        VITEST: process.env.VITEST,
+        NODE_ENV: process.env.NODE_ENV,
+        GRADA_CONFIG_PATH: process.env.GRADA_CONFIG_PATH,
+        GRADA_TELEMETRY_ID_PATH: process.env.GRADA_TELEMETRY_ID_PATH,
+    };
+    delete process.env.VITEST;
+    delete process.env.NODE_ENV;
+    telemetryScratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telemetry-env-'));
+    process.env.GRADA_CONFIG_PATH = path.join(telemetryScratchDir, 'config.json');
+    process.env.GRADA_TELEMETRY_ID_PATH = path.join(telemetryScratchDir, 'telemetry-id');
+    resetTelemetryIdentityCache();
+    resetTelemetryPreferenceCache();
+}
+
+function restoreTelemetryEnv() {
+    vi.unstubAllGlobals();
+    delete process.env.DO_NOT_TRACK;
+    delete process.env.DEPLOY_STACK_TELEMETRY_ID_PATH;
+    for (const [key, value] of Object.entries(savedTelemetryEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
+    resetTelemetryIdentityCache();
+    resetTelemetryPreferenceCache();
+    if (telemetryScratchDir) fs.rmSync(telemetryScratchDir, { recursive: true, force: true });
+    telemetryScratchDir = null;
+}
+
 describe('trackEvent capture', () => {
     beforeEach(() => {
-        resetTelemetryIdentityCache();
+        isolateTelemetryEnv();
     });
 
     afterEach(() => {
-        vi.unstubAllGlobals();
-        delete process.env.DO_NOT_TRACK;
-        delete process.env.GRADA_TELEMETRY_ID_PATH;
-        delete process.env.DEPLOY_STACK_TELEMETRY_ID_PATH;
+        restoreTelemetryEnv();
     });
 
     function mockFetch() {
@@ -125,6 +159,10 @@ describe('trackEvent capture', () => {
         try {
             const idPath = path.join(dir, 'nested', 'telemetry-id');
             process.env.DEPLOY_STACK_TELEMETRY_ID_PATH = idPath;
+            // The isolated env pins the grada override, which wins over the
+            // legacy one under test — drop it for the duration of this test.
+            const savedGradaPath = process.env.GRADA_TELEMETRY_ID_PATH;
+            delete process.env.GRADA_TELEMETRY_ID_PATH;
             const savedCI = process.env.CI;
             process.env.CI = 'true';
             try {
@@ -139,21 +177,62 @@ describe('trackEvent capture', () => {
             } finally {
                 if (savedCI === undefined) delete process.env.CI;
                 else process.env.CI = savedCI;
+                process.env.GRADA_TELEMETRY_ID_PATH = savedGradaPath;
             }
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
     });
 
-    it('tags automated test runs without blocking them', () => {
-        const fetchMock = mockFetch();
-        trackEvent('exec_run', { projectName: 'test' });
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-        const payload = lastPayload(fetchMock);
-        // VITEST is set by the runner itself, so this must be true here.
-        expect(payload.properties.is_test_env).toBe(true);
-        expect(typeof payload.properties.is_tty).toBe('boolean');
-        expect(typeof payload.properties.is_cli_entry).toBe('boolean');
+    it('suppresses emission under our own test runner without throwing', () => {
+        process.env.VITEST = 'true';
+        try {
+            const fetchMock = mockFetch();
+            expect(() => trackEvent('exec_run', { projectName: 'test' })).not.toThrow();
+            expect(fetchMock).not.toHaveBeenCalled();
+            expect(isRunningUnderVitest()).toBe(true);
+            expect(telemetryState()).toEqual({ enabled: false, source: 'vitest' });
+        } finally {
+            delete process.env.VITEST;
+        }
+    });
+
+    it('still tags and sends NODE_ENV=test runs (third-party bots stay visible)', () => {
+        process.env.NODE_ENV = 'test';
+        try {
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            const payload = lastPayload(fetchMock);
+            expect(payload.properties.is_test_env).toBe(true);
+            expect(typeof payload.properties.is_tty).toBe('boolean');
+            expect(typeof payload.properties.is_cli_entry).toBe('boolean');
+        } finally {
+            delete process.env.NODE_ENV;
+        }
+    });
+
+    it.each(['1', 'true', 'TRUE', 'True', 'yes', 'YES'])('treats DO_NOT_TRACK=%s as opted out', (value) => {
+        process.env.DO_NOT_TRACK = value;
+        try {
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(fetchMock).not.toHaveBeenCalled();
+            expect(telemetryState()).toEqual({ enabled: false, source: 'env' });
+        } finally {
+            delete process.env.DO_NOT_TRACK;
+        }
+    });
+
+    it.each(['0', 'false', 'FALSE', ''])('treats DO_NOT_TRACK=%s as tracking', (value) => {
+        process.env.DO_NOT_TRACK = value;
+        try {
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+        } finally {
+            delete process.env.DO_NOT_TRACK;
+        }
     });
 
     it.each([
@@ -243,8 +322,86 @@ describe('trackEvent capture', () => {
         });
     });
 
+    describe('telemetry config preference', () => {
+        it('suppresses when the config file opts out', () => {
+            fs.writeFileSync(process.env.GRADA_CONFIG_PATH, JSON.stringify({ telemetry: false }));
+            resetTelemetryPreferenceCache();
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(fetchMock).not.toHaveBeenCalled();
+            expect(telemetryState()).toEqual({ enabled: false, source: 'config' });
+        });
+
+        it.each([
+            ['explicit opt-in', { telemetry: true }],
+            ['silent config', { other: 'keys-stay' }],
+            ['non-boolean value', { telemetry: 'false' }],
+        ])('sends on %s', (_label, config) => {
+            fs.writeFileSync(process.env.GRADA_CONFIG_PATH, JSON.stringify(config));
+            resetTelemetryPreferenceCache();
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it('sends when the config file is missing or malformed, without throwing', () => {
+            expect(fs.existsSync(process.env.GRADA_CONFIG_PATH)).toBe(false);
+            const fetchMock = mockFetch();
+            expect(() => trackEvent('exec_run', { projectName: 'test' })).not.toThrow();
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+
+            fs.writeFileSync(process.env.GRADA_CONFIG_PATH, '{oops');
+            resetTelemetryPreferenceCache();
+            expect(() => trackEvent('exec_run', { projectName: 'test' })).not.toThrow();
+            expect(fetchMock).toHaveBeenCalledTimes(2);
+            expect(readTelemetryPreference()).toBe(null);
+        });
+
+        it('round-trips the preference and preserves other keys', () => {
+            const target = process.env.GRADA_CONFIG_PATH;
+            fs.writeFileSync(target, JSON.stringify({ other: 1 }));
+            writeTelemetryPreference(false);
+            expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual({ other: 1, telemetry: false });
+            expect(readTelemetryPreference()).toBe(false);
+            writeTelemetryPreference(true);
+            expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual({ other: 1, telemetry: true });
+            expect(readTelemetryPreference()).toBe(true);
+        });
+
+        it('creates parent dirs and recovers from a malformed file on write', () => {
+            const target = path.join(telemetryScratchDir, 'nested', 'deep', 'config.json');
+            writeTelemetryPreference(false, { configPath: target });
+            expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual({ telemetry: false });
+
+            fs.writeFileSync(target, '{oops');
+            writeTelemetryPreference(true, { configPath: target });
+            expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual({ telemetry: true });
+        });
+
+        it('lets DO_NOT_TRACK win over a config opt-in', () => {
+            fs.writeFileSync(process.env.GRADA_CONFIG_PATH, JSON.stringify({ telemetry: true }));
+            resetTelemetryPreferenceCache();
+            process.env.DO_NOT_TRACK = '1';
+            try {
+                const fetchMock = mockFetch();
+                trackEvent('exec_run', { projectName: 'test' });
+                expect(fetchMock).not.toHaveBeenCalled();
+                expect(telemetryState()).toEqual({ enabled: false, source: 'env' });
+            } finally {
+                delete process.env.DO_NOT_TRACK;
+            }
+        });
+
+        it('resolves the config path from the home dir unless overridden', () => {
+            expect(defaultConfigPath()).toBe(path.join(os.homedir(), '.grada', 'config.json'));
+            expect(resolveConfigPath()).toBe(process.env.GRADA_CONFIG_PATH);
+            expect(resolveConfigPath({})).toBe(path.join(os.homedir(), '.grada', 'config.json'));
+            expect(resolveConfigPath({ GRADA_CONFIG_PATH: '  ' })).toBe(path.join(os.homedir(), '.grada', 'config.json'));
+        });
+    });
+
     describe('detectCiProvider', () => {
-        const CI_KEYS = ['GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'JENKINS_URL', 'CI', 'CONTINUOUS_INTEGRATION'];
+        const CI_KEYS = ['GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'JENKINS_URL', 'BUILDKITE', 'TF_BUILD', 'BITBUCKET_BUILD_NUMBER', 'TEAMCITY_VERSION', 'TRAVIS', 'CODEBUILD_BUILD_ID', 'CI', 'CONTINUOUS_INTEGRATION'];
 
         const withEnv = (vars, fn) => {
             const saved = {};
@@ -268,6 +425,12 @@ describe('trackEvent capture', () => {
             [{ GITLAB_CI: 'true' }, 'gitlab_ci'],
             [{ CIRCLECI: 'true' }, 'circleci'],
             [{ JENKINS_URL: 'http://jenkins:8080/' }, 'jenkins'],
+            [{ BUILDKITE: 'true' }, 'buildkite'],
+            [{ TF_BUILD: 'True' }, 'azure_pipelines'],
+            [{ BITBUCKET_BUILD_NUMBER: '42' }, 'bitbucket'],
+            [{ TEAMCITY_VERSION: '2024.1' }, 'teamcity'],
+            [{ TRAVIS: 'true' }, 'travis_ci'],
+            [{ CODEBUILD_BUILD_ID: 'grada:1234' }, 'aws_codebuild'],
             [{ CI: 'true' }, 'generic_ci'],
             [{ CONTINUOUS_INTEGRATION: 'true' }, 'generic_ci'],
             [{}, 'none'],
@@ -295,7 +458,7 @@ describe('trackEvent capture', () => {
     });
 
     describe('is_ci consistency', () => {
-        const CI_KEYS = ['GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'JENKINS_URL', 'CI', 'CONTINUOUS_INTEGRATION'];
+        const CI_KEYS = ['GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'JENKINS_URL', 'BUILDKITE', 'TF_BUILD', 'BITBUCKET_BUILD_NUMBER', 'TEAMCITY_VERSION', 'TRAVIS', 'CODEBUILD_BUILD_ID', 'CI', 'CONTINUOUS_INTEGRATION'];
 
         const withEnv = (vars, fn) => {
             const saved = {};
@@ -524,12 +687,11 @@ describe('trackEvent capture', () => {
 
 describe('trackSuccess', () => {
     beforeEach(() => {
-        resetTelemetryIdentityCache();
+        isolateTelemetryEnv();
     });
 
     afterEach(() => {
-        vi.unstubAllGlobals();
-        delete process.env.DO_NOT_TRACK;
+        restoreTelemetryEnv();
     });
 
     it('stamps success:true and flushes before returning', async () => {
@@ -588,12 +750,11 @@ describe('trackSuccess', () => {
 
 describe('trackFailure', () => {
     beforeEach(() => {
-        resetTelemetryIdentityCache();
+        isolateTelemetryEnv();
     });
 
     afterEach(() => {
-        vi.unstubAllGlobals();
-        delete process.env.DO_NOT_TRACK;
+        restoreTelemetryEnv();
     });
 
     it('stamps success:false and flushes before returning', async () => {

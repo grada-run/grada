@@ -1,6 +1,6 @@
 ---
 title: add
-description: Provision modular cloud addons like private S3 storage, DynamoDB tables, Valkey caching, SQS queues, Bedrock AI access, SES email, or scheduled cron jobs.
+description: Provision modular cloud addons like private S3 storage, DynamoDB tables, Valkey caching, SQS queues, Bedrock AI access, SES email, scheduled cron jobs — or add a relational database to a project that started without one.
 ---
 
 Provision modular Day-2 cloud primitives without writing Terraform, configuring IAM policies, or opening the AWS Management Console.
@@ -14,8 +14,10 @@ Provision modular Day-2 cloud primitives without writing Terraform, configuring 
 - `ai:bedrock` grants your container least-privilege permission to invoke Amazon Bedrock foundation models (no static AWS keys) and injects `BEDROCK_MODEL_ID` into your container. Run it interactively to pick a provider and model from the catalog, or pass `--model <id>` directly.
 - `email:ses` provisions Amazon SES for transactional email: a domain identity, DKIM signing, a `mail.` subdomain for bounce handling with SPF, a DMARC baseline, least-privilege `ses:SendEmail` permissions locked to your sender domain, and `SES_FROM_EMAIL` / `SES_REGION` in your container. With `--zone-id` it creates the verification, DKIM, MX, SPF, and DMARC records in Route 53 automatically; otherwise it outputs the records to add at your DNS provider. If you already ran `domain add`, the domain (and zone) is picked up automatically. The identity, DKIM, MAIL FROM, and DNS records are scoped to the production workspace as account-wide singletons, so PR previews never duplicate or delete them — preview containers inherit sending permission through their own task role.
 - `cron` creates an EventBridge Scheduler schedule that runs a one-off Fargate task from your app's task definition on a `cron(...)` or `rate(...)` expression, with least-privilege `ecs:RunTask` + `iam:PassRole` permissions. One schedule per project: `--name` customizes it, and re-running with `--force` replaces it in place. On `--target lambda` projects the schedule invokes the function directly with a JSON payload carrying the command — handle scheduled events in application code.
+- `db:postgres`, `db:mysql`, and `db:aurora-postgresql` add a relational database to a project that was initialized without one: renders `terraform/database.tf` from the same templates `init --db-engine` uses and wires `DB_HOST`/`DB_PORT`/`DB_NAME` (plus `DB_ENGINE` for non-Postgres) into your container — as Secrets Manager references on ECS, as plain variables on Lambda (which also gets the VPC config and `random` provider). Refused on `--target static`; refuses when `main.tf` already references a database unless `--force` is passed.
 - Every addon attaches least-privilege IAM policies to your task role, so your application code can use the AWS SDK with no extra configuration.
-- Addon files live in `terraform/` (`s3.tf`, `dynamodb.tf`, `redis.tf`, `sqs.tf`, `bedrock.tf`, `ses.tf`, `cron.tf`), so `destroy` tears them down and `eject` keeps them automatically. PR-preview workspaces get isolated per-workspace resources. If your project has a `worker.tf` background service, addon environment variables are injected there too.
+- Addon files live in `terraform/` (`s3.tf`, `dynamodb.tf`, `redis.tf`, `sqs.tf`, `bedrock.tf`, `ses.tf`, `cron.tf`, plus `database.tf` for post-init relational databases), so `destroy` tears them down and `eject` keeps them automatically. PR-preview workspaces get isolated per-workspace resources. If your project has a `worker.tf` background service, addon environment variables are injected there too.
+- On [ejected](/grada/cli/eject/) projects, new addon files render without managed headers to match the vanilla tree (billing docs and resources are unchanged), with a warning and an `ejected: true` marker on the `add_run` telemetry event.
 - On `--target static` projects addon infrastructure still scaffolds (queues, tables, buckets, identities), but container env injection is skipped — there is no task role to inject into. Read the resource names from the generated `.tf` files and wire them into your build manually.
 - Emits an `add_run` telemetry event recording the capability and outcome.
 
@@ -39,11 +41,14 @@ npx grada-run add email:ses --domain example.com
 npx grada-run add email:ses --domain example.com --zone-id Z1234567890ABC
 npx grada-run add cron --schedule "cron(0 2 * * ? *)" --cmd "npm run cron"
 npx grada-run add storage:s3 --force
+npx grada-run add db:postgres
+npx grada-run add db:mysql
+npx grada-run add db:aurora-postgresql
 ```
 
 After adding, run `grada apply` (or commit and push to trigger CI) to provision the resource.
 
-To switch Bedrock models later, just run `grada add ai:bedrock` again (interactively) or with a new `--model <id>` — the model reference updates in place across `bedrock.tf`, `main.tf`, and `worker.tf` without needing `--force`.
+To switch Bedrock models later, just run `grada add ai:bedrock` again (interactively) or with a new `--model <id>` — the model reference updates in place across `bedrock.tf`, `main.tf`, and `worker.tf` without needing `--force`. The same in-place update applies when you re-run `add email:ses` with a new `--domain` or `--from-email`; every other re-run needs `--force`.
 
 ## Flags
 
@@ -76,6 +81,7 @@ Requires a project initialized with `grada` (`terraform/main.tf` must exist).
 - `ai:bedrock`: $0/mo fixed baseline; billed per 1K input/output tokens on `InvokeModel` calls.
 - `email:ses`: $0/mo fixed baseline; $0.10 per 1,000 emails sent.
 - `cron`: $0/mo fixed baseline (first 14M EventBridge Scheduler invocations/mo free); billed only for Fargate seconds while the cron task runs (per-invocation Lambda billing on `--target lambda`).
+- `db:postgres` / `db:mysql`: same as an init-time database (~$11.68/mo `db.t4g.micro` compute + ~$2.30/mo 20 GB gp3 storage). `db:aurora-postgresql`: Serverless v2 idles at 0 ACU (~$0.12/hr per ACU when active).
 
 `grada add` prints the cost impact, refreshes the estimate in your `README.md` (or `DEPLOYMENT.md`), and `grada apply` lists active addons in its pre-flight preview. Reference rates are us-east-2; actual charges vary by region and usage.
 

@@ -12,7 +12,7 @@ import {
     DescribeTaskDefinitionCommand,
     UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
-import { runRollback, parseRollbackArgs } from '../src/commands/rollback.js';
+import { runRollback, parseRollbackArgs, discoverEligibleRevisions } from '../src/commands/rollback.js';
 import { resolveWorkspaceSuffix } from '../src/utils/resolvers.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 import { select } from '@clack/prompts';
@@ -340,6 +340,7 @@ describe('Command: rollback (mocked ECS)', () => {
             projectName: 'myapp',
             success: false,
             error_code: 'SERVICE_NOT_FOUND',
+            reason: 'service-not-found',
         });
     });
 
@@ -357,6 +358,7 @@ describe('Command: rollback (mocked ECS)', () => {
             projectName: 'myapp',
             success: false,
             error_code: 'NO_PRIOR_REVISIONS',
+            reason: 'no-prior-revisions',
         });
     });
 
@@ -378,6 +380,7 @@ describe('Command: rollback (mocked ECS)', () => {
             projectName: 'myapp',
             success: false,
             error_code: 'REVISION_NOT_FOUND',
+            reason: 'revision-not-found',
         });
     });
 
@@ -699,5 +702,21 @@ describe('rollback on --target static projects', () => {
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
+    });
+});
+
+describe('discoverEligibleRevisions', () => {
+    it('returns ACTIVE revisions older than the deployed one, newest first', async () => {
+        const ecsClient = mockClient((command) => {
+            expect(command).toBeInstanceOf(ListTaskDefinitionsCommand);
+            expect(command.input).toMatchObject({ familyPrefix: 'myapp-task', status: 'ACTIVE' });
+            return { taskDefinitionArns: [arn(5), arn(4), arn(3)] };
+        });
+        await expect(discoverEligibleRevisions(ecsClient, 'myapp-task', 4)).resolves.toEqual([arn(3)]);
+    });
+
+    it('returns an empty list when only the current revision exists', async () => {
+        const ecsClient = mockClient(() => ({ taskDefinitionArns: [arn(2)] }));
+        await expect(discoverEligibleRevisions(ecsClient, 'myapp-task', 2)).resolves.toEqual([]);
     });
 });

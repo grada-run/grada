@@ -42,7 +42,10 @@ function paint(tone, fallback) {
 //   stamping the suppressed code onto the result — bin/cli.js restores it
 //   so CLI exit codes never change.
 // - `errorCode` stamps `error_code` into telemetry without repeating the
-//   whole `telemetry` object; `extra` merges additional telemetry fields.
+//   whole `telemetry` object; `reason` stamps `reason`, defaulting to the
+//   kebab-case mirror of the error code so every failure names itself in
+//   telemetry even when the call site only passed a code. `extra` merges
+//   additional telemetry fields and still wins over both stamps.
 export async function failCommand({
     message = null,
     hint = null,
@@ -67,9 +70,16 @@ export async function failCommand({
         if (hint) write(paint(hintTone, color.dim)(hint));
     }
     if (event) {
+        // Telemetry-only enrichment: the explicit reason wins, else the
+        // kebab-case error code. Result objects below keep only explicit
+        // reasons — analytics completeness must never reshape the
+        // programmatic API.
+        const resolvedReason = reason ?? telemetry.reason
+            ?? (errorCode === null ? null : String(errorCode).toLowerCase().replace(/_/g, '-'));
         trackEvent(event, {
             ...telemetry,
             ...(errorCode === null ? {} : { error_code: errorCode }),
+            ...(resolvedReason === null ? {} : { reason: resolvedReason }),
             ...extra,
             success: false,
         });

@@ -10,6 +10,8 @@ import path from 'path';
 import { stripVTControlCharacters } from 'node:util';
 import {
     runAdd,
+    canUpsertAddon,
+    injectContainerSecrets,
     parseAddArgs,
     validateAddonFlags,
     resolveAddonOptions,
@@ -43,6 +45,7 @@ import {
     validateCatalogHints,
 } from '../src/utils/bedrock-catalog.js';
 import { syncDocCostEstimate, estimateMonthlyCost, parseTerraformConfig, COST_ESTIMATE_MARKER, LEGACY_COST_ESTIMATE_MARKER } from '../src/utils/visualizer.js';
+import { resolveDbEngineRefs, buildDbEntries } from '../src/utils/generator.js';
 import { select, text, log } from '@clack/prompts';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
@@ -173,6 +176,7 @@ describe('precondition guards', () => {
             capability: 'storage:s3',
             success: false,
             error_code: 'TERRAFORM_NOT_INITIALIZED',
+            reason: 'terraform-not-initialized',
         });
         expect(flushTelemetry).toHaveBeenCalled();
     });
@@ -186,6 +190,7 @@ describe('precondition guards', () => {
             capability: 'unknown:foo',
             success: false,
             error_code: 'UNSUPPORTED_CAPABILITY',
+            reason: 'unsupported-capability',
         });
 
         vi.clearAllMocks();
@@ -194,6 +199,7 @@ describe('precondition guards', () => {
             capability: 'none',
             success: false,
             error_code: 'UNSUPPORTED_CAPABILITY',
+            reason: 'unsupported-capability',
         });
     });
 
@@ -208,6 +214,7 @@ describe('precondition guards', () => {
             capability: 'db:dynamodb',
             success: false,
             error_code: 'INVALID_PARTITION_KEY',
+            reason: 'invalid-partition-key',
         });
         expect(flushTelemetry).toHaveBeenCalled();
         expect(fs.existsSync(path.join(dir, 'terraform', 'dynamodb.tf'))).toBe(false);
@@ -228,6 +235,7 @@ describe('precondition guards', () => {
             capability: 'storage:s3',
             success: false,
             error_code: 'ADDON_ALREADY_EXISTS',
+            reason: 'addon-already-exists',
         });
     });
 
@@ -484,6 +492,7 @@ describe('--model flag', () => {
             capability: 'ai:bedrock',
             success: false,
             error_code: 'INVALID_MODEL_ID',
+            reason: 'invalid-model-id',
         });
         expect(flushTelemetry).toHaveBeenCalled();
         expect(fs.existsSync(path.join(dir, 'terraform', 'bedrock.tf'))).toBe(false);
@@ -2028,5 +2037,143 @@ describe('lambda generated terraform', () => {
         const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
         expect(mainTf).toContain('vpc_config {');
         expect(mainTf).toContain('REDIS_URL = ');
+    });
+});
+
+describe('canUpsertAddon', () => {
+    it.each([
+        ['bedrock with an explicit model', 'ai:bedrock', { explicitModel: true }, true],
+        ['bedrock with an interactive selection', 'ai:bedrock', { selectedInteractively: true }, true],
+        ['bedrock with defaults', 'ai:bedrock', {}, false],
+        ['ses with an explicit sender', 'email:ses', { explicitFromEmail: true }, true],
+        ['ses with an explicit domain', 'email:ses', { explicitDomain: true }, true],
+        ['ses with an interactive selection', 'email:ses', { selectedInteractively: true }, true],
+        ['ses with resolved-only values', 'email:ses', { domain: 'example.com' }, false],
+        ['redis always needs --force (no value flags)', 'db:redis', {}, false],
+        ['capabilities without upsert keys need --force', 'queue:sqs', {}, false],
+        ['unknown capabilities need --force', 'nope:nah', {}, false],
+    ])('%s', (_label, capability, meta, expected) => {
+        expect(canUpsertAddon(capability, meta)).toBe(expected);
+    });
+});
+
+describe('resolveDbEngineRefs', () => {
+    it.each([
+        ['postgres', 'postgres', 'postgres', 'terraform/database.tf', 'aws_db_instance.postgres', 'address', 'db_name', '5432'],
+        ['mysql', 'mysql', 'mysql', 'terraform/database-mysql.tf', 'aws_db_instance.postgres', 'address', 'db_name', '3306'],
+        ['aurora-postgresql', 'aurora-postgresql', 'aurora-postgresql', 'terraform/database-aurora-postgresql.tf', 'aws_rds_cluster.postgres', 'endpoint', 'database_name', '5432'],
+        ['unknown falls back to postgres', 'oracle', 'postgres', 'terraform/database.tf', 'aws_db_instance.postgres', 'address', 'db_name', '5432'],
+    ])('%s', (_label, input, engine, template, dbRef, dbHostAttr, dbNameAttr, dbPort) => {
+        expect(resolveDbEngineRefs(input)).toEqual({
+            engine,
+            isCluster: engine === 'aurora-postgresql',
+            dbRef,
+            dbHostAttr,
+            dbNameAttr,
+            dbPort,
+            template,
+        });
+    });
+});
+
+describe('buildDbEntries', () => {
+    it('builds ECS env + secret entries with init-identical fragments', () => {
+        const { env, secrets } = buildDbEntries('postgres', 'ecs');
+        expect(env.map((entry) => entry.name)).toEqual(['DB_HOST', 'DB_PORT', 'DB_NAME']);
+        expect(env).toContainEqual({ name: 'DB_HOST', value: '${aws_db_instance.postgres.address}' });
+        expect(env).toContainEqual({ name: 'DB_PORT', value: '5432' });
+        expect(secrets).toEqual([
+            { name: 'DB_USER', valueFrom: '${aws_db_instance.postgres.master_user_secret[0].secret_arn}:username::' },
+            { name: 'DB_PASSWORD', valueFrom: '${aws_db_instance.postgres.master_user_secret[0].secret_arn}:password::' },
+        ]);
+    });
+
+    it('adds DB_ENGINE for non-postgres engines and cluster refs for aurora', () => {
+        const mysql = buildDbEntries('mysql', 'ecs');
+        expect(mysql.env).toContainEqual({ name: 'DB_ENGINE', value: 'mysql' });
+        expect(mysql.env).toContainEqual({ name: 'DB_PORT', value: '3306' });
+        const aurora = buildDbEntries('aurora-postgresql', 'ecs');
+        expect(aurora.env).toContainEqual({ name: 'DB_HOST', value: '${aws_rds_cluster.postgres.endpoint}' });
+        expect(aurora.secrets[0].valueFrom).toContain('aws_rds_cluster.postgres');
+    });
+
+    it('builds Lambda variables with plain user/password and no secrets', () => {
+        const { env, secrets } = buildDbEntries('postgres', 'lambda');
+        expect(secrets).toEqual([]);
+        expect(env).toContainEqual({ name: 'DB_USER', value: 'dbadmin' });
+        expect(env).toContainEqual({ name: 'DB_PASSWORD', value: '${random_password.db_password.result}' });
+    });
+});
+
+describe('injectContainerSecrets', () => {
+    const DB_SECRETS = [
+        { name: 'DB_USER', valueFrom: '${aws_db_instance.postgres.master_user_secret[0].secret_arn}:username::' },
+        { name: 'DB_PASSWORD', valueFrom: '${aws_db_instance.postgres.master_user_secret[0].secret_arn}:password::' },
+    ];
+
+    function secretsMainTf(inner = '') {
+        return [
+            'resource "aws_ecs_task_definition" "app" {',
+            '  container_definitions = jsonencode([',
+            '    {',
+            '      secrets = concat(',
+            '        [',
+            '          for key in local.secret_keys : {',
+            '            name      = key',
+            '            valueFrom = "${local.secret_arn}:${key}::"',
+            '          }',
+            '        ],',
+            '        [',
+            inner,
+            '        ]',
+            '      )',
+            '    }',
+            '  ])',
+            '}',
+            '',
+        ].join('\n');
+    }
+
+    it('injects into the empty TASK_SECRETS slot, leaving the for-expression alone', () => {
+        const before = secretsMainTf('');
+        const after = injectContainerSecrets(before, DB_SECRETS);
+        expect(after).toContain('{ "name": "DB_USER", "valueFrom": "${aws_db_instance.postgres.master_user_secret[0].secret_arn}:username::" }');
+        expect(after).toContain('{ "name": "DB_PASSWORD", "valueFrom": "${aws_db_instance.postgres.master_user_secret[0].secret_arn}:password::" }');
+        // The for-expression array is untouched: exactly one for-key block.
+        expect(after.match(/for key in local\.secret_keys/g)).toHaveLength(1);
+        // Appends after existing entries without doubling commas.
+        const twice = injectContainerSecrets(after, DB_SECRETS);
+        expect(twice).toBe(after);
+    });
+
+    it('replaces same-name entries in place when the value differs (engine switch)', () => {
+        const before = secretsMainTf('          { "name": "DB_USER", "valueFrom": "stale" }');
+        const after = injectContainerSecrets(before, DB_SECRETS);
+        expect(after).not.toContain('"stale"');
+        expect(after.match(/"name": "DB_USER"/g)).toHaveLength(1);
+        expect(after).toContain('"name": "DB_PASSWORD"');
+    });
+
+    it('returns the content unchanged when the resource, name, or array is missing', () => {
+        const before = secretsMainTf('');
+        expect(injectContainerSecrets(before, [])).toBe(before);
+        expect(injectContainerSecrets(before, DB_SECRETS, 'worker')).toBe(before);
+        expect(injectContainerSecrets('resource "x" "y" {}', DB_SECRETS)).toBe('resource "x" "y" {}');
+    });
+
+    it('falls back to a direct secrets array without concat', () => {
+        const direct = [
+            'resource "aws_ecs_task_definition" "app" {',
+            '  container_definitions = jsonencode([',
+            '    {',
+            '      secrets = [',
+            '      ]',
+            '    }',
+            '  ])',
+            '}',
+            '',
+        ].join('\n');
+        const after = injectContainerSecrets(direct, DB_SECRETS.slice(0, 1));
+        expect(after).toContain('{ "name": "DB_USER"');
     });
 });

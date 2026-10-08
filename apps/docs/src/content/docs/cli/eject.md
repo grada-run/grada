@@ -11,6 +11,7 @@ Take permanent, sole ownership of your infrastructure files when you no longer w
 - Strips grada metadata from your local files: removes the `# grada generated infrastructure` header and the `default_tags { tags = { ManagedBy = "grada" } }` block from `terraform/main.tf`, and removes the `# grada backups` block from `.gitignore`.
 - Recursively deletes every `*.bak.*` backup file in the project (skipping `node_modules` and `.git`).
 - Leaves your infrastructure fully operational as raw, standalone Terraform. As a final step, run `terraform apply` inside `terraform/` so AWS syncs state and removes the live `ManagedBy` tags.
+- Records the ejection in gitignored local state (`.grada/ejected.json`), so later `add` runs warn and render new files without managed headers to match the vanilla tree, and re-running `init` asks for explicit confirmation (or `--force`) before re-applying managed metadata.
 - Emits a `project_ejected` telemetry event. This cannot be undone.
 
 ## Usage
