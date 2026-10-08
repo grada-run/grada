@@ -316,7 +316,16 @@ describe('Migrations: target switching with backup', () => {
             expect(fs.existsSync(path.join(dir, 'Dockerfile'))).toBe(true);
             fs.appendFileSync(path.join(dir, 'terraform', 'main.tf'), '\n# hand edit\n');
 
-            const second = runCli(['init', '--target', 'static', '--headless'], { cwd: dir, env });
+            // Hand edits are protected: a headless re-run refuses instead of
+            // silently regenerating over them.
+            const refused = runCli(['init', '--target', 'static', '--headless'], { cwd: dir, env, capture: true });
+            expect(refused.status).toBe(1);
+            expect(refused.output).toContain('were modified since generation');
+            expect(refused.output).toContain('--force');
+            expect(fs.existsSync(path.join(dir, 'Dockerfile'))).toBe(true);
+            expect(fs.readdirSync(dir).some((e) => e.includes('.bak.'))).toBe(false);
+
+            const second = runCli(['init', '--target', 'static', '--headless', '--force'], { cwd: dir, env });
             expect(second.status).toBe(0);
             const entries = fs.readdirSync(dir);
             expect(entries.some((e) => e.startsWith('terraform.bak.'))).toBe(true);

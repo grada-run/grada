@@ -18,11 +18,17 @@ function isolateTelemetryEnv() {
     savedTelemetryEnv = {
         VITEST: process.env.VITEST,
         NODE_ENV: process.env.NODE_ENV,
+        DO_NOT_TRACK: process.env.DO_NOT_TRACK,
         GRADA_CONFIG_PATH: process.env.GRADA_CONFIG_PATH,
         GRADA_TELEMETRY_ID_PATH: process.env.GRADA_TELEMETRY_ID_PATH,
+        DEPLOY_STACK_TELEMETRY_ID_PATH: process.env.DEPLOY_STACK_TELEMETRY_ID_PATH,
     };
     delete process.env.VITEST;
     delete process.env.NODE_ENV;
+    // CI sets DO_NOT_TRACK=1 job-wide: without clearing it here, every
+    // send-path test is suppressed and the suite only passes locally.
+    delete process.env.DO_NOT_TRACK;
+    delete process.env.DEPLOY_STACK_TELEMETRY_ID_PATH;
     telemetryScratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telemetry-env-'));
     process.env.GRADA_CONFIG_PATH = path.join(telemetryScratchDir, 'config.json');
     process.env.GRADA_TELEMETRY_ID_PATH = path.join(telemetryScratchDir, 'telemetry-id');
@@ -32,8 +38,6 @@ function isolateTelemetryEnv() {
 
 function restoreTelemetryEnv() {
     vi.unstubAllGlobals();
-    delete process.env.DO_NOT_TRACK;
-    delete process.env.DEPLOY_STACK_TELEMETRY_ID_PATH;
     for (const [key, value] of Object.entries(savedTelemetryEnv)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
