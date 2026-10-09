@@ -76,6 +76,11 @@ describe('exec: CLI args', () => {
         expect(parseExecArgs(['exec'])).toEqual({});
     });
 
+    it('treats the first positional as the service and flags the rest', () => {
+        expect(parseExecArgs(['exec', 'web'])).toEqual({ service: 'web' });
+        expect(parseExecArgs(['exec', 'web', 'bogus'])).toEqual({ service: 'web', unexpectedPositionals: ['bogus'] });
+    });
+
     it('resolves names from project directory with env overrides', () => {
         expect(resolveCluster({ projectName: 'myapp' }, '/tmp')).toBe('myapp-cluster');
         expect(resolveService({ projectName: 'myapp' }, '/tmp')).toBe('myapp-service');

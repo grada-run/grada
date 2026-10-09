@@ -38,6 +38,7 @@ export function parseExecArgs(argv = []) {
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0 && !options.service) options.service = positionals[0];
+    if (positionals.length > 1) options.unexpectedPositionals = positionals.slice(1);
     return options;
 }
 
@@ -109,6 +110,19 @@ async function runExecMain(input = {}) {
     } catch {
         return failProjectNotInitialized({ event: 'exec_run', noExit });
     }
+
+    if (Array.isArray(options.unexpectedPositionals) && options.unexpectedPositionals.length > 0) {
+        return failCommand({
+            noExit,
+            message: `\n✖ Unexpected argument "${options.unexpectedPositionals[0]}". Pass at most one service: exec [service].\n`,
+            event: 'exec_run',
+            telemetry: { projectName },
+            errorCode: 'UNEXPECTED_POSITIONAL_ARGS',
+            reason: 'unexpected-positional-args',
+            resultExtra: { cluster, service, region },
+        });
+    }
+
     const shellCommand = resolveShellCommand(options);
 
     const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });

@@ -134,7 +134,7 @@ describe('programmatic command context', () => {
     it('exec validation failures return stamped errors when headless', async () => {
         const result = await runExec({ isHeadless: true, unexpectedPositionals: ['bogus'] });
         expect(exitSpy).not.toHaveBeenCalled();
-        expect(result).toMatchObject({ ok: false, exitCode: 1 });
+        expect(result).toMatchObject({ ok: false, exitCode: 1, reason: 'unexpected-positional-args' });
     });
 
     it('domain subcommand failures return stamped errors when headless', async () => {
