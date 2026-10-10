@@ -421,11 +421,25 @@ export async function trackSuccess(eventName, properties = {}) {
     await flushTelemetry();
 }
 
+// Mirrors failCommand's telemetry enrichment for direct failure reports:
+// when a payload names an error_code but no reason, the kebab-case code is
+// stamped as the reason so every failure names itself in analytics. An
+// explicit reason (even '') always wins; missing values and wrapped
+// primitives pass through untouched.
+function withFailureReason(properties) {
+    if (properties === null || properties === undefined || typeof properties !== 'object' || Array.isArray(properties)) {
+        return properties;
+    }
+    if (properties.reason !== undefined && properties.reason !== null) return properties;
+    if (properties.error_code === undefined || properties.error_code === null) return properties;
+    return { ...properties, reason: String(properties.error_code).toLowerCase().replace(/_/g, '-') };
+}
+
 // Reports a failed command outcome without terminating: tracks the event
 // stamped `success: false` and flushes immediately. Companion to
 // trackSuccess for catch blocks that must keep branching (auth recovery,
 // not-found guidance) after reporting — failCommand covers terminal failures.
 export async function trackFailure(eventName, properties = {}) {
-    trackEvent(eventName, withSuccessFlag(properties, false));
+    trackEvent(eventName, withSuccessFlag(withFailureReason(properties), false));
     await flushTelemetry();
 }

@@ -778,6 +778,30 @@ describe('trackFailure', () => {
         expect(JSON.parse(body).properties.success).toBe(false);
     });
 
+    it('mirrors the kebab-case error_code as reason when reason is missing', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({});
+        vi.stubGlobal('fetch', fetchMock);
+        await trackFailure('diagnose_run', { projectName: 'test', error_code: 'AWS_CLI_MISSING' });
+        const [, { body }] = fetchMock.mock.calls[0];
+        expect(JSON.parse(body).properties).toMatchObject({ error_code: 'AWS_CLI_MISSING', reason: 'aws-cli-missing' });
+    });
+
+    it('keeps an explicit reason instead of mirroring the error_code', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({});
+        vi.stubGlobal('fetch', fetchMock);
+        await trackFailure('exec_run', { error_code: 'AWS_CLI_MISSING', reason: 'custom-reason' });
+        const [, { body }] = fetchMock.mock.calls[0];
+        expect(JSON.parse(body).properties.reason).toBe('custom-reason');
+    });
+
+    it('stamps no reason when no error_code is given', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({});
+        vi.stubGlobal('fetch', fetchMock);
+        await trackFailure('exec_run', { projectName: 'test' });
+        const [, { body }] = fetchMock.mock.calls[0];
+        expect(JSON.parse(body).properties).not.toHaveProperty('reason');
+    });
+
     it.each(['test', 42, true])(
         'wraps primitive properties %s as raw_properties without spreading',
         async (properties) => {
