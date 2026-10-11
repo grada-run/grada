@@ -1,7 +1,7 @@
 import { RDSClient, CreateDBSnapshotCommand, DescribeDBSnapshotsCommand, CreateDBClusterSnapshotCommand, DescribeDBClusterSnapshotsCommand } from '@aws-sdk/client-rds';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../../core/telemetry.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -35,7 +35,18 @@ export function parseDbBackupArgs(argv = []) {
     return options;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDbBackup(input = {}) {
+    setActiveCommandName('db_backup');
+    try {
+        return await runDbBackupMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbBackupMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;

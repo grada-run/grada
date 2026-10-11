@@ -550,6 +550,28 @@ describe('trackEvent capture', () => {
             expect(lastPayload(fetchMock).properties.cli_command).toBe('module_import');
         });
 
+        it('restores the outer command when nested wrappers unwind', () => {
+            process.argv = ['node', '/repo/scripts/runner.mjs'];
+            delete process.env.CLI_COMMAND;
+            const fetchMock = mockFetch();
+            setActiveCommandName('apply');
+            try {
+                setActiveCommandName('wake');
+                try {
+                    trackEvent('wake_run', { projectName: 'test' });
+                    expect(lastPayload(fetchMock).properties.cli_command).toBe('wake');
+                } finally {
+                    resetActiveCommandName();
+                }
+                trackEvent('infrastructure_applied', { projectName: 'test' });
+                expect(lastPayload(fetchMock).properties.cli_command).toBe('apply');
+            } finally {
+                resetActiveCommandName();
+            }
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(lastPayload(fetchMock).properties.cli_command).toBe('module_import');
+        });
+
         it('ignores blank names and prefers real CLI invocations over stale context', () => {
             process.argv = ['node', '/repo/scripts/runner.mjs'];
             delete process.env.CLI_COMMAND;

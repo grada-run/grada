@@ -1,5 +1,5 @@
 import { DescribeDBInstancesCommand, DescribeDBClustersCommand } from '@aws-sdk/client-rds';
-import { resolveProjectName, resolveWorkspaceSuffix } from './resolvers.js';
+import { resolveProjectName, resolveWorkspaceSuffix, readResourceSuffix } from './resolvers.js';
 import { normalizeOptions } from './args.js';
 
 // Error names the RDS API returns for a missing instance across SDK shapes.
@@ -40,6 +40,16 @@ function isMysqlEngine(engine) {
     return engine === 'mysql' || engine === 'aurora-mysql';
 }
 
+// RDS API asymmetry: DB instances report `DBInstanceStatus`, Aurora
+// clusters report `Status`. Every status read goes through here — reading
+// `Status` off an instance yields undefined and hung the destroy/wake
+// wait loops forever (P2 live incident: `(undefined)` status polling).
+export function dbStatusOf(record, kind) {
+    if (!record) return null;
+    if (kind === 'cluster') return record.Status ?? null;
+    return record.DBInstanceStatus ?? null;
+}
+
 // Unified RDS discovery across single instances and Aurora clusters.
 // Tries the instance identifier first (zero extra API calls for the common
 // postgres/mysql case), then the cluster identifiers. Returns a normalized
@@ -54,7 +64,7 @@ export async function findDbTarget(rdsClient, { dbIdentifier, dbClusterIdentifie
                 kind: 'instance',
                 id: dbIdentifier,
                 engine: instance.Engine,
-                status: instance.Status,
+                status: dbStatusOf(instance, 'instance'),
                 endpoint: instance.Endpoint?.Address,
                 port: String(port),
                 dbName: instance.DBName,
@@ -74,7 +84,7 @@ export async function findDbTarget(rdsClient, { dbIdentifier, dbClusterIdentifie
                 kind: 'cluster',
                 id: clusterId,
                 engine: cluster.Engine,
-                status: cluster.Status,
+                status: dbStatusOf(cluster, 'cluster'),
                 endpoint: cluster.Endpoint,
                 port: String(port),
                 dbName: cluster.DatabaseName,
@@ -115,7 +125,7 @@ export function resolveDbIdentifier(options = {}, cwd = process.cwd()) {
         return opts.dbIdentifier.trim();
     }
     const base = resolveProjectName(opts, cwd);
-    return `${base}${resolveWorkspaceSuffix(opts, cwd)}-db`;
+    return `${base}${resolveWorkspaceSuffix(opts, cwd)}${readResourceSuffix(cwd)}-db`;
 }
 
 // Aurora cluster identifier for the current project/workspace. An explicit
@@ -127,5 +137,5 @@ export function resolveDbClusterIdentifier(options = {}, cwd = process.cwd()) {
         return opts.dbIdentifier.trim();
     }
     const base = resolveProjectName(opts, cwd);
-    return `${base}${resolveWorkspaceSuffix(opts, cwd)}-db-cluster`;
+    return `${base}${resolveWorkspaceSuffix(opts, cwd)}${readResourceSuffix(cwd)}-db-cluster`;
 }

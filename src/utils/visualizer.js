@@ -5,6 +5,7 @@ import path from 'path';
 import { ADDON_REGISTRY } from './addons.js';
 import { detectComputeTargetFromMainTf } from './resolvers.js';
 import { trackEvent, flushTelemetry, trackFailure } from '../core/telemetry.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 export const COST_ESTIMATE_MARKER = 'Estimated Fixed Monthly Baseline:';
 export const LEGACY_COST_ESTIMATE_MARKER = 'Estimated Monthly Cost:';
@@ -390,6 +391,6 @@ export function syncDocCostEstimate(cwd = process.cwd()) {
         lines.splice(markerIdx + 1, 0, '', section);
     }
 
-    fs.writeFileSync(targetPath, lines.join('\n'));
+    atomicWriteFileSync(targetPath, lines.join('\n'));
     return targetPath;
 }

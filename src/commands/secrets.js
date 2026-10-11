@@ -5,10 +5,12 @@ import fs from 'fs/promises';
 import { spinner, confirm, outro, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 import path from 'path';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
+import { atomicWriteFile } from '../utils/atomic-write.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
+import { readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { requireManagedTree } from '../utils/terraform-metadata.js';
 
 // Static sites provision no secrets vault, so push/pull/audit would fail
 // obscurely against a Secrets Manager secret that can never exist. One
@@ -33,6 +35,20 @@ function failUnsupportedTarget(guard, event, projectName) {
     });
 }
 
+// Ejected trees are user-owned: push/pull/audit refuse unless --force.
+// Returns the refusal result, or null when the caller may proceed.
+async function secretsManagedTreeGuard(subcommand, event, projectName, options = {}) {
+    const managedTree = await requireManagedTree({
+        cwd: process.cwd(),
+        command: `secrets ${subcommand}`,
+        options,
+        event,
+        projectName: resolveSecretsProject(projectName),
+    });
+    if (!managedTree.proceed) return managedTree.result;
+    return null;
+}
+
 function resolveSecretsFile(envFilePath) {
     let resolvedFilePath = (typeof envFilePath === 'string' && envFilePath.trim())
         ? envFilePath.trim()
@@ -48,6 +64,12 @@ function resolveSecretsProject(projectName) {
     return (typeof projectName === 'string' && projectName.trim())
         ? projectName.trim()
         : path.basename(process.cwd());
+}
+
+// Vault identifiers carry the tree's resource suffix (matching the
+// Terraform secret name); telemetry keeps the bare project name.
+function secretVaultId(projectName) {
+    return `${projectName}${readResourceSuffix()}-secrets`;
 }
 
 export async function resolveSecretsRegion(options = {}) {
@@ -121,7 +143,20 @@ export function resolveEcsService(projectName, options = {}) {
     return `${projectName}-service`;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function pushSecrets(envFilePath, projectName, options = {}) {
+    setActiveCommandName('secrets_push');
+    try {
+        return await pushSecretsMain(envFilePath, projectName, options);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function pushSecretsMain(envFilePath, projectName, options = {}) {
+    const refused = await secretsManagedTreeGuard('push', 'secrets_pushed', projectName, options);
+    if (refused) return refused;
     const pushGuard = secretsTargetGuard('push');
     if (pushGuard) {
         return failUnsupportedTarget(pushGuard, 'secrets_pushed', typeof projectName === 'string' ? projectName : path.basename(process.cwd()));
@@ -206,7 +241,7 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
         let existingKeys = null;
         try {
             const existingResp = await client.send(new GetSecretValueCommand({
-                SecretId: `${resolvedProjectName}-secrets`,
+                SecretId: `${secretVaultId(resolvedProjectName)}`,
             }));
             if (existingResp.SecretString) {
                 try {
@@ -227,7 +262,7 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
 
         // 5. Update the secret string in AWS
         const command = new UpdateSecretCommand({
-            SecretId: `${resolvedProjectName}-secrets`,
+            SecretId: `${secretVaultId(resolvedProjectName)}`,
             SecretString: JSON.stringify(parsedSecrets),
         });
 
@@ -236,7 +271,7 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
         const keys = Object.keys(parsedSecrets);
         const keysFilePath = path.join(process.cwd(), 'terraform', 'secret_keys.json');
 
-        await fs.writeFile(keysFilePath, JSON.stringify(keys, null, 2));
+        await atomicWriteFile(keysFilePath, JSON.stringify(keys, null, 2));
 
         s.stop(`✅ Successfully pushed ${Object.keys(parsedSecrets).length} secrets to AWS (${targetRegion || 'default region'})!`);
 
@@ -312,7 +347,7 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
             stack_trace: error.name === 'TypeError' ? error.stack : undefined
         });
         if (error.name === 'ResourceNotFoundException') {
-            s.stop(color.red(`❌ Secrets Vault "${resolvedProjectName}-secrets" does not exist in AWS yet.`));
+            s.stop(color.red(`❌ Secrets Vault "${secretVaultId(resolvedProjectName)}" does not exist in AWS yet.`));
             console.log(color.yellow('\n💡 Next Step:'));
             console.log(`Run ${color.cyan('npx --yes grada-run apply')} first to provision the infrastructure and Secrets Manager vault.`);
             console.log(`Once applied, run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} to upload your environment variables.\n`);
@@ -326,7 +361,20 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
     }
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function pullSecrets(envFilePath, projectName, options = {}) {
+    setActiveCommandName('secrets_pull');
+    try {
+        return await pullSecretsMain(envFilePath, projectName, options);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function pullSecretsMain(envFilePath, projectName, options = {}) {
+    const refused = await secretsManagedTreeGuard('pull', 'secrets_pull', projectName, options);
+    if (refused) return refused;
     const pullGuard = secretsTargetGuard('pull');
     if (pullGuard) {
         return failUnsupportedTarget(pullGuard, 'secrets_pull', typeof projectName === 'string' ? projectName : path.basename(process.cwd()));
@@ -343,7 +391,7 @@ export async function pullSecrets(envFilePath, projectName, options = {}) {
         const client = resolveClient(injectedClient, SecretsManagerClient, targetRegion ? { region: targetRegion } : {});
 
         const resp = await client.send(new GetSecretValueCommand({
-            SecretId: `${resolvedProjectName}-secrets`,
+            SecretId: `${secretVaultId(resolvedProjectName)}`,
         }));
 
         let remoteSecrets = {};
@@ -417,7 +465,7 @@ export async function pullSecrets(envFilePath, projectName, options = {}) {
             error_message: error.message,
         });
         if (error.name === 'ResourceNotFoundException') {
-            s.stop(color.red(`❌ No remote secrets found for "${resolvedProjectName}-secrets".`));
+            s.stop(color.red(`❌ No remote secrets found for "${secretVaultId(resolvedProjectName)}".`));
             console.log(color.yellow('\n💡 Next Step:'));
             console.log(`Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`);
         } else if (handleAuthErrorBranch(error, s, opts)) {
@@ -430,7 +478,20 @@ export async function pullSecrets(envFilePath, projectName, options = {}) {
     }
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function auditSecrets(envFilePath, projectName, options = {}) {
+    setActiveCommandName('secrets_audit');
+    try {
+        return await auditSecretsMain(envFilePath, projectName, options);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function auditSecretsMain(envFilePath, projectName, options = {}) {
+    const refused = await secretsManagedTreeGuard('audit', 'secrets_audit', projectName, options);
+    if (refused) return refused;
     const auditGuard = secretsTargetGuard('audit');
     if (auditGuard) {
         return failUnsupportedTarget(auditGuard, 'secrets_audit', typeof projectName === 'string' ? projectName : path.basename(process.cwd()));
@@ -447,7 +508,7 @@ export async function auditSecrets(envFilePath, projectName, options = {}) {
         const client = resolveClient(injectedClient, SecretsManagerClient, targetRegion ? { region: targetRegion } : {});
 
         const resp = await client.send(new GetSecretValueCommand({
-            SecretId: `${resolvedProjectName}-secrets`,
+            SecretId: `${secretVaultId(resolvedProjectName)}`,
         }));
 
         let remoteSecrets = {};
@@ -506,7 +567,7 @@ export async function auditSecrets(envFilePath, projectName, options = {}) {
             error_message: error.message,
         });
         if (error.name === 'ResourceNotFoundException') {
-            s.stop(color.red(`❌ No remote secrets found for "${resolvedProjectName}-secrets".`));
+            s.stop(color.red(`❌ No remote secrets found for "${secretVaultId(resolvedProjectName)}".`));
             console.log(color.yellow('\n💡 Next Step:'));
             console.log(`Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`);
         } else if (handleAuthErrorBranch(error, s, opts)) {

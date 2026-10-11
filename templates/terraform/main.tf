@@ -4,7 +4,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy = "grada"
+      ManagedBy    = "grada"
+      GradaProject = "{{PROJECT_NAME}}"
     }
   }
 }
@@ -19,7 +20,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy = "grada"
+      ManagedBy    = "grada"
+      GradaProject = "{{PROJECT_NAME}}"
     }
   }
 }
@@ -31,8 +33,13 @@ locals {
   # Workspace suffix for PR preview environments (e.g., "-pr-123"). Empty for production.
   env_suffix = terraform.workspace == "default" ? "" : "-${terraform.workspace}"
   
-  # Dynamic naming variable to prevent collisions
-  app_name = "{{PROJECT_NAME}}${local.env_suffix}"
+  # Per-project collision suffix minted once at init ("-a1b2c3"). Empty for
+  # trees scaffolded before suffixes existed — never change it by hand:
+  # renaming replaces every singleton resource below.
+  grada_resource_suffix = "{{RESOURCE_SUFFIX}}"
+
+  # Full application name: project + workspace + collision suffix.
+  app_name = "{{PROJECT_NAME}}${local.env_suffix}${local.grada_resource_suffix}"
 }
 
 # --- CloudWatch Logs ---
@@ -43,8 +50,8 @@ resource "aws_cloudwatch_log_group" "app_logs" {
 
 # --- ECR Repository (Shared across workspaces) ---
 resource "aws_ecr_repository" "app" {
-  count                = terraform.workspace == "default" ? 1 : 0
-  name                 = "{{PROJECT_NAME}}-repo"
+  count = terraform.workspace == "default" ? 1 : 0
+  name  = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo"
   # trivy:ignore:AVD-AWS-0031 - Mutable tags allow the CI/CD pipeline to reuse the 'latest' tag for simplified deployments
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -57,7 +64,7 @@ resource "aws_ecr_repository" "app" {
 # In PR workspaces, fetch the existing production repository
 data "aws_ecr_repository" "existing_app" {
   count = terraform.workspace != "default" ? 1 : 0
-  name  = "{{PROJECT_NAME}}-repo"
+  name  = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo"
 }
 
 locals {
@@ -137,7 +144,7 @@ resource "aws_ecs_task_definition" "app" {
       essential = true
 
       environment = [
-        { "name": "PORT", "value": "{{PORT}}" },
+        { "name" : "PORT", "value" : "{{PORT}}" },
         {{COMPOSE_WEB_ENV_VARS}}
         {{DB_ENV_VARS}}
       ]
@@ -180,10 +187,10 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name               = substr("${local.app_name}-alb", 0, 32)
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+  name                       = substr("${local.app_name}-alb", 0, 32)
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb.id]
+  subnets                    = aws_subnet.public[*].id
   drop_invalid_header_fields = true
 }
 
@@ -218,11 +225,14 @@ resource "aws_lb_listener" "http" {
 
 # --- ECS Service ---
 resource "aws_ecs_service" "app" {
-  name                   = "${local.app_name}-service"
-  cluster                = aws_ecs_cluster.main.id
-  task_definition        = aws_ecs_task_definition.app.arn
-  launch_type            = "FARGATE"
-  desired_count          = {{DESIRED_COUNT}}
+  name            = "${local.app_name}-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.app.arn
+  launch_type     = "FARGATE"
+  # Sleep guard: `grada sleep` writes sleep.auto.tfvars (asleep = true)
+  # so raw Terraform keeps the service at 0; `grada wake` deletes the
+  # file before restoring. asleep=false (default) keeps plans identical.
+  desired_count          = var.asleep ? 0 : {{DESIRED_COUNT}}
   enable_execute_command = true
 
   deployment_circuit_breaker {
@@ -240,7 +250,7 @@ resource "aws_ecs_service" "app" {
   network_configuration {
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true 
+    assign_public_ip = true
   }
 
   load_balancer {
@@ -254,14 +264,14 @@ resource "aws_ecs_service" "app" {
 
 # Allow the ECS agent to read the specific secret from Secrets Manager
 resource "aws_iam_role_policy" "secrets_policy" {
-  name   = "{{PROJECT_NAME}}-secrets-policy"
-  role   = aws_iam_role.execution_role.id
+  name = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-secrets-policy"
+  role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
         Resource = [local.secret_arn]
       }
     ]

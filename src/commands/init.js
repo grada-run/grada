@@ -13,26 +13,54 @@ import {
     analyzeSvelteConfig,
     analyzeAstroConfig,
     analyzeNestApp,
-    splitProcfileCommand
+    splitProcfileCommand,
+    frameworkDefaultPort,
+    frameworkUsesStrippedRunner,
+    isNpmShimCommand,
+    SUPPORTED_FRAMEWORKS
 } from '../utils/detector.js';
 import { detectProjectCapabilities } from '../utils/capabilities.js';
 import { ADDON_REGISTRY } from '../utils/addons.js';
 import { validateAddonFlags, resolveAddonOptions, scaffoldAddon, DEFAULT_BEDROCK_MODEL } from './add.js';
 import { injectMigrationGate } from './db/migrate.js';
 import { scaffoldDriftWorkflow } from './drift.js';
-import { trackEvent, flushTelemetry, getCliVersion } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, getCliVersion, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 import { getFrameworkWarning } from '../utils/warnings.js';
-import { provisionStateBucket } from '../utils/aws.js';
+import { provisionStateBucket, formatStateBucketName } from '../utils/aws.js';
 import { generateTemplates } from '../utils/generator.js';
-import { handleExistingFiles, writeInitManifest } from '../utils/backup.js';
+import { planExistingFiles, executeBackup, preserveManagedFiles, restoreManagedFiles, refusalResultForPlan, writeInitManifest } from '../utils/backup.js';
+import { checkStateAdoption } from '../utils/state-adoption.js';
+import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { estimateMonthlyCost, parseTerraformConfig, renderDryRunPreview } from '../utils/visualizer.js';
 import { getTargetDirectory, getProjectConfig, promptWorkerCommand } from '../utils/prompts.js';
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
-import { parseDockerCompose } from '../utils/dockerCompose.js';
+import { parseDockerCompose, selectComposeWebService } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe, COMPUTE_TARGETS } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS, resolveInitSuffix } from '../utils/resolvers.js';
 import { parseDomainTf } from '../utils/domains.js';
+
+// Greppable, invalid-as-real placeholder stamped into backend.tf and
+// workflow role ARNs by `init --offline`. Uppercase by design: S3 rejects
+// it, so an unreconciled tree fails loud at `terraform init`.
+export const OFFLINE_ACCOUNT_PLACEHOLDER = 'YOUR_AWS_ACCOUNT_ID';
+
+// Reconciliation checklist for offline scaffolds. console.log (not clack)
+// so it lands in CI logs as well as terminals. Mirrors every call
+// provisionStateBucket makes (create + tag + versioning), including its
+// us-east-1 LocationConstraint exception.
+export function printOfflineChecklist({ projectName, region }) {
+    const bucket = formatStateBucketName(projectName, '<aws-account-id>');
+    const locationArg = region === 'us-east-1' ? '' : ` --create-bucket-configuration LocationConstraint=${region}`;
+    console.log('');
+    console.log(color.yellow('⚠️  Offline scaffold: no AWS resources were created. Reconcile before applying:'));
+    console.log(`  1. Create the state bucket (replace <aws-account-id> with yours):`);
+    console.log(color.cyan(`     aws s3api create-bucket --bucket ${bucket} --region ${region}${locationArg}`));
+    console.log(color.cyan(`     aws s3api put-bucket-tagging --bucket ${bucket} --tagging 'TagSet=[{Key=ManagedBy,Value=grada}]'`));
+    console.log(color.cyan(`     aws s3api put-bucket-versioning --bucket ${bucket} --versioning-configuration Status=Enabled`));
+    console.log(`  2. Replace every ${OFFLINE_ACCOUNT_PLACEHOLDER} with your account ID: the bucket name in terraform/backend.tf plus every role-to-assume ARN in .github/workflows/*.yml (deploy, preview, teardown, drift).`);
+    console.log(`  3. Run ${color.cyan('terraform init')} in terraform/, then ${color.cyan('grada apply')}.`);
+}
 
 // Single source of truth for the CLI version (telemetry resolver: upward
 // manifest walk + env fallback). A local duplicate read here previously
@@ -40,7 +68,18 @@ import { parseDomainTf } from '../utils/domains.js';
 // didn't resolve under global installs.
 const CLI_VERSION = getCliVersion();
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function mainStack(input = {}) {
+    setActiveCommandName('init');
+    try {
+        return await mainStackMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function mainStackMain(input = {}) {
     const options = normalizeOptions(input);
     const { isHeadless = false } = options;
     const isPreconfigured = options.isPreconfigured === true || process.argv.includes('--preconfigured');
@@ -67,6 +106,18 @@ export async function mainStack(input = {}) {
 
     // 2b. Fail-fast validation of init composition flags — before any
     // prompts, AWS calls, backups, or file writes.
+    const explicitFramework = typeof headlessOptions.framework === 'string' && headlessOptions.framework.trim() !== ''
+        ? headlessOptions.framework.trim()
+        : null;
+    if (explicitFramework !== null && !SUPPORTED_FRAMEWORKS.includes(explicitFramework)) {
+        return failCommand({
+            message: `\n✖ Unknown framework "${explicitFramework}".`,
+            hint: `  Supported frameworks: ${SUPPORTED_FRAMEWORKS.join(', ')}.\n${explicitFramework === 'express' ? '  Express apps use --framework=node.\n' : ''}`,
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'INVALID_FRAMEWORK' },
+            reason: 'invalid-framework',
+        });
+    }
     const withList = Array.isArray(initOptions.with)
         ? initOptions.with.filter((cap) => typeof cap === 'string')
         : [];
@@ -144,6 +195,11 @@ export async function mainStack(input = {}) {
             });
         }
     }
+
+    // Collision suffix, resolved before any prompt/AWS call/write (and
+    // before backup planning moves the old tree): fresh trees mint, re-init
+    // reuses the rendered value, pre-suffix trees stay '' (zero drift).
+    const resourceSuffix = resolveInitSuffix(dirConfig.targetDir);
 
     // Compute target: explicit flag wins (headless defaults to ECS);
     // interactive runs prompt when the flag was not passed.
@@ -274,6 +330,26 @@ export async function mainStack(input = {}) {
         log.warn(color.yellow('⚠️  --setup-ci-migrate was passed but no database is configured or no migration command was detected; skipping the migration gate.'));
     }
 
+    // Stripped-runner guard: init is about to generate a node
+    // Dockerfile without npm/npx, so wiring a detected npm-shim command
+    // into the gate would fail 100% of deploys. Fail fast headless (the
+    // gate can be wired later with an explicit node command); warn loudly
+    // interactively and continue.
+    if (migrationGateEnabled && isNpmShimCommand(migrationCmd) && target === 'ecs' && frameworkUsesStrippedRunner(config.framework)) {
+        if (!isInteractive) {
+            return failCommand({
+                message: `\n✖ Refusing to wire the pre-deploy migration gate with "${migrationCmd}": the generated ${config.framework} Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" on every deploy.\n`,
+                hint: '  Re-run without --setup-ci-migrate, then wire the gate with an explicit node-based command, e.g. `grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci`.\n',
+                event: 'cli-error',
+                telemetry: { step: 'init_setup', error_code: 'NPM_CMD_STRIPPED_RUNNER' },
+                errorCode: 'NPM_CMD_STRIPPED_RUNNER',
+                reason: 'npm-cmd-stripped-runner',
+            });
+        }
+        console.log(color.yellow(`⚠️  The detected migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs").`));
+        trackEvent('npm_cmd_stripped_runner', { projectName: dirConfig.actualProjectName, cmd_source: 'detected', ci_setup: true });
+    }
+
     // Scheduled IaC drift detection: explicit flag wins, else offer.
     // Opt-in by default — the workflow opens GitHub Issues on its own.
     const setupCiDriftFlag = initOptions.setupCiDrift === true;
@@ -356,15 +432,34 @@ export async function mainStack(input = {}) {
         resolvedByCap[cap] = resolved;
     }
 
-    // 3.5 Docker Compose Overrides
+    // 3.5 Docker Compose Overrides. The web service is the `build:`
+    // service first, then the framework-port match, then the first
+    // non-datastore service — never an anointed database. A
+    // datastore-only file skips the merge (and the port override) with a
+    // loud warning in both modes; the selection passes through to the
+    // generator so it merges without re-warning.
+    let composeForMerge = dockerCompose;
+    let composeWebName = null;
     if (dockerCompose && dockerCompose.length > 0) {
-        // Find the first service that has an exposed port
-        const webService = dockerCompose.find(s => s.port);
-        if (webService && webService.port) {
-            // Override the config port with the one from Docker Compose
-            config.port = webService.port.toString();
-            if (!isHeadless) {
-                console.log(color.cyan(`   🐳 Docker Compose overrides: Port set to ${config.port} via service "${webService.name}"`));
+        const selection = selectComposeWebService(dockerCompose, {
+            frameworkPort: frameworkDefaultPort(config.framework),
+        });
+        if (!selection.service) {
+            console.log(color.yellow('⚠️  No app service detected in your compose file (every service looks like a datastore) — skipping the compose merge. Give your app service a `build:` key and re-run to merge it.'));
+            trackEvent('compose_merge_skipped', { projectName: dirConfig.actualProjectName, reason: selection.skipped });
+            composeForMerge = null;
+        } else {
+            composeWebName = selection.service.name;
+            if (selection.datastoreImage) {
+                console.log(color.yellow(`⚠️  Compose service "${selection.service.name}" looks like a datastore but was selected as the web service — verify the merged port and env vars before applying.`));
+                trackEvent('compose_datastore_web_warned', { projectName: dirConfig.actualProjectName, service: selection.service.name });
+            }
+            if (selection.service.port) {
+                // Override the config port with the one from Docker Compose
+                config.port = selection.service.port.toString();
+                if (!isHeadless) {
+                    console.log(color.cyan(`   🐳 Docker Compose overrides: Port set to ${config.port} via service "${selection.service.name}"`));
+                }
             }
         }
     }
@@ -424,19 +519,61 @@ export async function mainStack(input = {}) {
     const estimatedCost = costs.totalMonthly;
     const buildDir = detectedFramework?.buildDir || 'dist';
 
-    // 6. Handle Backups & Provision Remote State
-    await handleExistingFiles(dirConfig.targetDir, isHeadless, { force: initOptions.force });
+    // 6. Plan existing-file handling BEFORE provisioning: headless fail
+    // paths fire here while the tree is still intact, and the actual
+    // renames wait until provisioning succeeds.
+    const existingFilesPlan = await planExistingFiles(dirConfig.targetDir, { isHeadless, force: initOptions.force });
+    const existingFilesRefusal = await refusalResultForPlan(existingFilesPlan);
+    if (existingFilesRefusal) return existingFilesRefusal;
+    // Stash preserved files before anything mutates the tree; the stash is
+    // discarded untouched when provisioning fails below.
+    const preservedStash = preserveManagedFiles(dirConfig.targetDir);
 
     const s = spinner();
     s.start('Provisioning infrastructure...');
 
     let awsAccountId, stateBucketName;
+    let adoptionRefusal = null;
+    const offlineScaffold = initOptions.offline === true;
     try {
-        const bucketData = await provisionStateBucket(config.region, dirConfig.actualProjectName);
-        awsAccountId = bucketData.awsAccountId;
-        stateBucketName = bucketData.stateBucketName;
+        if (offlineScaffold) {
+            // Scaffold-only mode for template development and CI
+            // fixtures — no AWS calls. Placeholders are greppable and
+            // invalid as real values (uppercase), so an unreconciled tree
+            // fails loud at `terraform init` instead of half-working.
+            awsAccountId = OFFLINE_ACCOUNT_PLACEHOLDER;
+            stateBucketName = formatStateBucketName(`${dirConfig.actualProjectName}${resourceSuffix}`, OFFLINE_ACCOUNT_PLACEHOLDER);
+            s.stop('Offline mode: skipping state bucket provisioning.');
+            trackEvent('init_offline_scaffold', { projectName: dirConfig.actualProjectName });
+        } else {
+            const bucketData = await provisionStateBucket(config.region, `${dirConfig.actualProjectName}${resourceSuffix}`);
+            awsAccountId = bucketData.awsAccountId;
+            stateBucketName = bucketData.stateBucketName;
+            // Adoption gate: a fresh tree pointing at a bucket that already
+            // holds state needs an explicit adopt/rename/wipe choice before
+            // anything touches the tree. Probe failures fail closed through
+            // the provisioning catch below.
+            const isFreshTree = existingFilesPlan.decision === 'clean' && existingFilesPlan.foundFiles.length === 0;
+            // An interactive prompt may fire below: park the spinner first
+            // so it doesn't scribble over the choice (precedent: apply's
+            // recovery prompt). Headless runs never prompt.
+            const mayPromptAdoption = !isHeadless && initOptions.adoptState !== true && isFreshTree;
+            if (mayPromptAdoption) s.stop('State bucket ready.');
+            adoptionRefusal = await checkStateAdoption({
+                s3: bucketData.s3Client ?? null,
+                bucket: stateBucketName,
+                isFreshTree,
+                isHeadless,
+                adoptState: initOptions.adoptState === true,
+            });
+            if (mayPromptAdoption && !adoptionRefusal) s.start('Provisioning infrastructure...');
+        }
     } catch (error) {
         s.stop('❌ Failed to provision remote state or authenticate with AWS.');
+        trackEvent('init_backup_deferred', {
+            projectName: dirConfig.actualProjectName,
+            plan: existingFilesPlan.decision,
+        });
         return failCommand({
             message: `AWS Error: ${error.message}`,
             useErrorStream: true,
@@ -444,11 +581,17 @@ export async function mainStack(input = {}) {
             telemetry: { step: 'aws_provisioning', error_code: error.name || 'UNKNOWN', error_message: error.message },
         });
     }
+    if (adoptionRefusal) return failCommand(adoptionRefusal);
+
+    // Provisioning succeeded: move the old tree aside (no-op on a clean
+    // slate), then regenerate over the cleared ground.
+    await executeBackup(dirConfig.targetDir, existingFilesPlan);
 
     // 7. Synthesize Templates
     s.message('Synthesizing Terraform templates...');
-    await generateTemplates(dirConfig.targetDir, {
+    const renderConfig = {
         PROJECT_NAME: dirConfig.actualProjectName,
+        RESOURCE_SUFFIX: resourceSuffix,
         REGION: config.region,
         PORT: config.port,
         CPU: cpu,
@@ -468,11 +611,20 @@ export async function mainStack(input = {}) {
         DISABLE_DEFAULT_CI: disableDefaultCI,
         PROCFILE: procfile,
         VERCEL_RULES: vercelRules,
-        DOCKER_COMPOSE: dockerCompose,
+        DOCKER_COMPOSE: composeForMerge,
+        DOCKER_COMPOSE_WEB: composeWebName,
         ENABLE_PR_PREVIEWS: config.enablePrPreviews,
         WORKER_COMMAND: workerCommandHcl,
         TARGET: target
-    });
+    };
+    await generateTemplates(dirConfig.targetDir, renderConfig);
+    if (Array.isArray(renderConfig.COMPOSE_SECRETS_FILTERED) && renderConfig.COMPOSE_SECRETS_FILTERED.length > 0) {
+        trackEvent('compose_secrets_filtered', {
+            projectName: dirConfig.actualProjectName,
+            count: renderConfig.COMPOSE_SECRETS_FILTERED.length,
+            names: renderConfig.COMPOSE_SECRETS_FILTERED,
+        });
+    }
 
     // 7b. Scaffold selected addons (registry order), then wire the
     // pre-deploy migration gate into the generated workflow.
@@ -486,7 +638,7 @@ export async function mainStack(input = {}) {
         const workflowContent = readFileSafe(deployYmlPath);
         const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd }) : null;
         if (gated) {
-            fsSync.writeFileSync(deployYmlPath, gated);
+            atomicWriteFileSync(deployYmlPath, gated);
             console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml'));
         } else {
             log.warn(color.yellow('⚠️  Could not wire the migration gate: the deploy workflow anchor was not found.'));
@@ -496,16 +648,20 @@ export async function mainStack(input = {}) {
     if (driftEnabled) {
         const drifted = scaffoldDriftWorkflow(dirConfig.targetDir, {
             region: config.region,
-            roleArn: `arn:aws:iam::${awsAccountId}:role/${dirConfig.actualProjectName}-github-actions-role`,
+            roleArn: `arn:aws:iam::${awsAccountId}:role/${dirConfig.actualProjectName}${resourceSuffix}-github-actions-role`,
         });
         if (drifted.ok) {
             console.log(color.green('✅ Scaffolded .github/workflows/drift.yml (scheduled IaC drift detection)'));
         }
     }
 
-    // 7b2. Record content hashes of everything generated above so a later
-    // re-run can distinguish pristine output from hand edits (F3).
-    writeInitManifest(dirConfig.targetDir);
+    // 7b2. Restore preserved files over the fresh output, then record
+    // content hashes of everything generated above so a later re-run can
+    // distinguish pristine output from hand edits (F3), plus the intended
+    // compute target (R5) for the target-switch gate. The manifest lands
+    // after the restore so secret_keys.json hashes the carried content.
+    restoreManagedFiles(dirConfig.targetDir, preservedStash);
+    writeInitManifest(dirConfig.targetDir, { target });
 
     // 7c. Print-only stack preview when addons were scaffolded (default
     // no-addon output is untouched).
@@ -528,6 +684,7 @@ export async function mainStack(input = {}) {
         // 2. Infrastructure Shape
         target,
         framework: config.framework,
+        resource_suffix_present: resourceSuffix !== '',
         specific_framework: detectedFramework?.name || config.framework,
         region: config.region,
         size: config.size,
@@ -678,6 +835,10 @@ export async function mainStack(input = {}) {
     1. ${color.cyan(applyStep)}
     2. ${color.cyan(gitInstructions)}
     ${color.magenta('🚀 Need help?')} ${color.underline('https://calendly.com/anton-codes-iac/15min')}`);
+
+    if (offlineScaffold) {
+        printOfflineChecklist({ projectName: dirConfig.actualProjectName, region: config.region });
+    }
 
     await flushTelemetry();
 }

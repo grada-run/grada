@@ -9,7 +9,7 @@ vi.mock('child_process', () => ({
     spawn: mockSpawn,
 }));
 
-import { runTerraformCommand, getTerraformOutputs } from '../src/utils/terraform.js';
+import { runTerraformCommand, getTerraformOutputs, getTerraformStateBuckets } from '../src/utils/terraform.js';
 
 function makeChild({ code = 0, stdout = '', stderr = '', error = null } = {}) {
     const child = new EventEmitter();
@@ -80,5 +80,51 @@ describe('getTerraformOutputs', () => {
 
         mockSpawn.mockReturnValueOnce(makeChild({ error: new Error('ENOENT') }));
         await expect(getTerraformOutputs('/tmp')).resolves.toEqual({});
+    });
+});
+
+describe('getTerraformStateBuckets', () => {
+    function showJson(modules) {
+        return JSON.stringify({ values: { root_module: modules } });
+    }
+
+    it('walks root and nested child modules for managed buckets', async () => {
+        mockSpawn.mockReturnValueOnce(makeChild({
+            stdout: showJson({
+                resources: [
+                    { type: 'aws_ecs_cluster', values: { name: 'x' } },
+                    { type: 'aws_s3_bucket', values: { bucket: 'root-bucket-1' } },
+                ],
+                child_modules: [
+                    {
+                        resources: [
+                            { type: 'aws_s3_bucket', values: { bucket: 'child-bucket-2' } },
+                            { type: 'aws_s3_bucket', values: { id: 'id-only-bucket-3' } },
+                        ],
+                        child_modules: [
+                            { resources: [{ type: 'aws_s3_bucket', values: { bucket: 'root-bucket-1' } }] },
+                        ],
+                    },
+                ],
+            }),
+        }));
+        await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([
+            'root-bucket-1', 'child-bucket-2', 'id-only-bucket-3',
+        ]);
+        expect(mockSpawn).toHaveBeenCalledWith('terraform', ['show', '-json'], { cwd: '/tmp' });
+    });
+
+    it('resolves to [] on missing state, bad JSON, non-zero exit, and spawn errors', async () => {
+        mockSpawn.mockReturnValueOnce(makeChild({ stdout: JSON.stringify({}) }));
+        await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([]);
+
+        mockSpawn.mockReturnValueOnce(makeChild({ stdout: 'not json' }));
+        await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([]);
+
+        mockSpawn.mockReturnValueOnce(makeChild({ code: 1 }));
+        await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([]);
+
+        mockSpawn.mockReturnValueOnce(makeChild({ error: new Error('ENOENT') }));
+        await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([]);
     });
 });

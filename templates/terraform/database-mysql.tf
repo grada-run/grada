@@ -51,6 +51,19 @@ resource "aws_db_instance" "postgres" {
 
   skip_final_snapshot = true
   publicly_accessible = false
+
+  # grada destroy lifts this only via --allow-data-loss (or a per-run
+  # data-loss confirm); grada snapshots the database first unless the
+  # flag says the data may go. grada destroy also pre-wakes stopped
+  # databases automatically; a raw `terraform destroy` on a stopped DB
+  # fails — start it first with `aws rds start-db-instance`.
+  deletion_protection = !var.grada_allow_data_loss
+}
+
+variable "grada_allow_data_loss" {
+  type        = bool
+  default     = false
+  description = "Set by grada destroy --allow-data-loss to lift deletion protection. Do not enable by hand."
 }
 
 # 4. IAM Permission for RDS Master Password Secret

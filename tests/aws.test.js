@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { provisionStateBucket, handleAwsAuthError, isAuthError, handleAuthErrorBranch, resolveClient, hasAwsCli, resetAwsCliCache } from '../src/utils/aws.js';
+import { provisionStateBucket, ensureStateBucketExists, formatStateBucketName, handleAwsAuthError, isAuthError, handleAuthErrorBranch, resolveClient, hasAwsCli, resetAwsCliCache } from '../src/utils/aws.js';
 
 const { mockSpawnSync } = vi.hoisted(() => ({ mockSpawnSync: vi.fn() }));
 
@@ -76,6 +76,16 @@ describe('provisionStateBucket', () => {
     expect(MockCreateBucketCommand.mock.calls[0][0].CreateBucketConfiguration).toBeUndefined();
   });
 
+  it('sanitizes like init so recovery re-derives the identical bucket', async () => {
+    // Recovery passes a raw basename; init passes a sanitized name. Both
+    // must land on one bucket or recovery provisions fresh empty state.
+    const { stateBucketName } = await provisionStateBucket('us-east-2', '  My__App-- ');
+    expect(stateBucketName).toBe('my-app-tfstate-123456789012');
+    expect(MockCreateBucketCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ Bucket: 'my-app-tfstate-123456789012' }),
+    );
+  });
+
   it("when region is 'us-east-2', CreateBucketConfiguration has LocationConstraint 'us-east-2'", async () => {
     await provisionStateBucket('us-east-2', 'my-project');
 
@@ -87,6 +97,65 @@ describe('provisionStateBucket', () => {
     expect(MockCreateBucketCommand.mock.calls[0][0].CreateBucketConfiguration).toEqual({
       LocationConstraint: 'us-east-2',
     });
+  });
+});
+
+describe('ensureStateBucketExists', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockS3Send.mockReset().mockResolvedValue({});
+  });
+
+  it('creates, tags, and versions the exact bucket passed in', async () => {
+    const result = await ensureStateBucketExists({ region: 'us-east-2', bucket: 'myapp-a1b2c3-tfstate-123456789012' });
+
+    expect(result).toEqual({ bucket: 'myapp-a1b2c3-tfstate-123456789012' });
+    expect(MockCreateBucketCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Bucket: 'myapp-a1b2c3-tfstate-123456789012',
+        CreateBucketConfiguration: { LocationConstraint: 'us-east-2' },
+      }),
+    );
+    expect(MockPutBucketTaggingCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ Bucket: 'myapp-a1b2c3-tfstate-123456789012' }),
+    );
+    expect(MockPutBucketVersioningCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ Bucket: 'myapp-a1b2c3-tfstate-123456789012' }),
+    );
+  });
+
+  it('omits CreateBucketConfiguration in us-east-1', async () => {
+    await ensureStateBucketExists({ region: 'us-east-1', bucket: 'myapp-tfstate-123456789012' });
+
+    expect(MockCreateBucketCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ CreateBucketConfiguration: undefined }),
+    );
+  });
+
+  it('tolerates a bucket that already exists', async () => {
+    mockS3Send.mockRejectedValueOnce(Object.assign(new Error('owned'), { name: 'BucketAlreadyOwnedByYou' }));
+
+    const result = await ensureStateBucketExists({ region: 'us-east-2', bucket: 'myapp-tfstate-123456789012' });
+
+    expect(result).toEqual({ bucket: 'myapp-tfstate-123456789012' });
+  });
+});
+
+describe('formatStateBucketName', () => {
+  it('keeps account and placeholder suffixes verbatim', () => {
+    expect(formatStateBucketName('myapp', '123456789012')).toBe('myapp-tfstate-123456789012');
+    expect(formatStateBucketName('myapp', 'YOUR_AWS_ACCOUNT_ID')).toBe('myapp-tfstate-YOUR_AWS_ACCOUNT_ID');
+  });
+
+  it('truncates the project segment, never the account suffix', () => {
+    const long = 'a'.repeat(60);
+    const name = formatStateBucketName(long, '123456789012');
+    expect(name.length).toBeLessThanOrEqual(63);
+    expect(name.endsWith('-tfstate-123456789012')).toBe(true);
+  });
+
+  it('falls back to app for empty names instead of an invalid leading hyphen', () => {
+    expect(formatStateBucketName('   ', '123456789012')).toBe('app-tfstate-123456789012');
   });
 });
 

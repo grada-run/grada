@@ -107,7 +107,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`db enable-vector`](./apps/docs/src/content/docs/cli/db.md) | Enables `pgvector` for AI embeddings with a one-off VPC task. |
 | [`db import`](./apps/docs/src/content/docs/cli/db.md) | Streams a local dump or remote database into your private instance over an SSM tunnel. |
 | [`db backup` / `db restore`](./apps/docs/src/content/docs/cli/db.md) | Snapshot checkpoints and Terraform-pinned restores (cluster-aware for Aurora). |
-| [`gc`](./apps/docs/src/content/docs/cli/gc.md) | Deletes orphaned ECR images, log groups, and EIPs — dry-run first, explicit confirmation only. |
+| [`gc`](./apps/docs/src/content/docs/cli/gc.md) | Deletes orphaned ECR images, log groups, and EIPs — dry-run first, explicit confirmation (or `--yes`); `--deep` audits VPCs, secrets, and the state bucket report-only. |
 | [`sleep` / `wake`](./apps/docs/src/content/docs/cli/sleep.md) | Pauses an environment to $0 compute and restores exact replica counts (`--skip-db`, `--no-wait`, `--strict`). |
 | [`drift`](./apps/docs/src/content/docs/cli/drift.md) | Flags out-of-band AWS changes locally or daily in CI (`--setup`). |
 | [`alerts`](./apps/docs/src/content/docs/cli/alerts.md) | Scaffolds an SNS topic + alarm with email and chat-webhook delivery on every target (`--email`, `--webhook`, `--threshold`). |
@@ -115,7 +115,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`domain`](./apps/docs/src/content/docs/cli/domain.md) | Attaches a custom domain with automated ACM TLS (Route 53 or external DNS). |
 | [`destroy`](./apps/docs/src/content/docs/cli/destroy.md) | Tears down AWS resources to stop billing (state bucket optionally retained). |
 | [`eject`](./apps/docs/src/content/docs/cli/eject.md) | Strips `grada` metadata, leaving pure Terraform and Actions files. |
-| [`--headless`](./apps/docs/src/content/docs/guides/headless.md) | Fully programmatic runs for CI/CD (`--target`, `--with`, `--db-engine`, `--setup-ci-migrate`, `--setup-ci-drift`). |
+| [`--headless`](./apps/docs/src/content/docs/guides/headless.md) | Fully programmatic runs for CI/CD (`--target`, `--with`, `--db-engine`, `--setup-ci-migrate`, `--setup-ci-drift`, `--offline`). |
 | [`sync-ai`](./apps/docs/src/content/docs/cli/sync-ai.md) | Generates IDE assistant rules for your stack (Cursor, Copilot, Windsurf, Claude). |
 | [`mcp`](./apps/docs/src/content/docs/cli/mcp.md) | Serves the MCP server for AI agents (STDIO/HTTP) or installs editor config (`--install`). |
 

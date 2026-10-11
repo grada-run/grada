@@ -2,7 +2,7 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../../core/telemetry.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -116,7 +116,18 @@ function printPrismaVectorHint() {
     console.log(color.dim('      extensions = [vector] }\n'));
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDbEnableVector(input = {}) {
+    setActiveCommandName('db_enable_vector');
+    try {
+        return await runDbEnableVectorMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbEnableVectorMain(input = {}) {
     const options = normalizeOptions(input);
     const startTime = Date.now();
     let cwd;

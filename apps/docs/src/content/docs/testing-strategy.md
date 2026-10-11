@@ -17,6 +17,7 @@ Because `grada` generates highly dynamic Terraform (`.tf`), GitHub Actions (`.ym
 * **The Matrix:** The test suite generates dummy projects across 11 architectural topologies (including Django, Rails, Go, Nuxt, Next.js, SvelteKit, and Vercel/Heroku migrations).
 * **Negative Testing:** The suite explicitly checks for the *absence* of files (e.g., ensuring `database.tf` or `worker.tf` are not generated for static sites).
 * **Updating Snapshots:** If a template change is intentional, developers must run `npm run test:update` to overwrite the baseline `__snapshots__`.
+* **Format gate:** `tests/terraform-fmt.test.js` renders a target/addon matrix and asserts `terraform fmt -check` passes on every tree, so generated HCL is canonical from the first byte (no `terraform fmt` step needed before committing). The suite fails fast when the Terraform CLI is missing — install it before running `npm test`.
 
 ## 3. External API mocking
 To ensure tests run sub-second and deterministically without requiring real AWS credentials, we intercept network boundaries. Shared mock factories live in `tests/helpers/` (`clack.js` for `@clack/prompts`, `telemetry.js` for PostHog tracking, `console.js` for process/console spies, `tmpdir.js` for fixture directories) so new suites reuse one-liner `vi.mock` delegations instead of hand-rolling mocks:

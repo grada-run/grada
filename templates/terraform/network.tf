@@ -62,9 +62,9 @@ resource "aws_security_group" "alb" {
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
     # trivy:ignore:AVD-AWS-0104 - Allow ALB to route out to standard AWS services
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -84,9 +84,9 @@ resource "aws_security_group" "ecs_tasks" {
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
     # trivy:ignore:AVD-AWS-0104 - Allow containers to pull images and hit external APIs
     cidr_blocks = ["0.0.0.0/0"]
   }

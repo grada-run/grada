@@ -25,18 +25,22 @@ vi.mock('../src/utils/system.js', () => ({
     checkDependency: vi.fn(async () => true),
 }));
 
-vi.mock('../src/utils/aws.js', () => ({
-    checkAwsCredentials: vi.fn(async (region) => ({
-        accountId: '123456789012',
-        awsAccountId: '123456789012',
-        region: region || 'us-east-1',
-    })),
-    provisionStateBucket: vi.fn(async () => ({
-        awsAccountId: '123456789012',
-        stateBucketName: 'mock-tf-state-bucket',
-    })),
-    teardownStateBucket: vi.fn(async () => true),
-}));
+vi.mock('../src/utils/aws.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        checkAwsCredentials: vi.fn(async (region) => ({
+            accountId: '123456789012',
+            awsAccountId: '123456789012',
+            region: region || 'us-east-1',
+        })),
+        provisionStateBucket: vi.fn(async () => ({
+            awsAccountId: '123456789012',
+            stateBucketName: 'mock-tf-state-bucket',
+        })),
+        teardownStateBucket: vi.fn(async () => true),
+    };
+});
 
 // Silence telemetry so tests never hit the network.
 vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
@@ -251,12 +255,11 @@ describe('Headless contract (automation-safe)', () => {
 
     it('scaffolds email:ses headless with --domain and wires the migration gate', async () => {
         process.chdir(tmpDir);
-        await fs.writeFile(
-            path.join(tmpDir, 'package.json'),
-            JSON.stringify({ scripts: { 'db:migrate': 'prisma migrate deploy' } })
-        );
+        // Alembic on python: a non-npm command on a non-stripped runner,
+        // so the stripped-runner guard lets the gate through.
+        await fs.writeFile(path.join(tmpDir, 'alembic.ini'), '[alembic]\n');
         const parsed = parseCliArgs([
-            '--headless', '--framework=node', '--needsDatabase',
+            '--headless', '--framework=python', '--needsDatabase',
             '--with=email:ses', '--domain=example.com', '--setup-ci-migrate',
         ]);
         const spies = mockConsoleTrio();
@@ -276,7 +279,7 @@ describe('Headless contract (automation-safe)', () => {
             expect(sesTf).toContain('domain = "example.com"');
             const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
             expect(deployYml).toContain('# grada:db-migrate-start');
-            expect(deployYml).toContain('db:migrate');
+            expect(deployYml).toContain('alembic upgrade head');
             expect(trackEvent).toHaveBeenCalledWith(
                 'project_provisioned',
                 expect.objectContaining({ selected_addons: ['email:ses'], migration_gate_enabled: true })
@@ -345,6 +348,8 @@ describe('Headless contract (automation-safe)', () => {
         [['--headless', '--db-engine=sqlite'], 'invalid-db-engine', 'INVALID_DB_ENGINE'],
         [['--headless', '--target=eks'], 'invalid-compute-target', 'INVALID_COMPUTE_TARGET'],
         [['--headless', '--framework=node', '--target=static'], 'static-target-framework-mismatch', 'STATIC_TARGET_FRAMEWORK_MISMATCH'],
+        [['--headless', '--framework=express'], 'invalid-framework', 'INVALID_FRAMEWORK'],
+        [['--headless', '--framework=rails2'], 'invalid-framework', 'INVALID_FRAMEWORK'],
     ])('fails fast (%s) before AWS provisioning or file backup', async (argv, reason, code) => {
         process.chdir(tmpDir);
         await fs.mkdir(path.join(tmpDir, 'terraform'), { recursive: true });
@@ -376,9 +381,134 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('names supported frameworks and redirects express to node', async () => {
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=express']);
+        const spies = mockConsoleTrio();
+        try {
+            const result = await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+            expect(result).toMatchObject({ ok: false, reason: 'invalid-framework' });
+            const text = spies.logSpy.mock.calls.flat().join('\n') + spies.errorSpy.mock.calls.flat().join('\n');
+            expect(text).toContain('node');
+            expect(text).toContain('--framework=node');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('accepts every supported framework id without tripping validation', async () => {
+        const { SUPPORTED_FRAMEWORKS } = await import('../src/utils/detector.js');
+        expect(SUPPORTED_FRAMEWORKS.length).toBeGreaterThan(0);
+        for (const framework of SUPPORTED_FRAMEWORKS) {
+            process.chdir(tmpDir);
+            const parsed = parseCliArgs(['--headless', `--framework=${framework}`]);
+            const spies = mockConsoleTrio();
+            try {
+                const result = await mainStack({
+                    isHeadless: parsed.isHeadless,
+                    isPreconfigured: parsed.isPreconfigured,
+                    headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                    initOptions: parsed.initOptions,
+                });
+                expect(result?.reason).not.toBe('invalid-framework');
+            } finally {
+                spies.restore();
+            }
+        }
+    });
+
+    it('mints a resource suffix on fresh trees and bakes it into names', async () => {
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node']);
+        const spies = mockConsoleTrio();
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf8');
+            const match = mainTf.match(/grada_resource_suffix = "(-[a-f0-9]{6})"/);
+            expect(match, 'expected a minted -a1b2c3 suffix in main.tf').not.toBeNull();
+            // provisionStateBucket is mocked here; pin the wiring (suffixed
+            // project in) and let aws.test.js pin the bucket formula.
+            expect(provisionStateBucket).toHaveBeenCalledWith(
+                expect.anything(),
+                expect.stringMatching(/-[a-f0-9]{6}$/)
+            );
+            const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf8');
+            expect(deployYml).toContain(`${match[1]}-cluster`);
+            expect(trackEvent).toHaveBeenCalledWith('project_provisioned', expect.objectContaining({
+                resource_suffix_present: true,
+            }));
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('reuses the rendered suffix on re-init instead of minting', async () => {
+        await fs.mkdir(path.join(tmpDir, 'terraform'), { recursive: true });
+        await fs.writeFile(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-b2c3d4"\n  app_name = "myapp${local.env_suffix}${local.grada_resource_suffix}"\n}\n'
+        );
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node']);
+        const spies = mockConsoleTrio();
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: { ...parsed.initOptions, force: true },
+            });
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf8');
+            expect(mainTf).toContain('grada_resource_suffix = "-b2c3d4"');
+            expect(provisionStateBucket).toHaveBeenCalledWith(
+                expect.anything(),
+                expect.stringMatching(/-b2c3d4$/)
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('leaves pre-suffix trees unsuffixed on re-init (zero drift)', async () => {
+        await fs.mkdir(path.join(tmpDir, 'terraform'), { recursive: true });
+        await fs.writeFile(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\nresource "aws_ecr_repository" "app" {\n  name = "myapp-repo"\n}\n'
+        );
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node']);
+        const spies = mockConsoleTrio();
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: { ...parsed.initOptions, force: true },
+            });
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf8');
+            expect(mainTf).toContain('grada_resource_suffix = ""');
+            expect(mainTf).not.toMatch(/-[a-f0-9]{6}-repo/);
+            expect(trackEvent).toHaveBeenCalledWith('project_provisioned', expect.objectContaining({
+                resource_suffix_present: false,
+            }));
+        } finally {
+            spies.restore();
+        }
+    });
+
     it.each([
-        ['mysql', 'engine            = "mysql"', '{ "name": "DB_PORT", "value": "3306" }'],
-        ['aurora-postgresql', 'resource "aws_rds_cluster" "postgres"', '{ "name": "DB_ENGINE", "value": "aurora-postgresql" }'],
+        ['mysql', 'engine            = "mysql"', '{ "name" : "DB_PORT", "value" : "3306" }'],
+        ['aurora-postgresql', 'resource "aws_rds_cluster" "postgres"', '{ "name" : "DB_ENGINE", "value" : "aurora-postgresql" }'],
     ])('scaffolds --db-engine=%s headless with engine-specific wiring', async (engine, dbMarker, envMarker) => {
         process.chdir(tmpDir);
         const parsed = parseCliArgs([
@@ -404,6 +534,231 @@ describe('Headless contract (automation-safe)', () => {
             expect(trackEvent).toHaveBeenCalledWith(
                 'project_provisioned',
                 expect.objectContaining({ has_database: true, db_engine: engine })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('skips the compose merge for datastore-only files instead of baking in port 5432', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'compose.yml'), [
+            'services:',
+            '  postgres:',
+            '    image: postgres:16',
+            '    ports: ["5432:5432"]',
+            '    environment:',
+            '      POSTGRES_USER: app',
+            '      POSTGRES_PASSWORD: s3cret',
+            '  valkey:',
+            '    image: valkey/valkey:8',
+            '    ports: ["6379:6379"]',
+            '',
+        ].join('\n'));
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(exitSpy).not.toHaveBeenCalled();
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf-8');
+            expect(mainTf).toContain('containerPort = 3000');
+            expect(mainTf).not.toContain('5432');
+            expect(mainTf).not.toContain('POSTGRES_USER');
+            expect(mainTf).not.toContain('s3cret');
+            expect(logSpy.mock.calls.flat().join('\n')).toContain('No app service detected');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'compose_merge_skipped',
+                expect.objectContaining({ reason: 'all-datastores' })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('headless --setup-ci-migrate refuses detected npm-shim commands on stripped runners', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { drizzle: '1.0.0' } }));
+        await fs.writeFile(path.join(tmpDir, 'drizzle.config.ts'), 'export default {};');
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--needsDatabase', '--setup-ci-migrate']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            const result = await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(result).toMatchObject({ ok: false, reason: 'npm-cmd-stripped-runner' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(provisionStateBucket).not.toHaveBeenCalled();
+            expect(logSpy.mock.calls.flat().join('\n')).toContain('node ./');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('--offline scaffolds without AWS calls and prints the reconciliation checklist', async () => {
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--offline']);
+        expect(parsed.initOptions.offline).toBe(true);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(exitSpy).not.toHaveBeenCalled();
+            expect(provisionStateBucket).not.toHaveBeenCalled();
+            const backendTf = await fs.readFile(path.join(tmpDir, 'terraform', 'backend.tf'), 'utf-8');
+            expect(backendTf).toContain('YOUR_AWS_ACCOUNT_ID');
+            const logged = logSpy.mock.calls.flat().join('\n');
+            expect(logged).toContain('Offline scaffold');
+            expect(logged).toContain('YOUR_AWS_ACCOUNT_ID');
+            expect(logged).toContain('create-bucket');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'init_offline_scaffold',
+                expect.objectContaining({ projectName: expect.any(String) })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('compose secrets are filtered with telemetry instead of inlined', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'compose.yml'), [
+            'services:',
+            '  web:',
+            '    build: .',
+            '    ports: ["3000:3000"]',
+            '    environment:',
+            '      APP_KEY: yes',
+            '      POSTGRES_PASSWORD: s3cret',
+            '',
+        ].join('\n'));
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(exitSpy).not.toHaveBeenCalled();
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf-8');
+            expect(mainTf).toContain('APP_KEY');
+            expect(mainTf).not.toContain('s3cret');
+            expect(logSpy.mock.calls.flat().join('\n')).toContain('POSTGRES_PASSWORD');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'compose_secrets_filtered',
+                expect.objectContaining({ count: 1, names: ['POSTGRES_PASSWORD'] })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('--offline composes with database, addons, migrate gate, drift, and previews', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'alembic.ini'), '[alembic]\n');
+        const parsed = parseCliArgs([
+            '--headless', '--framework=python', '--needsDatabase',
+            '--with=db:redis,queue:sqs', '--setup-ci-migrate', '--setup-ci-drift',
+            '--enablePrPreviews', '--offline',
+        ]);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(exitSpy).not.toHaveBeenCalled();
+            expect(provisionStateBucket).not.toHaveBeenCalled();
+            const backendTf = await fs.readFile(path.join(tmpDir, 'terraform', 'backend.tf'), 'utf-8');
+            expect(backendTf).toContain('YOUR_AWS_ACCOUNT_ID');
+            for (const workflow of ['deploy.yml', 'drift.yml', 'preview.yml', 'teardown.yml']) {
+                const content = await fs.readFile(path.join(tmpDir, '.github', 'workflows', workflow), 'utf-8');
+                expect(content).toContain('YOUR_AWS_ACCOUNT_ID');
+            }
+            const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+            expect(deployYml).toContain('# grada:db-migrate-start');
+            expect(deployYml).toContain('alembic upgrade head');
+            expect(await fs.stat(path.join(tmpDir, 'terraform', 'redis.tf'))).toBeTruthy();
+            const logged = logSpy.mock.calls.flat().join('\n');
+            expect(logged).toContain('put-bucket-tagging');
+            expect(logged).toContain('role-to-assume');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('offline checklist omits LocationConstraint in us-east-1', async () => {
+        const { printOfflineChecklist } = await import('../src/commands/init.js');
+        const spies = mockConsoleTrio();
+        try {
+            printOfflineChecklist({ projectName: 'demo', region: 'us-east-1' });
+            const logged = spies.logSpy.mock.calls.flat().join('\n');
+            expect(logged).toContain('create-bucket --bucket demo-tfstate-<aws-account-id> --region us-east-1');
+            expect(logged).not.toContain('LocationConstraint');
+            expect(logged).toContain('put-bucket-tagging');
+            expect(logged).toContain('put-bucket-versioning');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('datastore selected as web warns loudly instead of silently', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'compose.yml'), [
+            'services:',
+            '  postgres:',
+            '    build: .',
+            '    image: postgres:16',
+            '    ports: ["5432:5432"]',
+            '',
+        ].join('\n'));
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(exitSpy).not.toHaveBeenCalled();
+            expect(logSpy.mock.calls.flat().join('\n')).toContain('looks like a datastore');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'compose_datastore_web_warned',
+                expect.objectContaining({ service: 'postgres' })
             );
         } finally {
             spies.restore();
@@ -507,5 +862,95 @@ describe('Headless: --target lambda', () => {
         for (const [message] of clack.mockLogWarn.mock.calls) {
             expect(String(message)).not.toContain('connection per concurrent execution');
         }
+    });
+});
+
+describe('Headless: state adoption gate', () => {
+    let tmpDir;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-headless-adopt-'));
+        process.chdir(tmpDir);
+    });
+
+    afterEach(async () => {
+        process.chdir(path.dirname(tmpDir));
+        if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    function keyPresentClient() {
+        return { send: vi.fn(async () => ({})) };
+    }
+
+    function keyAbsentClient() {
+        return {
+            send: vi.fn(async () => {
+                throw Object.assign(new Error('Not Found'), { name: 'NotFound' });
+            }),
+        };
+    }
+
+    function mockProvisionedBucket(s3Client) {
+        provisionStateBucket.mockResolvedValueOnce({
+            awsAccountId: '123456789012',
+            stateBucketName: 'mock-tf-state-bucket',
+            s3Client,
+        });
+    }
+
+    async function runHeadlessInit(argv) {
+        const parsed = parseCliArgs(argv);
+        const spies = mockConsoleTrio();
+        try {
+            const result = await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+            // Snapshot before restore: mockRestore clears call history.
+            return {
+                result,
+                exitCalls: spies.exitSpy.mock.calls.map((call) => call[0]),
+                errorText: spies.errorSpy.mock.calls.flat().join('\n'),
+            };
+        } finally {
+            spies.restore();
+        }
+    }
+
+    it('refuses with STATE_ALREADY_EXISTS when remote state already exists', async () => {
+        mockProvisionedBucket(keyPresentClient());
+        const { result, exitCalls, errorText } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(result).toMatchObject({ ok: false, reason: 'state-already-exists' });
+        expect(exitCalls).toEqual([1]);
+        expect(errorText).toContain('--adopt-state');
+        expect(trackEvent).toHaveBeenCalledWith(
+            'cli-error',
+            expect.objectContaining({ step: 'state_adoption', error_code: 'STATE_ALREADY_EXISTS' })
+        );
+        expectNoInteractivePrompts();
+        expect(clack.mockSpinnerStop).not.toHaveBeenCalledWith('State bucket ready.');
+        await expect(fs.stat(path.join(tmpDir, 'terraform'))).rejects.toThrow();
+    });
+
+    it('--adopt-state proceeds over existing state without probing', async () => {
+        const s3Client = keyPresentClient();
+        mockProvisionedBucket(s3Client);
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--adopt-state']);
+
+        expect(exitCalls).toEqual([]);
+        expect(s3Client.send).not.toHaveBeenCalled();
+        await expect(fs.stat(path.join(tmpDir, 'terraform', 'main.tf'))).resolves.toBeTruthy();
+    });
+
+    it('proceeds when the state key is absent', async () => {
+        mockProvisionedBucket(keyAbsentClient());
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(exitCalls).toEqual([]);
+        await expect(fs.stat(path.join(tmpDir, 'terraform', 'main.tf'))).resolves.toBeTruthy();
     });
 });

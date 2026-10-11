@@ -3,7 +3,7 @@ import fsSync from 'fs';
 import path from 'path';
 import color from 'picocolors';
 import { intro, outro, spinner, select, confirm, cancel, isCancel } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../../core/telemetry.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -159,7 +159,18 @@ function formatSnapshotHint(snapshot) {
     return `${when} · ${size} · ${type}`;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDbRestore(input = {}) {
+    setActiveCommandName('db_restore');
+    try {
+        return await runDbRestoreMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbRestoreMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;

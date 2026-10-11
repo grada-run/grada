@@ -36,14 +36,25 @@ export function resetTelemetryIdentityCache() {
 // the MCP server set this around the command they invoke so `cli_command`
 // names the real command instead of falling back to 'module_import'.
 // Always paired with resetActiveCommandName in a finally block.
-let activeCommandName = null;
+//
+// A stack, not a slot: commands nest (status calls diagnose, apply and
+// eject call wake, MCP wraps every leaf), so reset must restore the outer
+// command — a flat null would leave the outer command's later events
+// misattributed to 'module_import'.
+const activeCommandNameStack = [];
 
 export function setActiveCommandName(name) {
-    activeCommandName = typeof name === 'string' && name.trim() !== '' ? name.trim() : null;
+    if (typeof name === 'string' && name.trim() !== '') activeCommandNameStack.push(name.trim());
 }
 
 export function resetActiveCommandName() {
-    activeCommandName = null;
+    activeCommandNameStack.pop();
+}
+
+function currentCommandName() {
+    return activeCommandNameStack.length > 0
+        ? activeCommandNameStack[activeCommandNameStack.length - 1]
+        : null;
 }
 
 // The installed package's own name. The version resolver matches it so an
@@ -373,7 +384,7 @@ export function trackEvent(eventName, properties) {
             is_cli_entry: isCliEntry,
             cli_command: isCliEntry
                 ? (process.env.CLI_COMMAND || process.argv.slice(2).join(' ') || 'unknown')
-                : (activeCommandName || 'module_import'),
+                : (currentCommandName() || 'module_import'),
             project_id: projectId,
             framework: process.env.GRADA_FRAMEWORK || process.env.DEPLOY_STACK_FRAMEWORK || frameworkOverride || undefined,
             ...eventProps

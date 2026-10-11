@@ -159,6 +159,33 @@ describe('Command: status (mocked ECS + CloudWatch)', () => {
         }
     });
 
+    it('diagnoses with suffixed cluster, service, and log group on suffixed trees', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n');
+            const ecsClient = mockEcsClient({ ...healthyService, runningCount: 1, pendingCount: 1 });
+            const cloudWatchClient = mockCloudWatchClient([]);
+            const output = [];
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+                output.push(args.join(' '));
+            });
+            try {
+                const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients(), cwd: dir });
+                expect(result.healthy).toBe(false);
+                expect(output.join('\n')).toContain(DEGRADED_MESSAGE);
+                expect(runDiagnose).toHaveBeenCalledWith(
+                    expect.objectContaining({ cluster: 'myapp-a1b2c3-cluster', region: 'us-east-2', logGroup: '/ecs/myapp-a1b2c3' })
+                );
+                expect(exitSpy).toHaveBeenCalledWith(1);
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it('hands off to diagnose when a 5XX alarm fires', async () => {
         const ecsClient = mockEcsClient(healthyService);
         const cloudWatchClient = mockCloudWatchClient([
@@ -481,6 +508,20 @@ describe('status: lambda target (mocked AWS CLI)', () => {
         expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"computeTarget": "lambda"'));
     });
 
+    it('resolves the function name with the rendered resource suffix', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n');
+            const spawnSyncImpl = cliWith(ACTIVE);
+            const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', json: true, spawnSyncImpl, cwd: dir });
+            expect(result.function.name).toBe('myapp-a1b2c3-fn');
+            expect(spawnSyncImpl.mock.calls[0][1]).toContain('myapp-a1b2c3-fn');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it('runs diagnostics and exits 1 when degraded', async () => {
         const failed = JSON.stringify({ Configuration: { State: 'Active', LastUpdateStatus: 'Failed' } });
         const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', spawnSyncImpl: cliWith(failed) });
@@ -561,6 +602,22 @@ describe('status: static target (mocked CloudFront)', () => {
         expect(result.distribution).toEqual({ id: 'E1234567890', status: 'Deployed', domainName: 'abc123.cloudfront.net' });
         expect(result.signals).toBeNull();
         expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('matches the distribution comment with the rendered resource suffix', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n');
+            const result = await runStaticStatus({
+                projectName: 'myapp', region: 'us-east-2', cwd: dir,
+                cloudFrontClient: mockCfClient([{ ...DEPLOYED, Comment: 'myapp-a1b2c3-cdn' }]),
+            });
+            expect(result.healthy).toBe(true);
+            expect(result.distribution.id).toBe('E1234567890');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it('supports --json', async () => {

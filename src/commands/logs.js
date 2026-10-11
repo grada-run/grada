@@ -1,6 +1,6 @@
 import { CloudWatchLogsClient, FilterLogEventsCommand, DescribeLogStreamsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, isComputeTarget } from '../utils/resolvers.js';
@@ -121,7 +121,18 @@ function printMissingLogGroupGuidance(logGroup, service, region) {
     console.log(color.dim(`List matching groups with: aws logs describe-log-groups --log-group-name-prefix "${prefix}" --region ${region}`));
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runLogs(input = {}) {
+    setActiveCommandName('logs');
+    try {
+        return await runLogsMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runLogsMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;

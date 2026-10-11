@@ -2,6 +2,7 @@ import path from 'path';
 import { text, select, multiselect, confirm, group, cancel } from '@clack/prompts';
 import color from 'picocolors';
 import { execSync } from 'child_process';
+import { frameworkDefaultPort } from './detector.js';
 
 // Sanitizes a raw project name for AWS resource compatibility (ALB names
 // allow `[a-zA-Z0-9-]` only; ECR repositories require lowercase): trim,
@@ -115,9 +116,7 @@ export async function getProjectConfig(isHeadless, headlessOptions, targetDir, d
     });
     if (typeof setupType === 'symbol') process.exit(0);
 
-    let defaultPort = '3000';
-    if (finalFramework === 'static' || finalFramework === 'go') defaultPort = '8080';
-    if (finalFramework === 'python' || finalFramework === 'django') defaultPort = '8000';
+    const defaultPort = frameworkDefaultPort(finalFramework);
 
     let currentGitBranch = 'main';
     try {

@@ -714,6 +714,18 @@ describe('Command: diagnose on --target lambda projects', () => {
         expect(trackEvent).toHaveBeenCalledWith('diagnose_run', expect.objectContaining({ healthy: true, success: true }));
     });
 
+    it('resolves the function name with the rendered resource suffix', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnose-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n');
+            const result = await runLambdaDiagnose(baseInput({ cwd: dir }));
+            expect(result.functionName).toBe('myapp-a1b2c3-fn');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it('surfaces failed updates and recent error logs', async () => {
         const failed = JSON.stringify({ Configuration: { State: 'Active', LastUpdateStatus: 'Failed' } });
         const logsClient = { send: vi.fn().mockResolvedValue({ events: [{ message: 'ERROR boom' }, { message: 'ok line' }] }) };

@@ -17,6 +17,8 @@ import {
     getAttributeValue,
 } from '../utils/hcl.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, parseDomainTf } from '../utils/domains.js';
+import { withProjectLock } from '../utils/file-lock.js';
+import { atomicWriteFile, atomicWriteFileSync } from '../utils/atomic-write.js';
 
 export const DOMAIN_SUBCOMMANDS = ['add', 'verify', 'activate', 'status', 'remove'];
 
@@ -35,7 +37,7 @@ function acmCertificateBlock(domain) {
 }`;
 }
 
-function usEast1ProviderBlock() {
+function usEast1ProviderBlock(projectName) {
     return `# tflint-ignore: terraform_unused_declarations
 provider "aws" {
   alias  = "us_east_1"
@@ -43,7 +45,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy = "grada"
+      ManagedBy    = "grada"
+      GradaProject = "${projectName}"
     }
   }
 }`;
@@ -58,7 +61,8 @@ export function ensureUsEast1Provider(mainTfPath) {
     const content = fsSync.readFileSync(mainTfPath, 'utf-8');
     if (/alias\s*=\s*"us_east_1"/.test(content)) return false;
     const suffix = content.endsWith('\n') ? '' : '\n';
-    fsSync.writeFileSync(mainTfPath, `${content}${suffix}\n${usEast1ProviderBlock()}\n`);
+    const projectName = path.basename(path.dirname(path.dirname(mainTfPath)));
+    atomicWriteFileSync(mainTfPath, `${content}${suffix}\n${usEast1ProviderBlock(projectName)}\n`);
     return true;
 }
 
@@ -446,12 +450,16 @@ async function runDomainMain(input = {}) {
         });
     }
 
-    if (subcommand === 'add') return runDomainAdd({ options, cwd, projectName, domain, zoneId, domainTfPath, cloudfrontTfPath });
-    if (subcommand === 'verify' || subcommand === 'activate') {
-        return runDomainVerify({ options, cwd, projectName, domainTfPath, cloudfrontTfPath });
-    }
     if (subcommand === 'status') return runDomainStatus({ options, cwd, projectName, domainTfPath, cloudfrontTfPath });
-    return runDomainRemove({ options, cwd, projectName, domainTfPath, cloudfrontTfPath });
+    // Mutating subcommands share main.tf/domain.tf/cloudfront.tf with
+    // concurrent `add`/`eject` runs: serialize the whole mutation.
+    return withProjectLock(cwd, () => {
+        if (subcommand === 'add') return runDomainAdd({ options, cwd, projectName, domain, zoneId, domainTfPath, cloudfrontTfPath });
+        if (subcommand === 'verify' || subcommand === 'activate') {
+            return runDomainVerify({ options, cwd, projectName, domainTfPath, cloudfrontTfPath });
+        }
+        return runDomainRemove({ options, cwd, projectName, domainTfPath, cloudfrontTfPath });
+    }, { scope: 'terraform' });
 }
 
 async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath, cloudfrontTfPath }) {
@@ -490,7 +498,7 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
         content = renderDomainTfExternalPending({ domain });
     }
     await fs.mkdir(path.dirname(domainTfPath), { recursive: true });
-    await fs.writeFile(domainTfPath, content);
+    await atomicWriteFile(domainTfPath, content);
     ensureUsEast1Provider(path.join(path.dirname(domainTfPath), 'main.tf'));
 
     let cloudfrontPatched = false;
@@ -546,7 +554,7 @@ async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, sub
     }
     updated = patchCloudFrontDomain(updated, domain);
     const changed = updated !== content;
-    if (changed) await fs.writeFile(cloudfrontTfPath, updated);
+    if (changed) await atomicWriteFile(cloudfrontTfPath, updated);
     return { ok: true, changed };
 }
 
@@ -584,7 +592,7 @@ async function runDomainVerify({ options, projectName, domainTfPath, cloudfrontT
         await trackSuccess('domain_run', { projectName, subcommand: 'verify', mode, alreadyActive: true });
         return { ok: true, subcommand: 'verify', mode, domain, alreadyActive: true };
     }
-    await fs.writeFile(domainTfPath, appendValidationResource(content));
+    await atomicWriteFile(domainTfPath, appendValidationResource(content));
     const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, null, 'verify', noExit);
     if (!patched.ok) return patched.failure;
     console.log(color.green(`\n✅ Custom domain ${domain} activated.`));
@@ -695,7 +703,7 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
         if (domain && fsSync.existsSync(cloudfrontTfPath)) {
             const content = fsSync.readFileSync(cloudfrontTfPath, 'utf-8');
             const updated = unpatchCloudFrontDomain(content, domain);
-            if (updated !== content) fsSync.writeFileSync(cloudfrontTfPath, updated);
+            if (updated !== content) atomicWriteFileSync(cloudfrontTfPath, updated);
         }
     } catch {
         // A best-effort unpatch never blocks domain.tf removal.

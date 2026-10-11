@@ -23,13 +23,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run Vitest Suite
-        run: npm test
-
-      # grada init shells out to `terraform fmt` while rendering templates,
-      # so the CLI fails without Terraform on PATH.
+      # Terraform on PATH before the tests: the unit suite shells out to
+      # `terraform fmt -check` (tests/terraform-fmt.test.js), and the IaC
+      # scanning stage below runs tflint against rendered templates.
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+
+      - name: Run Vitest Suite
+        run: npm test
 
       - name: Render templates for IaC scanning
         env:

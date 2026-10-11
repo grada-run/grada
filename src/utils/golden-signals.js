@@ -4,6 +4,7 @@ import { RDSClient } from '@aws-sdk/client-rds';
 import { resolveClient } from './aws.js';
 import { normalizeOptions } from './args.js';
 import { findDbTarget, resolveDbIdentifier, resolveDbClusterIdentifier } from './rds.js';
+import { readResourceSuffix } from './resolvers.js';
 
 // Golden Signals: live CloudWatch telemetry for `grada status`.
 //
@@ -69,8 +70,10 @@ export async function fetchGoldenSignals(input = {}) {
             return failed(['projectName is required']);
         }
         const region = options.region;
-        const cluster = options.cluster || `${projectName}-cluster`;
-        const service = options.service || `${projectName}-service`;
+        const cwd = options.cwd || process.cwd();
+        const suffixedBase = `${projectName}${readResourceSuffix(cwd)}`;
+        const cluster = options.cluster || `${suffixedBase}-cluster`;
+        const service = options.service || `${suffixedBase}-service`;
         const cloudWatchClient = options.cloudWatchClient;
         if (!cloudWatchClient || typeof cloudWatchClient.send !== 'function') {
             return failed(['cloudWatchClient is required']);
@@ -83,7 +86,7 @@ export async function fetchGoldenSignals(input = {}) {
         // 1. ALB dimension discovery (name → app/<name>/<id>).
         let albDimension = null;
         try {
-            albDimension = await resolveAlbDimension(elbClient, projectName);
+            albDimension = await resolveAlbDimension(elbClient, suffixedBase);
         } catch (error) {
             errors.push(`alb: ${error?.message || error}`);
         }
@@ -93,8 +96,8 @@ export async function fetchGoldenSignals(input = {}) {
         let dbTarget = null;
         try {
             dbTarget = await findDbTarget(rdsClient, {
-                dbIdentifier: resolveDbIdentifier({ projectName, dbIdentifier: options.dbIdentifier }),
-                dbClusterIdentifier: resolveDbClusterIdentifier({ projectName, dbIdentifier: options.dbIdentifier }),
+                dbIdentifier: resolveDbIdentifier({ projectName, dbIdentifier: options.dbIdentifier }, cwd),
+                dbClusterIdentifier: resolveDbClusterIdentifier({ projectName, dbIdentifier: options.dbIdentifier }, cwd),
             });
         } catch (error) {
             errors.push(`db: ${error?.message || error}`);

@@ -3,6 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // during module evaluation and need the factories initialized.
 import { clackPromptsMockFactory, mockOutro } from './helpers/clack.js';
 import { telemetryMockFactory } from './helpers/telemetry.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { runDoctor, installHint, ciHint, singleCheckFailure, DOCTOR_CHECKS, AWS_AUTH_TIMEOUT_MS } from '../src/commands/doctor.js';
 import { checkDependency } from '../src/utils/system.js';
 import { checkAwsCredentials } from '../src/utils/aws.js';
@@ -236,7 +239,9 @@ describe('runDoctor', () => {
             expect(text).toContain('active AWS SDK credentials were found');
             expect(text).toContain('grada db connect');
             expect(text).not.toContain('AWS CLI (✗)');
-            expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining('100% ready'));
+            // R2 redefines bare success: outside a grada project the toolchain
+            // verdict is honest about the skipped project checks.
+            expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining('project checks were skipped'));
         } finally {
             restore();
         }
@@ -514,6 +519,156 @@ describe('runDoctor', () => {
             vi.mocked(checkDependency).mockImplementation(async () => true);
             await runDoctor();
             expect(vi.mocked(checkDependency)).toHaveBeenCalledTimes(8);
+        } finally {
+            restore();
+        }
+    });
+});
+
+describe('S27: project-aware doctor checks (R2)', () => {
+    const originalCwd = process.cwd();
+    let tmpDir;
+
+    beforeEach(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-project-'));
+    });
+
+    afterEach(() => {
+        process.chdir(originalCwd);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeProjectWithBackend() {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'backend.tf'),
+            'terraform {\n  backend "s3" {\n    bucket = "myapp-tfstate-1"\n    region = "us-east-2"\n  }\n}\n'
+        );
+    }
+
+    it('S27a: reports a held state lock instead of green', async () => {
+        writeProjectWithBackend();
+        const s3Client = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'ListObjectsV2Command') {
+                    return { Contents: [{ Key: 'terraform.tfstate.tflock' }] };
+                }
+                if (command.constructor.name === 'HeadBucketCommand') return {};
+                throw new Error(`unexpected S3 command: ${command.constructor.name}`);
+            }),
+        };
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir, s3Client });
+            expect(output.join('\n')).toMatch(/state lock|lock held|\.tflock/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_state_lock: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('deep mode reports the lock holder identity', async () => {
+        writeProjectWithBackend();
+        const s3Client = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'ListObjectsV2Command') {
+                    return { Contents: [{ Key: 'terraform.tfstate.tflock' }] };
+                }
+                if (command.constructor.name === 'GetObjectCommand') {
+                    return {
+                        Body: {
+                            transformToString: async () => JSON.stringify({
+                                ID: 'lock-1',
+                                Who: 'ci@build-7',
+                                Operation: 'apply',
+                                Created: '2026-10-01T00:00:00Z',
+                            }),
+                        },
+                    };
+                }
+                throw new Error(`unexpected S3 command: ${command.constructor.name}`);
+            }),
+        };
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir, s3Client, deep: true });
+            expect(output.join('\n')).toMatch(/ci@build-7/);
+        } finally {
+            restore();
+        }
+    });
+
+    it('warns (without failing) on an interrupted terraform run marker', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.mkdirSync(path.join(tmpDir, '.grada'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, '.grada', 'last-run.json'),
+            JSON.stringify({ status: 'interrupted', command: 'apply', startedAt: '2026-10-01T00:00:00Z' })
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/interrupt/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+                check_interrupted_run: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('groups output into System Environment and Project State sections', async () => {
+        writeProjectWithBackend();
+        const s3Client = { send: vi.fn(async () => ({ Contents: [] })) };
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir, s3Client });
+            const text = output.join('\n');
+            const envIdx = text.indexOf('System Environment');
+            const toolchainIdx = text.indexOf('Terraform (✓)');
+            const projectIdx = text.indexOf('Project State');
+            const projectLineIdx = text.indexOf('Terraform state lock');
+            expect(envIdx).toBeGreaterThanOrEqual(0);
+            expect(projectIdx).toBeGreaterThanOrEqual(0);
+            expect(envIdx).toBeLessThan(toolchainIdx);
+            expect(toolchainIdx).toBeLessThan(projectIdx);
+            expect(projectIdx).toBeLessThan(projectLineIdx);
+        } finally {
+            restore();
+        }
+    });
+
+    it('nests the project-skipped notice under the Project State heading', async () => {
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            const text = output.join('\n');
+            const envIdx = text.indexOf('System Environment');
+            const projectIdx = text.indexOf('Project State');
+            const skippedIdx = text.search(/project checks? skipped|no terraform\//i);
+            expect(envIdx).toBeGreaterThanOrEqual(0);
+            expect(projectIdx).toBeGreaterThan(envIdx);
+            expect(skippedIdx).toBeGreaterThan(projectIdx);
+            // The skip notice is no longer a trailing item in the tool list.
+            expect(text.indexOf('Docker (✓)')).toBeLessThan(projectIdx);
+        } finally {
+            restore();
+        }
+    });
+
+    it('S27b: success message is downgraded when project checks are skipped', async () => {
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            const text = output.join('\n');
+            expect(text).not.toContain('100% ready');
+            expect(text).toMatch(/project checks? skipped|no terraform\//i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+            }));
         } finally {
             restore();
         }

@@ -6,7 +6,7 @@ on:
 
 env:
   AWS_REGION: {{REGION}}
-  ECR_REPOSITORY: {{PROJECT_NAME}}-repo
+  ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
   WORKSPACE: pr-${{ github.event.pull_request.number }}
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -61,11 +61,11 @@ jobs:
           # then ignores), so the PR-tagged image is deployed explicitly —
           # mirroring the workspace-tagged task definition on ECS targets.
           aws lambda update-function-code \
-            --function-name {{PROJECT_NAME}}-${{ env.WORKSPACE }}-fn \
+            --function-name {{PROJECT_NAME}}-${{ env.WORKSPACE }}{{RESOURCE_SUFFIX}}-fn \
             --image-uri $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.WORKSPACE }} \
             --region ${{ env.AWS_REGION }}
           aws lambda wait function-updated \
-            --function-name {{PROJECT_NAME}}-${{ env.WORKSPACE }}-fn \
+            --function-name {{PROJECT_NAME}}-${{ env.WORKSPACE }}{{RESOURCE_SUFFIX}}-fn \
             --region ${{ env.AWS_REGION }}
 
       - name: Read preview URL

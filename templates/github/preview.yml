@@ -6,7 +6,7 @@ on:
 
 env:
   AWS_REGION: {{REGION}}
-  ECR_REPOSITORY: {{PROJECT_NAME}}-repo
+  ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
   WORKSPACE: pr-${{ github.event.pull_request.number }}
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR

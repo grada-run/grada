@@ -50,6 +50,13 @@ resource "aws_rds_cluster" "postgres" {
   skip_final_snapshot = true
   storage_encrypted   = true
 
+  # grada destroy lifts this only via --allow-data-loss (or a per-run
+  # data-loss confirm); grada snapshots the database first unless the
+  # flag says the data may go. grada destroy also pre-wakes stopped
+  # databases automatically; a raw `terraform destroy` on a stopped DB
+  # fails — start it first with `aws rds start-db-cluster`.
+  deletion_protection = !var.grada_allow_data_loss
+
   serverlessv2_scaling_configuration {
     min_capacity             = 0
     max_capacity             = 2
@@ -61,6 +68,12 @@ resource "aws_rds_cluster" "postgres" {
     # that drift as a change on subsequent applies.
     ignore_changes = [availability_zones]
   }
+}
+
+variable "grada_allow_data_loss" {
+  type        = bool
+  default     = false
+  description = "Set by grada destroy --allow-data-loss to lift deletion protection. Do not enable by hand."
 }
 
 resource "aws_rds_cluster_instance" "postgres" {

@@ -8,9 +8,10 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { runDiagnose } from './diagnose.js';
 import { fetchGoldenSignals } from '../utils/golden-signals.js';
+import { requireManagedTree } from '../utils/terraform-metadata.js';
 
 export const DEGRADED_MESSAGE = '⚠️ Degraded state detected. Running automated diagnostics...';
 export const STATUS_WATCH_INTERVAL_MS = 10000;
@@ -106,7 +107,7 @@ export async function runLambdaStatus(input = {}) {
     const projectName = options.projectName;
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : `${projectName}-fn`;
+        : `${projectName}${readResourceSuffix(cwd)}-fn`;
     const asJson = Boolean(options.json);
     const runSync = options.spawnSyncImpl || spawnSync;
 
@@ -223,7 +224,7 @@ export async function runStaticStatus(input = {}) {
     const cwd = options.cwd || process.cwd();
     const region = options.region;
     const projectName = options.projectName;
-    const comment = `${projectName}-cdn`;
+    const comment = `${projectName}${readResourceSuffix(cwd)}-cdn`;
     const asJson = Boolean(options.json);
     const cloudFrontClient = resolveClient(options.cloudFrontClient, CloudFrontClient, { region });
 
@@ -381,6 +382,8 @@ async function runStatusMain(input = {}) {
     } catch {
         return failProjectNotInitialized({ event: 'status_run', noExit });
     }
+    // Read-only status warns (never refuses) on ejected trees.
+    await requireManagedTree({ cwd, command: 'status', options, mode: 'warn', noExit });
     const computeTarget = readTerraformComputeTarget(cwd);
     if (computeTarget === 'lambda') {
         return runLambdaStatus({ ...options, cwd, region, projectName });
@@ -388,9 +391,10 @@ async function runStatusMain(input = {}) {
     if (computeTarget === 'static') {
         return runStaticStatus({ ...options, cwd, region, projectName });
     }
-    const cluster = options.cluster || process.env.ECS_CLUSTER || `${projectName}-cluster`;
-    const serviceName = options.service || process.env.ECS_SERVICE || `${projectName}-service`;
-    const logGroup = options.logGroup || process.env.ECS_LOG_GROUP || `/ecs/${projectName}`;
+    const resourceSuffix = readResourceSuffix(cwd);
+    const cluster = options.cluster || process.env.ECS_CLUSTER || `${projectName}${resourceSuffix}-cluster`;
+    const serviceName = options.service || process.env.ECS_SERVICE || `${projectName}${resourceSuffix}-service`;
+    const logGroup = options.logGroup || process.env.ECS_LOG_GROUP || `/ecs/${projectName}${resourceSuffix}`;
     const asJson = Boolean(options.json);
 
     // --watch repaints the human dashboard; --json stays a single shot.
@@ -443,6 +447,7 @@ async function runStatusMain(input = {}) {
                 cloudWatchClient,
                 elbClient: options.elbClient,
                 rdsClient: options.rdsClient,
+                cwd,
             });
             signals = { alb: fetched.alb, ecs: fetched.ecs, db: fetched.db };
             if (fetched.errors.length > 0) signalsError = fetched.errors;

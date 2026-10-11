@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fetchGoldenSignals, resolveAlbName, albDimensionFromArn } from '../src/utils/golden-signals.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 const LB_ARN = 'arn:aws:elasticloadbalancing:us-east-2:123456789012:loadbalancer/app/myapp-alb/abcdef1234567890';
 
@@ -71,6 +74,23 @@ describe('golden-signals: ALB discovery helpers', () => {
 });
 
 describe('golden-signals: fetch', () => {
+    it('discovers the suffixed ALB and cluster names from the rendered tree', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golden-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n');
+            const elbClient = mockElbClient();
+            const cloudWatchClient = mockMetricClient([]);
+            await fetchGoldenSignals(baseInput({ cwd: dir, elbClient, cloudWatchClient }));
+            expect(elbClient.send.mock.calls[0][0].input.Names).toEqual(['myapp-a1b2c3-alb']);
+            const queries = cloudWatchClient.send.mock.calls[0][0].input.MetricDataQueries;
+            const clusterDims = queries.flatMap((q) => (q.MetricStat?.Metric?.Dimensions ?? []).map((d) => d.Value));
+            expect(clusterDims).toContain('myapp-a1b2c3-cluster');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it('populates ALB and ECS sections from one batched GetMetricData call', async () => {
         const cloudWatchClient = mockMetricClient([
             { Id: 'albRequests', Values: [1240] },

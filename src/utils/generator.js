@@ -4,7 +4,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { COST_ESTIMATE_MARKER, LEGACY_COST_ESTIMATE_MARKER } from './visualizer.js';
-import { findResourceBlock, replaceBlock } from './hcl.js';
+import { findResourceBlock, replaceBlock, normalizeBlankLines, realignAssignmentRuns } from './hcl.js';
+import { atomicWriteFile } from './atomic-write.js';
+import { selectComposeWebService, partitionComposeEnv } from './dockerCompose.js';
+import { frameworkDefaultPort } from './detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +37,7 @@ export function targetFileSets(finalFramework) {
     const shared = [
         { src: 'terraform/oidc.tf', dest: 'terraform/oidc.tf' },
         { src: 'terraform/backend.tf', dest: 'terraform/backend.tf' },
+        { src: 'terraform/variables.tf', dest: 'terraform/variables.tf' },
     ];
     return {
         ecs: {
@@ -211,6 +215,36 @@ export function buildDbEntries(engine, target = 'ecs') {
 
 // Adds the `random` provider to a rendered backend.tf (Lambda + database
 // projects only, for `random_password.db_password`). No-op when present.
+// Resolves the compose service to merge for a render config. init
+// pre-selects through DOCKER_COMPOSE_WEB (a service name, or null when
+// init already warned and declined the merge); direct callers run the
+// full selector with its warnings here. Returns the service or null.
+export function resolveComposeWebService(config) {
+    const services = config.DOCKER_COMPOSE;
+    if (config.DOCKER_COMPOSE_WEB === null) return null;
+    if (typeof config.DOCKER_COMPOSE_WEB === 'string') {
+        const named = services.find((s) => s && s.name === config.DOCKER_COMPOSE_WEB);
+        if (named) return named;
+    }
+    const { service, skipped, datastoreImage } = selectComposeWebService(services, {
+        frameworkPort: frameworkDefaultPort(config.finalFramework),
+    });
+    if (!service) {
+        console.log(color.yellow(`⚠️  No app service detected in your compose file (${skipped === 'all-datastores' ? 'every service looks like a datastore' : 'no services found'}) — skipping the compose merge. Give your app service a \`build:\` key to merge it.`));
+        return null;
+    }
+    if (datastoreImage) {
+        console.log(color.yellow(`⚠️  Compose service "${service.name}" looks like a datastore but was selected as the web service — verify the merged port and env vars before applying.`));
+    }
+    return service;
+}
+
+// One loud line per filtered block: names what was withheld and where
+// the values belong instead.
+export function warnComposeSecretsFiltered(skipped) {
+    console.log(color.yellow(`⚠️  Skipped ${skipped.length} secret-like compose env var(s) (${skipped.join(', ')}): values are never inlined into generated files — use \`grada secrets push\` instead.`));
+}
+
 export function addRandomProvider(backendTfContent) {
     const content = String(backendTfContent ?? '');
     if (/source\s*=\s*"hashicorp\/random"/.test(content)) return content;
@@ -223,6 +257,9 @@ export function addRandomProvider(backendTfContent) {
 }
 
 export async function generateTemplates(targetDir, config) {
+    // Collision suffix defaults to empty (pre-suffix callers and fixtures
+    // render byte-identical names); init always passes the real value.
+    if (config.RESOURCE_SUFFIX === undefined || config.RESOURCE_SUFFIX === null) config.RESOURCE_SUFFIX = '';
     const target = config.TARGET === 'lambda' ? 'lambda' : config.TARGET === 'static' ? 'static' : 'ecs';
     const isLambda = target === 'lambda';
     const isStatic = target === 'static';
@@ -320,20 +357,23 @@ export async function generateTemplates(targetDir, config) {
             // a plain variable (see convertDatabaseTfForLambda) because
             // VPC-attached functions cannot reach Secrets Manager without a
             // paid VPC endpoint.
-            config.DB_ENV_VARS = `      DB_HOST = ${dbRef}.${dbHostAttr}\n`
-                + `      DB_PORT = "${dbPort}"\n`
-                + `      DB_NAME = ${dbRef}.${dbNameAttr}\n`
-                + `      DB_USER = "dbadmin"\n`
+            // Own alignment group (leading blank line separates it from the
+            // static PORT entries above): keys padded to DB_PASSWORD, the
+            // longest key this emitter ever prints.
+            config.DB_ENV_VARS = `\n      DB_HOST     = ${dbRef}.${dbHostAttr}\n`
+                + `      DB_PORT     = "${dbPort}"\n`
+                + `      DB_NAME     = ${dbRef}.${dbNameAttr}\n`
+                + `      DB_USER     = "dbadmin"\n`
                 + `      DB_PASSWORD = random_password.db_password.result\n`
-                + (dbEngine === 'postgres' ? '' : `      DB_ENGINE = "${dbEngine}"\n`);
+                + (dbEngine === 'postgres' ? '' : `      DB_ENGINE   = "${dbEngine}"\n`);
         } else {
             config.DB_ENV_VARS = `
-        { "name": "DB_HOST", "value": ${dbRef}.${dbHostAttr} },
-        { "name": "DB_PORT", "value": "${dbPort}" },
-        { "name": "DB_NAME", "value": ${dbRef}.${dbNameAttr} }${dbEngine === 'postgres' ? '' : `,\n        { "name": "DB_ENGINE", "value": "${dbEngine}" }`}`;
+        { "name" : "DB_HOST", "value" : ${dbRef}.${dbHostAttr} },
+        { "name" : "DB_PORT", "value" : "${dbPort}" },
+        { "name" : "DB_NAME", "value" : ${dbRef}.${dbNameAttr} }${dbEngine === 'postgres' ? '' : `,\n        { "name" : "DB_ENGINE", "value" : "${dbEngine}" }`}`;
 
-            secretsArray.push(`{ "name": "DB_USER", "valueFrom": "\${${dbRef}.master_user_secret[0].secret_arn}:username::" }`);
-            secretsArray.push(`{ "name": "DB_PASSWORD", "valueFrom": "\${${dbRef}.master_user_secret[0].secret_arn}:password::" }`);
+            secretsArray.push(`{ "name" : "DB_USER", "valueFrom" : "\${${dbRef}.master_user_secret[0].secret_arn}:username::" }`);
+            secretsArray.push(`{ "name" : "DB_PASSWORD", "valueFrom" : "\${${dbRef}.master_user_secret[0].secret_arn}:password::" }`);
         }
 
         // VPC-attached functions reach RDS/ElastiCache over the VPC subnets;
@@ -349,49 +389,64 @@ export async function generateTemplates(targetDir, config) {
     // 3.3. Docker Compose Overrides & Sidecars
     let composeWebEnvVars = [];
     let extraContainersHCL = "";
+    // Names withheld by the secret filter, collected for the caller's
+    // telemetry (the generator itself stays telemetry-free).
+    config.COMPOSE_SECRETS_FILTERED = [];
 
     if (config.DOCKER_COMPOSE && config.DOCKER_COMPOSE.length > 0) {
-        // Identify the main web service (the one with the exposed port)
-        const webService = config.DOCKER_COMPOSE.find(s => s.port) || config.DOCKER_COMPOSE[0];
+        // Identify the main web service: build-key first, then the
+        // framework default port, then the first non-datastore service.
+        // init pre-selects through DOCKER_COMPOSE_WEB (null = skip);
+        // direct callers run the full selector with its warnings here.
+        const webService = resolveComposeWebService(config);
 
-        // Extract Web Env Vars
-        if (webService.environment) {
-            for (const [key, val] of Object.entries(webService.environment)) {
+        if (webService) {
+            // Extract Web Env Vars (secret-like entries are withheld, never inlined)
+            const { safe: webEnv, skipped: webSkipped } = partitionComposeEnv(webService.environment);
+            if (webSkipped.length > 0) {
+                warnComposeSecretsFiltered(webSkipped);
+                config.COMPOSE_SECRETS_FILTERED.push(...webSkipped);
+            }
+            for (const [key, val] of Object.entries(webEnv)) {
                 if (isLambda) {
                     composeWebEnvVars.push(`      ${key} = "${String(val).replace(/"/g, '\\"')}"`);
                 } else {
-                    composeWebEnvVars.push(`{ "name": "${key}", "value": "${val}" }`);
+                    composeWebEnvVars.push(`{ "name" : "${key}", "value" : "${String(val).replace(/"/g, '\\"')}" }`);
                 }
             }
-        }
 
-        // Extract Web Command Override (only if Procfile hasn't already set it)
-        if (webService.command && !config.TASK_COMMAND && !isLambda) {
-            config.TASK_COMMAND = `command = ${JSON.stringify(typeof webService.command === 'string' ? webService.command.split(' ') : webService.command)}`;
-        }
-        if (isLambda && webService.command && config.LAMBDA_IMAGE_CONFIG === '') {
-            const composeCommand = typeof webService.command === 'string' ? webService.command : webService.command.join(' ');
-            config.LAMBDA_IMAGE_CONFIG = `  image_config {\n    command = ${JSON.stringify(['sh', '-c', composeCommand])}\n  }\n`;
-        }
+            // Extract Web Command Override (only if Procfile hasn't already set it)
+            if (webService.command && !config.TASK_COMMAND && !isLambda) {
+                config.TASK_COMMAND = `command = ${JSON.stringify(typeof webService.command === 'string' ? webService.command.split(' ') : webService.command)}`;
+            }
+            if (isLambda && webService.command && config.LAMBDA_IMAGE_CONFIG === '') {
+                const composeCommand = typeof webService.command === 'string' ? webService.command : webService.command.join(' ');
+                config.LAMBDA_IMAGE_CONFIG = `  image_config {\n    command = ${JSON.stringify(['sh', '-c', composeCommand])}\n  }\n`;
+            }
 
-        // Process Sidecar Containers (e.g., Redis, Memcached)
-        const sidecars = config.DOCKER_COMPOSE.filter(s => s.name !== webService.name);
-        if (isLambda && sidecars.length > 0) {
-            console.log(color.yellow(`⚠️  Skipping ${sidecars.length} Docker Compose sidecar(s) (${sidecars.map((s) => s.name).join(', ')}): Lambda targets run a single container per function.`));
-        }
-        if (!isLambda && sidecars.length > 0) {
-            extraContainersHCL = sidecars.map(service => {
-                const sidecarEnv = Object.entries(service.environment || {})
-                    .map(([k, v]) => `{ "name": "${k}", "value": "${String(v).replace(/"/g, '\\"')}" }`)
-                    .join(',\n        ');
+            // Process Sidecar Containers (e.g., Redis, Memcached)
+            const sidecars = config.DOCKER_COMPOSE.filter(s => s.name !== webService.name);
+            if (isLambda && sidecars.length > 0) {
+                console.log(color.yellow(`⚠️  Skipping ${sidecars.length} Docker Compose sidecar(s) (${sidecars.map((s) => s.name).join(', ')}): Lambda targets run a single container per function.`));
+            }
+            if (!isLambda && sidecars.length > 0) {
+                extraContainersHCL = sidecars.map(service => {
+                    const { safe: sidecarSafe, skipped: sidecarSkipped } = partitionComposeEnv(service.environment);
+                    if (sidecarSkipped.length > 0) {
+                        warnComposeSecretsFiltered(sidecarSkipped);
+                        config.COMPOSE_SECRETS_FILTERED.push(...sidecarSkipped);
+                    }
+                    const sidecarEnv = Object.entries(sidecarSafe)
+                        .map(([k, v]) => `{ "name" : "${k}", "value" : "${String(v).replace(/"/g, '\\"')}" }`)
+                        .join(',\n        ');
 
-                const sidecarCmd = service.command ? `\n      command = ${JSON.stringify(typeof service.command === 'string' ? service.command.split(' ') : service.command)}` : '';
+                    const sidecarCmd = service.command ? `\n      command = ${JSON.stringify(typeof service.command === 'string' ? service.command.split(' ') : service.command)}` : '';
 
-                return `,
+                    return `,
     {
       name      = "${service.name}"
       image     = "${service.image || 'alpine:latest'}"
-      essential = true
+      essential = false
       environment = [
         ${sidecarEnv}
       ]${sidecarCmd}
@@ -404,14 +459,17 @@ export async function generateTemplates(targetDir, config) {
         }
       }
     }`;
-            }).join('');
+                }).join('');
+            }
         }
     }
 
     config.COMPOSE_WEB_ENV_VARS = composeWebEnvVars.length === 0
         ? ''
         : isLambda
-            ? `${composeWebEnvVars.join('\n')}\n`
+            // Own alignment group (leading blank line) with keys padded
+            // to the longest compose key in this render.
+            ? `\n${realignAssignmentRuns(composeWebEnvVars.join('\n'))}\n`
             : `${composeWebEnvVars.join(',\n        ')},`;
     config.EXTRA_CONTAINERS = isLambda ? '' : extraContainersHCL;
 
@@ -421,7 +479,7 @@ export async function generateTemplates(targetDir, config) {
 
     // 4.1. Inject Rails Master Key if applicable
     if (config.finalFramework === 'rails') {
-        secretsArray.push(`{ "name": "RAILS_MASTER_KEY", "valueFrom": "\${local.secret_arn}:RAILS_MASTER_KEY::" }`);
+        secretsArray.push(`{ "name" : "RAILS_MASTER_KEY", "valueFrom" : "\${local.secret_arn}:RAILS_MASTER_KEY::" }`);
 
         let initialMasterKey = "1234567890abcdef1234567890abcdef"; // Dummy fallback for CI/CD
         const masterKeyPath = path.join(targetDir, 'config', 'master.key');
@@ -442,7 +500,7 @@ export async function generateTemplates(targetDir, config) {
     if (isLambda && config.finalFramework === 'rails') {
         console.log(color.yellow('⚠️  RAILS_MASTER_KEY is not auto-injected on Lambda targets: set it as a function environment variable after provisioning.'));
     }
-    config.TASK_SECRETS = isLambda ? '' : secretsArray.join(',\n        ');
+    config.TASK_SECRETS = isLambda ? '' : secretsArray.join(',\n          ');
     config.INITIAL_SECRET_MAP = initialSecretMap;
 
     config.SAFE_ALB_NAME = config.PROJECT_NAME.length > 27
@@ -516,25 +574,29 @@ resource "aws_lb_listener_rule" "vercel_redirect_${index}" {
             // blank line after NODE_ENV (main.tf shares the value shape, so
             // the cleanup stays worker-specific).
             content = content.replace(
-                /(\{ "name": "NODE_ENV", "value": "production" \}),\s*\n\s*\n(\s*\])/,
+                /(\{ "name" : "NODE_ENV", "value" : "production" \}),\s*\n\s*\n(\s*\])/,
                 '$1\n$2'
             );
         }
 
-        await fs.writeFile(path.join(targetDir, file.dest), content);
+        // Empty placeholder expansions leave indented blank lines that
+        // `terraform fmt` flags — normalize them on every rendered file.
+        content = normalizeBlankLines(content);
+
+        await atomicWriteFile(path.join(targetDir, file.dest), content);
     }
 
     // 6. Create empty secrets file (preserve previously pushed keys on re-init)
     const secretKeysPath = path.join(targetDir, 'terraform', 'secret_keys.json');
     if (!fsSync.existsSync(secretKeysPath)) {
-        await fs.writeFile(secretKeysPath, "[]");
+        await atomicWriteFile(secretKeysPath, "[]");
     }
 
     // 7. Handle .gitignore dynamically based on framework
     const targetGitignore = path.join(targetDir, '.gitignore');
 
     if (!fsSync.existsSync(targetGitignore)) {
-        await fs.writeFile(targetGitignore, getGitignoreContent(config.finalFramework));
+        await atomicWriteFile(targetGitignore, getGitignoreContent(config.finalFramework));
     } else {
         const existingGitignore = await fs.readFile(targetGitignore, 'utf-8');
         if (!existingGitignore.includes('terraform/.terraform/')) {
@@ -560,7 +622,7 @@ __pycache__/
 *.pyc
 .DS_Store
 `.trim() + appendDockerIgnore;
-            await fs.writeFile(dockerignorePath, dockerignoreContent);
+            await atomicWriteFile(dockerignorePath, dockerignoreContent);
         } else {
             const existingDockerignore = await fs.readFile(dockerignorePath, 'utf-8');
             if (!existingDockerignore.includes('terraform/')) {

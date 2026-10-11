@@ -59,6 +59,9 @@ resource "aws_scheduler_schedule" "cron" {
   name                         = "${local.app_name}-cron-{{CRON_NAME}}"
   schedule_expression          = "{{SCHEDULE_EXPRESSION}}"
   schedule_expression_timezone = "{{SCHEDULE_TIMEZONE}}"
+  # Sleep guard: stays disabled while grada sleep's auto-vars are active
+  # so a raw apply never re-enables a paused schedule.
+  state = var.asleep ? "DISABLED" : "ENABLED"
 
   flexible_time_window {
     mode = "OFF"

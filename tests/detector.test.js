@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { analyzeNextConfig, detectFramework, detectMigrationCommand } from '../src/utils/detector.js';
+import { analyzeNextConfig, detectFramework, detectMigrationCommand, frameworkDefaultPort, frameworkUsesStrippedRunner, isNpmShimCommand, dockerfileStripsNpmShims } from '../src/utils/detector.js';
 
 function makeProject(files = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-migrate-'));
@@ -144,5 +144,72 @@ describe('detectFramework static-export detection', () => {
         });
         expect(detectFramework(dir)).toMatchObject({ id: 'svelte', name: 'SvelteKit SSR' });
         expect(detectFramework(dir).isStaticExport).toBeUndefined();
+    });
+});
+
+describe('frameworkDefaultPort', () => {
+    it.each([
+        ['nextjs', '3000'],
+        ['node', '3000'],
+        ['rails', '3000'],
+        ['static', '8080'],
+        ['go', '8080'],
+        ['python', '8000'],
+        ['django', '8000'],
+        ['unknown-framework', '3000'],
+        [null, '3000'],
+        [undefined, '3000'],
+    ])('maps %s to port %s', (framework, expected) => {
+        expect(frameworkDefaultPort(framework)).toBe(expected);
+    });
+});
+
+describe('stripped-runner detection', () => {
+    it.each([
+        ['node', true],
+        ['nestjs', true],
+        ['nextjs', true],
+        ['nuxt', true],
+        ['svelte', true],
+        ['python', false],
+        ['django', false],
+        ['rails', false],
+        ['go', false],
+        ['static', false],
+    ])('frameworkUsesStrippedRunner(%s) is %s', (framework, expected) => {
+        expect(frameworkUsesStrippedRunner(framework)).toBe(expected);
+    });
+
+    it.each([
+        ['npm run db:migrate', true],
+        ['npx drizzle-kit migrate', true],
+        ['npx prisma migrate deploy', true],
+        ['yarn db:migrate', true],
+        ['  npm run cron  ', true],
+        ['NODE_ENV=production npm run migrate', true],
+        ['node ./dist/migrate.cjs', false],
+        ['node ./dist/migrate.mjs', false],
+        ['alembic upgrade head', false],
+        ['python manage.py migrate --noinput', false],
+        ['bundle exec rails db:migrate', false],
+        ['', false],
+        [null, false],
+    ])('isNpmShimCommand(%s) is %s', (cmd, expected) => {
+        expect(isNpmShimCommand(cmd)).toBe(expected);
+    });
+
+    it('detects the npx strip line in Grada Dockerfiles', () => {
+        const stripped = [
+            'FROM node:22-alpine AS runner',
+            'RUN apk upgrade --no-cache && \\',
+            '    rm -rf /usr/local/lib/node_modules/npm \\',
+            '    /usr/local/bin/npm \\',
+            '    /usr/local/bin/npx \\',
+            '',
+        ].join('\n');
+        expect(dockerfileStripsNpmShims(stripped)).toBe(true);
+        expect(dockerfileStripsNpmShims('FROM node:22-alpine\nRUN npm ci\n')).toBe(false);
+        expect(dockerfileStripsNpmShims('')).toBe(false);
+        expect(dockerfileStripsNpmShims(null)).toBe(false);
     });
 });

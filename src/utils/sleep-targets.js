@@ -1,5 +1,7 @@
 import fsSync from 'fs';
 import path from 'path';
+import { withProjectLock } from './file-lock.js';
+import { readResourceSuffix } from './resolvers.js';
 
 // Auxiliary sleep/wake targets driven through the AWS CLI: EventBridge
 // Scheduler pause/resume and ECS Application Auto Scaling suspend/resume.
@@ -10,9 +12,13 @@ import path from 'path';
 // instead of adding new npm packages. Every helper degrades to a skip
 // reason; callers warn and continue so sleep/wake never fail on these.
 
-// cron.tf renders `name = "${local.app_name}-cron-<slug>"`. Resolves the
-// live schedule name for an app prefix, or null when cron isn't configured
-// (or the file was hand-edited past recognition).
+// cron.tf renders `name = "${local.app_name}-cron-<slug>"` inside the
+// schedule block. Resolves the live schedule name for an app prefix, or
+// null when cron isn't configured (or the file was hand-edited past
+// recognition). Scoped to the schedule block: the IAM role/policy above
+// share the `-cron-` prefix, and an unscoped first match resolves
+// `-cron-scheduler-role` — pausing a schedule that doesn't exist while
+// the real one keeps firing (and Terraform plans ENABLED -> DISABLED).
 export function readCronScheduleName(cwd, appPrefix) {
     let content;
     try {
@@ -20,9 +26,11 @@ export function readCronScheduleName(cwd, appPrefix) {
     } catch {
         return null;
     }
-    const match = /\$\{local\.app_name\}-cron-([A-Za-z0-9-]+)/.exec(content);
+    const blockStart = content.indexOf('resource "aws_scheduler_schedule"');
+    if (blockStart < 0) return null;
+    const match = /name\s*=\s*"\$\{local\.app_name\}-cron-([A-Za-z0-9-]+)"/.exec(content.slice(blockStart));
     if (!match) return null;
-    return `${appPrefix}-cron-${match[1]}`;
+    return `${appPrefix}${readResourceSuffix(cwd)}-cron-${match[1]}`;
 }
 
 export function hasCronAddon(cwd) {
@@ -38,6 +46,60 @@ export function hasSqsWorkerScaling(cwd) {
 
 export function hasRedisAddon(cwd) {
     return fsSync.existsSync(path.join(cwd, 'terraform', 'redis.tf'));
+}
+
+// Scaffold files younger than this are treated as a write still in
+// flight (racing or crashed `add`), not a settled tree.
+export const SCAFFOLD_FRESHNESS_MS = 15000;
+
+// Every scaffold file sleep consults. main.tf is deliberately excluded:
+// init always leaves it fresh, and db-addon races are caught by the
+// lock probe below instead.
+const SCAFFOLD_FILES = ['cron.tf', 'sqs.tf', 'worker.tf', 'redis.tf'];
+
+// Detects an unfinished addon scaffold before sleep records a ledger for
+// half-built IaC. Returns null when the tree is settled, otherwise
+// `{ detail, telemetry }` with `telemetry.trigger` of `lock-held` |
+// `fresh-file` | `unparseable-file`. Stale locks are taken over (crashed
+// holders), never reported.
+export async function detectScaffoldingInProgress(cwd, { nowMs = Date.now(), freshnessMs = SCAFFOLD_FRESHNESS_MS } = {}) {
+    for (const scope of ['project', 'terraform']) {
+        try {
+            await withProjectLock(cwd, async () => {}, { scope, timeoutMs: 0 });
+        } catch (error) {
+            if (error?.code === 'FILE_LOCK_TIMEOUT') {
+                return {
+                    detail: `another grada command holds the ${scope} lock`,
+                    telemetry: { trigger: 'lock-held', scope },
+                };
+            }
+            throw error;
+        }
+    }
+    for (const file of SCAFFOLD_FILES) {
+        let stat = null;
+        try {
+            stat = fsSync.statSync(path.join(cwd, 'terraform', file));
+        } catch {
+            continue;
+        }
+        const ageMs = Math.max(0, nowMs - stat.mtimeMs);
+        if (ageMs < freshnessMs) {
+            return {
+                detail: `terraform/${file} changed ${Math.max(1, Math.round(ageMs / 1000))}s ago`,
+                telemetry: { trigger: 'fresh-file', file, age_ms: ageMs },
+            };
+        }
+    }
+    // Settled but unparseable: a crash mid-scaffold (or a hand edit past
+    // recognition). Reported, never skipped silently.
+    if (hasCronAddon(cwd) && !readCronScheduleName(cwd, 'probe')) {
+        return {
+            detail: 'terraform/cron.tf exists but its schedule name is unreadable',
+            telemetry: { trigger: 'unparseable-file', file: 'cron.tf' },
+        };
+    }
+    return null;
 }
 
 function tailLines(output, count = 5) {

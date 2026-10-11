@@ -19,6 +19,9 @@ Provision modular Day-2 cloud primitives without writing Terraform, configuring 
 - Addon files live in `terraform/` (`s3.tf`, `dynamodb.tf`, `redis.tf`, `sqs.tf`, `bedrock.tf`, `ses.tf`, `cron.tf`, plus `database.tf` for post-init relational databases), so `destroy` tears them down and `eject` keeps them automatically. PR-preview workspaces get isolated per-workspace resources. If your project has a `worker.tf` background service, addon environment variables are injected there too.
 - On [ejected](/grada/cli/eject/) projects, new addon files render without managed headers to match the vanilla tree (billing docs and resources are unchanged), with a warning and an `ejected: true` marker on the `add_run` telemetry event.
 - On `--target static` projects addon infrastructure still scaffolds (queues, tables, buckets, identities), but container env injection is skipped — there is no task role to inject into. Read the resource names from the generated `.tf` files and wire them into your build manually.
+- Concurrent `add` runs serialize under a project lock instead of clobbering each other's files — safe to run several in rapid succession or from a CI loop.
+- On an asleep environment, scaffolding proceeds with a warning (the files land, but `apply` stays gated until you [`wake`](/grada/cli/sleep/)).
+- **Stripped runners:** on ECS, the cron schedule executes `--cmd` inside your app image — and Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage, so the `npm run cron` default (or any `npm`/`npx` command) fails with `command not found`. When your `Dockerfile` strips those binaries, `add cron` refuses headless (`NPM_CMD_STRIPPED_RUNNER`) and warns loudly interactively; pass a `node ...` command instead. (Lambda cron invokes the function with the command as an event payload, so it is exempt.)
 - Emits an `add_run` telemetry event recording the capability and outcome.
 
 > **Bedrock model access:** AWS requires you to enable model access in the Bedrock console before your first `InvokeModel` call — including in the regions behind your `us.*` cross-region inference profile. IAM permissions alone are not enough. Anthropic models additionally require a one-time First Time Use (FTU) form in the Bedrock console.
@@ -39,7 +42,7 @@ npx grada-run add ai:bedrock --list-models
 npx grada-run add ai:bedrock --refresh
 npx grada-run add email:ses --domain example.com
 npx grada-run add email:ses --domain example.com --zone-id Z1234567890ABC
-npx grada-run add cron --schedule "cron(0 2 * * ? *)" --cmd "npm run cron"
+npx grada-run add cron --schedule "cron(0 2 * * ? *)" --cmd "node ./dist/cron.cjs"
 npx grada-run add storage:s3 --force
 npx grada-run add db:postgres
 npx grada-run add db:mysql
@@ -64,7 +67,7 @@ To switch Bedrock models later, just run `grada add ai:bedrock` again (interacti
 | `--from-email <email>` | Default sender address (default `noreply@<domain>`). Must belong to the SES domain. Only applies to `email:ses`. |
 | `--zone-id <id>` | Route 53 hosted zone ID for automatic DKIM/SPF/DMARC records. Only applies to `email:ses`. |
 | `--schedule <expr>` | EventBridge Scheduler expression, e.g. `cron(0 2 * * ? *)` or `rate(1 hour)` (default `cron(0 0 * * ? *)`). Only applies to `cron`. |
-| `--cmd <command>` | Command to run inside the scheduled container (default `npm run cron`; also accepts `--cron-command`). Only applies to `cron`. |
+| `--cmd <command>` | Command to run inside the scheduled container (default `npm run cron`; also accepts `--cron-command`). Only applies to `cron`. On Node-family projects the default fails — the generated images strip `npm`/`npx` (see below), so pass a `node ...` command. |
 | `--name <job>` | Job slug customizing the schedule name (default `daily-job`). Only applies to `cron`. |
 | `--timezone <tz>` | IANA timezone for the schedule expression (default `UTC`). Only applies to `cron`. |
 | `--force` | Overwrite the existing addon file (also accepts `--force=false`). Without it, re-adding refuses to clobber your edits. |

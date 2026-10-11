@@ -82,3 +82,35 @@ describe('Static template CVE patch (nginx-unprivileged)', () => {
         expect(idxCopy).toBeGreaterThan(userIdxs[userIdxs.length - 1]);
     });
 });
+
+describe('stripped-runner list matches templates (drift guard)', () => {
+    // frameworkUsesStrippedRunner drives the init-time npm/npx guard from a
+    // hardcoded framework list (init renders its own Dockerfile, so the
+    // framework template — not any existing file — is the right input).
+    // This cross-check pins that list against template content in both
+    // directions, so a template edit that adds or removes the npx strip
+    // line fails loudly here instead of silently desyncing the guard.
+    it('STRIPPED_RUNNER_FRAMEWORKS equals the set of templates that strip npx', async () => {
+        const { STRIPPED_RUNNER_FRAMEWORKS, dockerfileStripsNpmShims } = await import('../src/utils/detector.js');
+        const stripping = fs.readdirSync(TEMPLATES_DIR)
+            .filter((file) => file.endsWith('.Dockerfile'))
+            .map((file) => file.slice(0, -'.Dockerfile'.length))
+            .filter((framework) => dockerfileStripsNpmShims(
+                fs.readFileSync(path.join(TEMPLATES_DIR, `${framework}.Dockerfile`), 'utf-8')
+            ))
+            .sort();
+        expect([...STRIPPED_RUNNER_FRAMEWORKS].sort()).toEqual(stripping);
+    });
+
+    it('SUPPORTED_FRAMEWORKS equals the set of Dockerfile templates', async () => {
+        // Init fails fast on unknown --framework values; the accepted list
+        // must stay exactly the set of renderable templates, or valid
+        // frameworks get rejected (or invalid ones crash generation).
+        const { SUPPORTED_FRAMEWORKS } = await import('../src/utils/detector.js');
+        const templated = fs.readdirSync(TEMPLATES_DIR)
+            .filter((file) => file.endsWith('.Dockerfile'))
+            .map((file) => file.slice(0, -'.Dockerfile'.length))
+            .sort();
+        expect([...SUPPORTED_FRAMEWORKS].sort()).toEqual(templated);
+    });
+});

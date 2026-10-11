@@ -424,3 +424,50 @@ export function enclosingBraceBounds(text, index) {
     if (!bounds) return null;
     return { openIdx: bounds.openIdx, closeIdx: bounds.closeIdx };
 }
+
+// Strips indentation from whitespace-only lines (empty expansions like
+// `        {{DB_ENV_VARS}}` otherwise leave trailing-space lines that
+// `terraform fmt` flags). Lines carrying any other text — including
+// heredoc message lines whose trailing space joins wrapped words — are
+// left untouched.
+export function normalizeBlankLines(content) {
+    return String(content ?? '').replace(/^[ \t]+$/gm, '');
+}
+
+// Realigns every contiguous run of `KEY = value` lines in a flat HCL map
+// block so `terraform fmt` finds nothing to do: keys in a run pad to the
+// run's longest key. Blank lines, comments, non-assignment lines, and
+// lines whose value opens a nested block (`variables = {`) break runs,
+// matching fmt's own grouping. Values must be single-line scalars or
+// references (the lambda `variables` use case); multi-line values defeat
+// the regex and must not be passed through here.
+export function realignAssignmentRuns(text) {
+    const lines = String(text ?? '').split('\n');
+    const keyOf = (line) => {
+        const match = /^(\s*)([A-Za-z0-9_]+)(\s*)=(\s*)(.*)$/.exec(line);
+        if (!match) return null;
+        if (/^[{[(]/.test(match[5])) return null;
+        return { indent: match[1], key: match[2], rest: match[5].replace(/\s+$/, '') };
+    };
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+        if (!keyOf(lines[i])) {
+            out.push(lines[i]);
+            i++;
+            continue;
+        }
+        const run = [];
+        while (i < lines.length) {
+            const parsed = keyOf(lines[i]);
+            if (!parsed) break;
+            run.push(parsed);
+            i++;
+        }
+        const width = Math.max(...run.map((entry) => entry.key.length));
+        for (const entry of run) {
+            out.push(`${entry.indent}${entry.key.padEnd(width)} = ${entry.rest}`);
+        }
+    }
+    return out.join('\n');
+}

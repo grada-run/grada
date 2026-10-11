@@ -31,6 +31,8 @@ import { runGc } from '../src/commands/gc.js';
 import { runAlerts } from '../src/commands/alerts.js';
 import { runLogs } from '../src/commands/logs.js';
 import { runAdd } from '../src/commands/add.js';
+import { ADDON_REGISTRY, ADDON_TARGET_POLICY, addonTargetDisposition } from '../src/utils/addons.js';
+import { DB_ADD_ENGINES } from '../src/commands/add.js';
 import { ejectStack } from '../src/commands/eject.js';
 import { runDrift } from '../src/commands/drift.js';
 import { runDoctor } from '../src/commands/doctor.js';
@@ -313,5 +315,34 @@ describe('matrix: mcp analyze_stack (ADAPT)', () => {
         fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { express: '*' } }));
         const result = await handleAnalyzeStack({ cwd: dir });
         expect(JSON.parse(result.content[0].text)).toMatchObject({ computeTarget: 'static' });
+    });
+});
+
+describe('R12: addon target policy covers every capability', () => {
+    it('every registry capability has an explicit ecs/lambda/static row', () => {
+        for (const capability of Object.keys(ADDON_REGISTRY)) {
+            const row = ADDON_TARGET_POLICY[capability];
+            expect(row, capability).toBeDefined();
+            for (const target of ['ecs', 'lambda', 'static']) {
+                expect(['allow', 'warn', 'refuse'], `${capability}/${target}`).toContain(row[target]);
+            }
+        }
+    });
+
+    it('every relational engine refuses static and allows compute targets', () => {
+        for (const capability of Object.keys(DB_ADD_ENGINES)) {
+            expect(addonTargetDisposition(capability, 'static')).toBe('refuse');
+            expect(addonTargetDisposition(capability, 'ecs')).toBe('allow');
+            expect(addonTargetDisposition(capability, 'lambda')).toBe('allow');
+        }
+    });
+
+    it('pins the warn/refuse cells the matrix depends on', () => {
+        expect(addonTargetDisposition('queue:sqs', 'ecs')).toBe('allow');
+        expect(addonTargetDisposition('queue:sqs', 'lambda')).toBe('warn');
+        expect(addonTargetDisposition('queue:sqs', 'static')).toBe('warn');
+        expect(addonTargetDisposition('cron', 'static')).toBe('refuse');
+        expect(addonTargetDisposition('cron', 'ecs')).toBe('allow');
+        expect(addonTargetDisposition('cron', 'lambda')).toBe('allow');
     });
 });

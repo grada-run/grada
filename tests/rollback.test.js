@@ -662,10 +662,28 @@ describe('rollback on --target lambda projects', () => {
             );
             const result = await runRollback({ cwd: dir });
             expect(result).toMatchObject({ ok: false, reason: 'lambda-target-unsupported' });
-            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(exitSpy).toHaveBeenCalledWith(3);
             const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
             expect(output).toContain('aws lambda update-function-code');
             expect(output).toContain('myapp-fn');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('names the suffixed function and repo on suffixed trees', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-lambda-test-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'main.tf'),
+                'locals {\n  grada_resource_suffix = "-a1b2c3"\n  app_name = "myapp${local.env_suffix}${local.grada_resource_suffix}"\n}\nresource "aws_lambda_function" "app" {}\n'
+            );
+            const result = await runRollback({ cwd: dir });
+            expect(result).toMatchObject({ ok: false, reason: 'lambda-target-unsupported' });
+            const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+            expect(output).toContain('myapp-a1b2c3-fn');
+            expect(output).toContain('myapp-a1b2c3-repo');
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
@@ -697,7 +715,7 @@ describe('rollback on --target static projects', () => {
             );
             const result = await runRollback({ cwd: dir });
             expect(result).toMatchObject({ ok: false, reason: 'static-target-unsupported' });
-            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(exitSpy).toHaveBeenCalledWith(3);
             expect(logSpy.mock.calls.map((call) => String(call[0])).join('\n')).toContain('push to redeploy');
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });

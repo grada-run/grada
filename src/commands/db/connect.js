@@ -4,7 +4,7 @@ import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { spawn } from 'child_process';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../../core/telemetry.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -91,7 +91,18 @@ export function printNoDatabaseGuidance(dbIdentifier) {
     console.log(`  Re-run ${color.green('npx grada-run')} and answer "Yes" to the database prompt, then ${color.green('npx grada-run apply')}.\n`);
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDbConnect(input = {}) {
+    setActiveCommandName('db_connect');
+    try {
+        return await runDbConnectMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbConnectMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;

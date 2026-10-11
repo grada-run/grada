@@ -1441,6 +1441,50 @@ describe('db migrate: --setup-ci and gate injection', () => {
         const result = await runDbMigrate(noCmd);
         expect(result.reason).toBe('missing-migration-cmd');
     });
+
+    it('headless --setup-ci refuses npm-shim commands against a stripped runner', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        writeWorkflow(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, isHeadless: true,
+            cmd: 'npx drizzle-kit migrate',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('npm-cmd-stripped-runner');
+        expect(stripVTControlCharacters(output.join('\n'))).toContain('node ./');
+        const updated = fs.readFileSync(path.join(dir, '.github', 'workflows', 'deploy.yml'), 'utf8');
+        expect(updated).not.toContain('# grada:db-migrate-start');
+    });
+
+    it('interactive --setup-ci warns but proceeds on a stripped runner', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        const workflowFile = writeWorkflow(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, isHeadless: false,
+            cmd: 'npm run db:migrate',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true, workflowFile }));
+        expect(stripVTControlCharacters(output.join('\n'))).toContain('npm');
+        expect(mockTrackEvent).toHaveBeenCalledWith('npm_cmd_stripped_runner', expect.objectContaining({
+            cmd_source: 'explicit',
+        }));
+    });
+
+    it('node-based commands pass the stripped-runner guard headless', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        const workflowFile = writeWorkflow(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, isHeadless: true,
+            cmd: 'node ./dist/migrate.cjs',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true, workflowFile }));
+    });
 });
 
 describe('db migrate: gate helpers', () => {

@@ -4,11 +4,12 @@ import { ECSClient, UpdateServiceCommand } from '@aws-sdk/client-ecs';
 import { RDSClient, StopDBInstanceCommand, StopDBClusterCommand } from '@aws-sdk/client-rds';
 import color from 'picocolors';
 import { intro, outro, spinner, confirm, cancel } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveHeadless, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { findDbTarget } from '../utils/rds.js';
 import { fetchActiveService } from '../utils/ecs.js';
 import { parseTerraformConfig, estimateSleepSavings } from '../utils/visualizer.js';
@@ -21,6 +22,8 @@ import {
     formatUtcTimestamp,
     resolveTargetIntercept,
     reportSleepWakeSkip,
+    LEDGER_LOCK_SCOPE,
+    writeSleepAutoTfvars,
 } from '../utils/sleep-state.js';
 import {
     readCronScheduleName,
@@ -29,7 +32,9 @@ import {
     hasRedisAddon,
     setSchedulerState,
     setWorkerScalingSuspended,
+    detectScaffoldingInProgress,
 } from '../utils/sleep-targets.js';
+import { withProjectLock } from '../utils/file-lock.js';
 
 export const SLEEP_CONFIRM_MESSAGE = "Put environment to sleep? This will take the web service offline until you run 'grada wake'.";
 
@@ -50,7 +55,18 @@ function isMysqlEngine(engine) {
     return engine === 'mysql' || engine === 'aurora-mysql';
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runSleep(input = {}) {
+    setActiveCommandName('sleep');
+    try {
+        return await runSleepMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runSleepMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;
@@ -83,6 +99,13 @@ export async function runSleep(input = {}) {
             resultExtra: { cluster: target.cluster, region },
         });
     }
+
+    // Ejected trees are user-owned: refuse unless --force. Runs before
+    // the intercepts so ejected static trees refuse instead of skipping.
+    const managedTree = await requireManagedTree({
+        cwd, command: 'sleep', options, event: 'sleep_run', projectName,
+    });
+    if (!managedTree.proceed) return managedTree.result;
 
     // Scale-to-zero intercept: static targets have no compute or database,
     // so there is nothing to sleep. Runs before the confirm gate and any
@@ -168,6 +191,27 @@ export async function runSleep(input = {}) {
         }
     }
 
+    // Add-in-progress gate: a racing (or crashed) `add` leaves scaffolds
+    // half-written, and sleeping through that records a ledger for
+    // half-built IaC. Runs before any AWS call; --force bypasses for
+    // automation that sequences its own commands.
+    const forceBypass = options.force === true || options.force === 'true';
+    if (!forceBypass) {
+        const scaffolding = await detectScaffoldingInProgress(cwd);
+        if (scaffolding) {
+            trackEvent('sleep_add_in_progress', { projectName, ...scaffolding.telemetry });
+            return failCommand({
+                message: `\n✖ Scaffolding is still in progress (${scaffolding.detail}) — sleep refused to avoid recording half-built infrastructure.`,
+                hint: '  Re-run sleep in a few seconds, or pass --force to proceed anyway.\n',
+                event: 'sleep_run',
+                telemetry: { projectName, env_kind: target.envKind },
+                errorCode: 'ADD_IN_PROGRESS',
+                reason: 'add-in-progress',
+                resultExtra: { cluster: target.cluster, region },
+            });
+        }
+    }
+
     const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
     // rdsClient was resolved above the confirm gate for the Lambda probe.
     const runSync = options.spawnSyncImpl || spawnSync;
@@ -176,10 +220,70 @@ export async function runSleep(input = {}) {
     s.start(`Putting ${target.envKey} to sleep...`);
 
     try {
+        // Read-only probes first: the fast-path check below must see live
+        // state before any mutation. Stopping/scaling stay in the main
+        // flow, which the fast path skips entirely.
         // Lambda compute is already scale-to-zero: there are no services to
         // scale, so sleep only stops the database and pauses schedules.
         const appService = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.appService);
         const workerService = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.workerService);
+        const servicesMissing = !appService && !workerService;
+
+        let dbTarget = null;
+        if (!skipDb) {
+            // Lambda already probed above the confirm gate — reuse it so a
+            // hibernation run describes RDS exactly once.
+            dbTarget = lambdaDbProbed
+                ? lambdaDbTarget
+                : await findDbTarget(rdsClient, {
+                dbIdentifier: target.dbIdentifier,
+                dbClusterIdentifier: target.dbClusterIdentifier,
+            });
+        }
+
+        // Already-asleep fast path: a ledger entry plus live state already
+        // at rest means a repeat sleep — short-circuit before any mutation,
+        // pause, or ledger rewrite. Live state is verified, never trusted:
+        // divergence falls through to a normal sleep, and vanished infra
+        // keeps the nothing-to-sleep guidance below.
+        const priorEntry = readSleepState(cwd)[target.envKey] || null;
+        const somethingFound = Boolean(appService || workerService || dbTarget);
+        const servicesAtRest = [appService, workerService]
+            .every((service) => !service || (service.desiredCount ?? 0) <= 0);
+        const dbAtRest = !dbTarget || dbTarget.status === 'stopped' || dbTarget.status === 'stopping';
+        if (priorEntry && somethingFound && servicesAtRest && dbAtRest) {
+            // Re-assert the Terraform-visible marker (a no-op when present):
+            // pre-R18 sleeps recorded a ledger without one.
+            writeSleepAutoTfvars(cwd);
+            s.stop(color.green('Environment already asleep. 💤'));
+            console.log('');
+            console.log(`  ${color.dim('sleep:')} already asleep — nothing to scale, stop, or pause`);
+            console.log('');
+            await trackSuccess('sleep_run', {
+                projectName,
+                env_kind: target.envKind,
+                ecs_scaled: 0,
+                db_stopped: false,
+                db_kind: dbTarget?.kind ?? 'none',
+                cron_paused: false,
+                scaling_suspended: false,
+                fast_path: true,
+            });
+            outro(color.green('Done.'));
+            return {
+                ok: true,
+                env: target.envKey,
+                cluster: target.cluster,
+                region,
+                ecsScaled: 0,
+                dbStopped: false,
+                dbKind: dbTarget?.kind ?? priorEntry.dbKind ?? null,
+                cronPaused: false,
+                scalingSuspended: false,
+                autoRestartAt: priorEntry.autoRestartAt ?? null,
+                fastPath: true,
+            };
+        }
 
         let ecsScaled = 0;
         let prevApp = 0;
@@ -205,20 +309,11 @@ export async function runSleep(input = {}) {
             if (label === 'app') prevApp = desired;
             else prevWorker = desired;
         }
-        const servicesMissing = !appService && !workerService;
 
-        let dbTarget = null;
         let dbStopped = false;
         let dbNote = null;
         if (!skipDb) {
-            // Lambda already probed above the confirm gate — reuse it so a
-            // hibernation run describes RDS exactly once.
-            dbTarget = lambdaDbProbed
-                ? lambdaDbTarget
-                : await findDbTarget(rdsClient, {
-                dbIdentifier: target.dbIdentifier,
-                dbClusterIdentifier: target.dbClusterIdentifier,
-            });
+            // Probed above (fast-path check reads the same target).
             if (!dbTarget) {
                 dbNote = 'no database provisioned';
             } else if (dbTarget.status === 'available') {
@@ -304,26 +399,35 @@ export async function runSleep(input = {}) {
 
         // Persist the ledger: a repeat sleep never overwrites the original
         // replica counts with 0, and keeps the original 7-day window (AWS
-        // counts from the actual stop, not from re-runs).
+        // counts from the actual stop, not from re-runs). The whole
+        // read→modify→write runs under the ledger lock so concurrent
+        // sleeps/wakes serialize instead of clobbering each other.
         const nowMs = options.nowMs ?? Date.now();
-        const state = readSleepState(cwd);
-        const existing = state[target.envKey] && typeof state[target.envKey] === 'object'
-            ? state[target.envKey]
-            : null;
-        const storedApp = isLambda ? 0 : (prevApp > 0 ? prevApp : (existing?.services?.app ?? 1));
-        const storedWorker = isLambda ? 0 : (prevWorker > 0 ? prevWorker : (existing?.services?.worker ?? (workerService ? 1 : 0)));
-        const sleptAt = existing?.sleptAt ?? new Date(nowMs).toISOString();
-        const autoRestartAt = existing?.autoRestartAt ?? computeAutoRestartAt(nowMs).toISOString();
-        state[target.envKey] = {
-            env: target.envKey,
-            sleptAt,
-            autoRestartAt,
-            services: { app: storedApp, worker: storedWorker },
-            dbId: dbTarget?.id ?? existing?.dbId ?? null,
-            dbKind: dbTarget?.kind ?? existing?.dbKind ?? null,
-        };
-        writeSleepState(cwd, state);
-        ensureSleepGitignore(cwd);
+        const { autoRestartAt, storedApp, storedWorker } = await withProjectLock(cwd, async () => {
+            const state = readSleepState(cwd);
+            const existing = state[target.envKey] && typeof state[target.envKey] === 'object'
+                ? state[target.envKey]
+                : null;
+            const storedApp = isLambda ? 0 : (prevApp > 0 ? prevApp : (existing?.services?.app ?? 1));
+            const storedWorker = isLambda ? 0 : (prevWorker > 0 ? prevWorker : (existing?.services?.worker ?? (workerService ? 1 : 0)));
+            const sleptAt = existing?.sleptAt ?? new Date(nowMs).toISOString();
+            const restartAt = existing?.autoRestartAt ?? computeAutoRestartAt(nowMs).toISOString();
+            state[target.envKey] = {
+                env: target.envKey,
+                sleptAt,
+                autoRestartAt: restartAt,
+                services: { app: storedApp, worker: storedWorker },
+                dbId: dbTarget?.id ?? existing?.dbId ?? null,
+                dbKind: dbTarget?.kind ?? existing?.dbKind ?? null,
+            };
+            writeSleepState(cwd, state);
+            ensureSleepGitignore(cwd);
+            return { autoRestartAt: restartAt, storedApp, storedWorker };
+        }, { scope: LEDGER_LOCK_SCOPE });
+        // Terraform-visible marker so raw applies on an ejected tree keep
+        // the stack asleep instead of half-waking it. Written once the
+        // ledger record is durable.
+        writeSleepAutoTfvars(cwd);
 
         const tfConfig = parseTerraformConfig(path.join(cwd, 'terraform'));
         const hasDb = tfConfig.hasDb || Boolean(dbTarget);

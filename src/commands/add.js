@@ -5,15 +5,19 @@ import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, select, text, spinner, log, cancel, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, isActiveEnvValue, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf, isComputeTarget, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
 import { resolveDbEngineRefs, buildDbEntries, convertDatabaseTfForLambda, addRandomProvider } from '../utils/generator.js';
-import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars } from '../utils/addons.js';
+import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars, addonTargetDisposition, addonSupportedTargets } from '../utils/addons.js';
 import { stripTerraformMetadata, readEjectedMarker } from '../utils/terraform-metadata.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, isValidFromEmail, parseDomainTf } from '../utils/domains.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
-import { findArrayBounds, findMapBounds, findNestedBlock, findResourceBlock, enclosingBraceBounds } from '../utils/hcl.js';
+import { findArrayBounds, findMapBounds, findNestedBlock, findResourceBlock, enclosingBraceBounds, normalizeBlankLines, realignAssignmentRuns } from '../utils/hcl.js';
 import { syncDocCostEstimate } from '../utils/visualizer.js';
+import { withProjectLock } from '../utils/file-lock.js';
+import { guardSleepingEnv, resolveSleepTarget } from '../utils/sleep-state.js';
+import { atomicWriteFile, createFileExclusive } from '../utils/atomic-write.js';
+import { isNpmShimCommand, dockerfileStripsNpmShims } from '../utils/detector.js';
 import {
     FALLBACK_BEDROCK_MODEL,
     GENERIC_MODEL_HINT,
@@ -170,13 +174,16 @@ export function injectContainerEnvVars(tfContent, envEntries = [], taskDefinitio
     let updated = content;
     if (missing.length > 0) {
         const inner = content.slice(openIdx + 1, closeIdx);
+        // Strip a dangling comma so files rendered with one (e.g. worker.tf
+        // without a database, or hand-edited arrays) never produce `, ,`,
+        // then all trailing whitespace: the comma must attach to the last
+        // entry, never sit on its own indented line (which `terraform fmt`
+        // would reindent).
+        const prefix = content.slice(0, closeIdx).replace(/,\s*$/, '').replace(/\s+$/, '');
         const glue = inner.trim() === '' ? '\n        ' : ',\n        ';
         const insertion = missing
             .map(({ name, value }) => `{ name = "${name}", value = ${renderEnvValue(value)} }`)
             .join(',\n        ');
-        // Strip a dangling comma so files rendered with one (e.g. worker.tf
-        // without a database, or hand-edited arrays) never produce `, ,`.
-        const prefix = content.slice(0, closeIdx).replace(/,\s*$/, '');
         updated = `${prefix}${glue}${insertion}\n      ${content.slice(closeIdx)}`;
     }
 
@@ -247,6 +254,15 @@ export function injectLambdaEnvVars(tfContent, envEntries = [], options = {}) {
             .map(({ name, value }) => `      ${name} = ${renderEnvValue(value)}`)
             .join('\n');
         updated = `${prefix.endsWith('\n') ? prefix : `${prefix}\n`}${insertion}\n    ${content.slice(closeIdx)}`;
+        // A longer injected key widens the alignment group it joins —
+        // realign the map so `terraform fmt` stays clean.
+        const realignedBounds = findLambdaVariablesBounds(updated);
+        if (realignedBounds) {
+            const { openIdx: rOpen, closeIdx: rClose } = realignedBounds;
+            updated = updated.slice(0, rOpen + 1)
+                + realignAssignmentRuns(updated.slice(rOpen + 1, rClose))
+                + updated.slice(rClose);
+        }
     }
 
     const upserts = envEntries.filter(({ name }) => upsertKeys.has(name));
@@ -413,7 +429,7 @@ export function injectContainerSecrets(tfContent, secretEntries = [], taskDefini
     let updatedInner = inner;
     const missing = [];
     for (const { name, valueFrom } of secretEntries) {
-        const rendered = `{ "name": "${name}", "valueFrom": "${valueFrom}" }`;
+        const rendered = `{ "name" : "${name}", "valueFrom" : "${valueFrom}" }`;
         if (updatedInner.includes(rendered)) continue;
         const namePattern = new RegExp(`(?:"name"|name)\\s*[:=]\\s*"${escapeRegExp(name)}"`);
         const match = namePattern.exec(updatedInner);
@@ -974,6 +990,7 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
         if (typeof schedule === 'string') schedule = schedule.trim();
         let cronCommand = explicitStringOption(opts, 'cronCommand');
         if (typeof cronCommand === 'string') cronCommand = cronCommand.trim();
+        const cronCommandExplicit = !!cronCommand;
         const explicitName = explicitStringOption(opts, 'name');
         const name = explicitName === undefined ? DEFAULT_CRON_NAME : sanitizeCronName(explicitName);
         let timezone = explicitStringOption(opts, 'timezone');
@@ -1001,12 +1018,36 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
             };
         }
 
+        let cronCommandPrompted = false;
         if (!cronCommand && isInteractive) {
             const answer = await promptCronCommand();
             if (isCancel(answer)) return { ok: false, cancelled: true };
             cronCommand = String(answer).trim();
+            cronCommandPrompted = true;
         }
         cronCommand = cronCommand || DEFAULT_CRON_COMMAND;
+        const cronCommandSource = cronCommandExplicit ? 'explicit' : (cronCommandPrompted ? 'prompted' : 'default');
+
+        // Stripped-runner guard: on ECS the schedule executes the
+        // command inside the app image, where Grada's node-family runners
+        // have no npm/npx — an npm-shim command is a guaranteed failure.
+        // (Lambda cron passes the command as an event payload instead, so
+        // it is exempt.) Fail fast headless; warn loudly interactively.
+        if (readTerraformComputeTarget(cwd) !== 'lambda'
+            && isNpmShimCommand(cronCommand)
+            && dockerfileStripsNpmShims(readFileSafe(path.join(cwd, 'Dockerfile')))) {
+            if (!isInteractive) {
+                return {
+                    ok: false,
+                    errorCode: 'NPM_CMD_STRIPPED_RUNNER',
+                    reason: 'npm-cmd-stripped-runner',
+                    message: `\n✖ Refusing to schedule "${cronCommand}": your Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" inside the cron task.`,
+                    hint: '  Re-run with an explicit node-based command, e.g. --cmd "node ./dist/cron.cjs".\n',
+                };
+            }
+            console.log(color.yellow(`⚠️  "${cronCommand}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/cron.cjs").`));
+            trackEvent('npm_cmd_stripped_runner', { projectName: resolveProjectName(opts, cwd), capability: 'cron', cmd_source: cronCommandSource });
+        }
 
         if (!CRON_TIMEZONE_RE.test(timezone)) {
             return {
@@ -1216,20 +1257,65 @@ async function runAddMain(input = {}) {
 
     // Post-init relational databases take a dedicated pipeline (they are
     // not registry addons): render database.tf and wire the container.
+    // The pipeline consults the policy table and the asleep guard itself.
     const dbEngine = DB_ADD_ENGINES[capability];
     if (dbEngine) {
         return runAddDatabase(
-            { cwd, projectName, region: resolveRegion(options, cwd), force, noExit },
+            { cwd, projectName, region: resolveRegion(options, cwd), force, noExit, workspace: options.workspace, env: options.env },
             dbEngine
         );
     }
 
-    // Long-running workers require ECS: the generator never renders
-    // worker.tf for Lambda/static targets, so warn now instead of
-    // provisioning a queue that nothing will ever drain.
-    if (capability === 'queue:sqs' && isComputeTarget(cwd, 'lambda', 'static')) {
-        log.warn(color.yellow(`⚠️  Adding queue:sqs to a ${readTerraformComputeTarget(cwd)} target provisions the queue without a worker service — long-running workers require ECS (--target ecs).`));
+    // Capability-vs-target policy, consulted once before the TOCTOU
+    // guards: refuse-level fails closed, warn-level proceeds loud.
+    const region = resolveRegion(options, cwd);
+    const diskTarget = readTerraformComputeTarget(cwd);
+    const disposition = addonTargetDisposition(capability, diskTarget);
+    if (disposition === 'refuse') {
+        const targetGuard = guardComputeTarget({
+            cwd,
+            command: `add ${capability}`,
+            supported: addonSupportedTargets(capability),
+            hint: 'Static sites run no containers — this capability needs a compute target (--target ecs or lambda).',
+        });
+        trackEvent('addon_target_refused', { projectName, capability, target: diskTarget });
+        return failCommand({
+            noExit,
+            message: targetGuard.message,
+            hint: targetGuard.hint,
+            event: 'add_run',
+            telemetry: { projectName, capability, error_code: targetGuard.errorCode },
+            reason: targetGuard.reason,
+            resultExtra: { capability, projectName, region },
+        });
     }
+    let targetWarning = null;
+    if (disposition === 'warn') {
+        // Long-running workers require ECS: the generator never renders
+        // worker.tf for Lambda/static targets, so warn instead of
+        // provisioning a queue that nothing will ever drain. The clack
+        // warning is the historical channel; the console line keeps the
+        // warning visible to headless output scraping.
+        const warnText = `Adding ${capability} to a ${diskTarget} target provisions the queue without a worker service — long-running workers require ECS (--target ecs).`;
+        log.warn(color.yellow(`⚠️  ${warnText}`));
+        console.log(color.yellow(`⚠️  ${warnText}`));
+        trackEvent('addon_target_warned', { projectName, capability, target: diskTarget });
+        targetWarning = `${diskTarget}-target-unwired`;
+    }
+
+    // Asleep environments warn but proceed: the scaffold lands, and the
+    // user wakes before apply. Runs after the policy consult so refused
+    // adds fail without an irrelevant wake advisory.
+    await guardSleepingEnv({
+        cwd,
+        envKey: resolveSleepTarget(options, cwd).envKey,
+        options,
+        command: 'add',
+        mode: 'warn',
+        projectName,
+        warnEvent: 'asleep_add_warned',
+        warnTelemetry: { capability },
+    });
 
     // Interactive selection runs only on real TTYs without explicit
     // options, so headless runs, CI, and unit tests never block on prompts.
@@ -1241,14 +1327,27 @@ async function runAddMain(input = {}) {
         Boolean(process.stdout?.isTTY)
     );
 
-    const region = resolveRegion(options, cwd);
     const resolved = await resolveAddonOptions(capability, options, { cwd, region, isInteractive, heldCatalog });
     if (!resolved.ok && resolved.cancelled) return cancelSelection();
     if (!resolved.ok) return failResolved(resolved);
 
-    const targetPath = path.join(cwd, 'terraform', addon.file);
-    const addonExists = fsSync.existsSync(targetPath);
-    if (addonExists && !force && !canUpsertAddon(capability, resolved.meta)) {
+    // The exists-guard and the scaffold are one atomic step under the
+    // project lock: concurrent adds serialize instead of interleaving
+    // read→modify→write cycles on main.tf. (scaffoldAddon re-takes the
+    // same lock, which bypasses within this async chain.)
+    const guarded = await withProjectLock(cwd, async () => {
+        const targetPath = path.join(cwd, 'terraform', addon.file);
+        const addonExists = fsSync.existsSync(targetPath);
+        if (addonExists && !force && !canUpsertAddon(capability, resolved.meta)) {
+            return { guardFailed: true };
+        }
+        return {
+            guardFailed: false,
+            addonExists,
+            scaffolded: await scaffoldAddon(capability, resolved, { cwd, region }),
+        };
+    }, { scope: 'terraform' });
+    if (guarded.guardFailed) {
         return failCommand({
             noExit,
             message: `\n⚠ terraform/${addon.file} already exists. Pass --force to overwrite.\n`,
@@ -1260,8 +1359,7 @@ async function runAddMain(input = {}) {
             exitCode: null,
         });
     }
-
-    const scaffolded = await scaffoldAddon(capability, resolved, { cwd, region });
+    const { addonExists, scaffolded } = guarded;
     const envVars = scaffolded.envVars;
     const envInjected = scaffolded.envInjected;
 
@@ -1289,8 +1387,8 @@ async function runAddMain(input = {}) {
     outro(
         `Run ${color.green('grada apply')} (or commit and push to trigger CI) to provision ${capability}.${envSuffix}`
     );
-    await trackSuccess('add_run', { projectName, capability, ...(scaffolded.ejected ? { ejected: true } : {}) });
-    return { ok: true, capability, projectName, region, file: `terraform/${addon.file}`, envInjected };
+    await trackSuccess('add_run', { projectName, capability, ...(scaffolded.ejected ? { ejected: true } : {}), ...(targetWarning ? { warning: targetWarning } : {}) });
+    return { ok: true, capability, projectName, region, file: `terraform/${addon.file}`, envInjected, ...(targetWarning ? { warning: targetWarning } : {}) };
 }
 
 // Quiet database scaffolding pipeline for post-init `add db:*`:
@@ -1302,6 +1400,12 @@ async function runAddMain(input = {}) {
 export async function scaffoldDatabase(engine, { cwd } = {}) {
     const refs = resolveDbEngineRefs(engine);
     const projectDir = cwd || process.cwd();
+    // Serializes against concurrent adds (direct init calls share the
+    // same lock; nesting under runAddDatabase bypasses in-chain).
+    return withProjectLock(projectDir, () => scaffoldDatabaseInner(engine, projectDir, refs), { scope: 'terraform' });
+}
+
+async function scaffoldDatabaseInner(engine, projectDir, refs) {
     const mainTfPath = path.join(projectDir, 'terraform', 'main.tf');
     const workerTfPath = path.join(projectDir, 'terraform', 'worker.tf');
     const databaseTfPath = path.join(projectDir, 'terraform', 'database.tf');
@@ -1316,7 +1420,11 @@ export async function scaffoldDatabase(engine, { cwd } = {}) {
     // stripping — only the warning and telemetry below.
     const ejected = Boolean(readEjectedMarker(projectDir));
     await fs.mkdir(path.dirname(databaseTfPath), { recursive: true });
-    await fs.writeFile(databaseTfPath, rendered);
+    if (!fsSync.existsSync(databaseTfPath)) {
+        await createFileExclusive(databaseTfPath, normalizeBlankLines(rendered));
+    } else {
+        await atomicWriteFile(databaseTfPath, normalizeBlankLines(rendered));
+    }
 
     let randomInjected = false;
     if (isLambda) {
@@ -1324,7 +1432,7 @@ export async function scaffoldDatabase(engine, { cwd } = {}) {
         if (backendTf) {
             const withRandom = addRandomProvider(backendTf);
             randomInjected = withRandom !== backendTf;
-            if (randomInjected) await fs.writeFile(backendTfPath, withRandom);
+            if (randomInjected) await atomicWriteFile(backendTfPath, withRandom);
         }
     }
 
@@ -1343,7 +1451,7 @@ export async function scaffoldDatabase(engine, { cwd } = {}) {
         updated = withVpc;
     }
     const envInjected = updated !== mainTfContent;
-    if (envInjected) await fs.writeFile(mainTfPath, updated);
+    if (envInjected) await atomicWriteFile(mainTfPath, normalizeBlankLines(updated));
 
     let workerEnvInjected = false;
     if (!isLambda && fsSync.existsSync(workerTfPath)) {
@@ -1354,7 +1462,7 @@ export async function scaffoldDatabase(engine, { cwd } = {}) {
             'worker'
         );
         workerEnvInjected = updatedWorker !== workerTfContent;
-        if (workerEnvInjected) await fs.writeFile(workerTfPath, updatedWorker);
+        if (workerEnvInjected) await atomicWriteFile(workerTfPath, normalizeBlankLines(updatedWorker));
     }
 
     await syncDocCostEstimate(projectDir);
@@ -1372,15 +1480,22 @@ export async function scaffoldDatabase(engine, { cwd } = {}) {
 
 // Post-init `add db:postgres|mysql|aurora-postgresql`: guards, then the
 // scaffoldDatabase pipeline with banners and telemetry.
-export async function runAddDatabase({ cwd, projectName, region, force = false, noExit = false }, engine) {
+export async function runAddDatabase({ cwd, projectName, region, force = false, noExit = false, workspace, env }, engine) {
     const capability = `db:${engine}`;
-    const targetGuard = guardComputeTarget({
-        cwd,
-        command: `add ${capability}`,
-        supported: ['ecs', 'lambda'],
-        hint: 'Static sites provision no database — static sites needing data need an API backend.',
-    });
+    // Policy table first: db rows refuse static. The refusal reuses the
+    // historical guard descriptor byte-for-byte.
+    const diskTarget = readTerraformComputeTarget(cwd);
+    const disposition = addonTargetDisposition(capability, diskTarget);
+    const targetGuard = disposition === 'refuse'
+        ? guardComputeTarget({
+            cwd,
+            command: `add ${capability}`,
+            supported: addonSupportedTargets(capability),
+            hint: 'Static sites provision no database — static sites needing data need an API backend.',
+        })
+        : null;
     if (targetGuard) {
+        trackEvent('addon_target_refused', { projectName, capability, target: diskTarget });
         return failCommand({
             noExit,
             message: targetGuard.message,
@@ -1391,9 +1506,35 @@ export async function runAddDatabase({ cwd, projectName, region, force = false, 
             resultExtra: { capability, projectName, region },
         });
     }
-    const databaseTfPath = path.join(cwd, 'terraform', 'database.tf');
-    const databaseExists = fsSync.existsSync(databaseTfPath);
-    if (databaseExists && !force) {
+    // Asleep environments warn but proceed (registry path warns in
+    // runAddMain; the db pipeline warns here, exactly once).
+    await guardSleepingEnv({
+        cwd,
+        envKey: resolveSleepTarget({ workspace, env }, cwd).envKey,
+        options: {},
+        command: 'add',
+        mode: 'warn',
+        projectName,
+        warnEvent: 'asleep_add_warned',
+        warnTelemetry: { capability },
+    });
+    // Both guards and the scaffold are one atomic step under the
+    // project lock (same race class as registry addons).
+    const guarded = await withProjectLock(cwd, async () => {
+        const databaseTfPath = path.join(cwd, 'terraform', 'database.tf');
+        const databaseExists = fsSync.existsSync(databaseTfPath);
+        if (databaseExists && !force) return { guardFailed: 'exists' };
+        const mainTfContent = readFileSafe(path.join(cwd, 'terraform', 'main.tf')) ?? '';
+        if (!force && /aws_db_instance\.postgres|aws_rds_cluster\.postgres/.test(mainTfContent)) {
+            return { guardFailed: 'referenced' };
+        }
+        return {
+            guardFailed: null,
+            databaseExists,
+            scaffolded: await scaffoldDatabase(engine, { cwd }),
+        };
+    }, { scope: 'terraform' });
+    if (guarded.guardFailed === 'exists') {
         return failCommand({
             noExit,
             message: '\n⚠ terraform/database.tf already exists. Pass --force to overwrite.\n',
@@ -1405,8 +1546,7 @@ export async function runAddDatabase({ cwd, projectName, region, force = false, 
             exitCode: null,
         });
     }
-    const mainTfContent = readFileSafe(path.join(cwd, 'terraform', 'main.tf')) ?? '';
-    if (!force && /aws_db_instance\.postgres|aws_rds_cluster\.postgres/.test(mainTfContent)) {
+    if (guarded.guardFailed === 'referenced') {
         return failCommand({
             noExit,
             message: '\n⚠ main.tf already references a Postgres database. Pass --force to overwrite.\n',
@@ -1418,7 +1558,7 @@ export async function runAddDatabase({ cwd, projectName, region, force = false, 
             exitCode: null,
         });
     }
-    const scaffolded = await scaffoldDatabase(engine, { cwd });
+    const { databaseExists, scaffolded } = guarded;
     if (scaffolded.ejected) {
         console.log(color.yellow('\n⚠️  This project was ejected from grada — rendering an unmanaged-compatible terraform/database.tf.'));
     }
@@ -1438,6 +1578,13 @@ export async function runAddDatabase({ cwd, projectName, region, force = false, 
 // `resolvedOpts`. Prints nothing, emits no telemetry, and never exits —
 // callers own banners, telemetry, and failure handling.
 export async function scaffoldAddon(capability, resolvedOpts, { cwd, region } = {}) {
+    const projectDir = cwd || process.cwd();
+    // Serializes against concurrent adds (direct init calls share the
+    // same lock; nesting under runAdd bypasses in-chain).
+    return withProjectLock(projectDir, () => scaffoldAddonInner(capability, resolvedOpts, { cwd: projectDir, region }), { scope: 'terraform' });
+}
+
+async function scaffoldAddonInner(capability, resolvedOpts, { cwd, region } = {}) {
     void region;
     const addon = ADDON_REGISTRY[capability];
     if (!addon) throw new Error(`Unknown addon capability: ${capability}`);
@@ -1462,7 +1609,11 @@ export async function scaffoldAddon(capability, resolvedOpts, { cwd, region } = 
     const ejected = Boolean(readEjectedMarker(projectDir));
     const rendered = ejected ? `${stripTerraformMetadata(renderedRaw).trim()}\n` : renderedRaw;
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
-    await fs.writeFile(targetPath, rendered);
+    if (!fsSync.existsSync(targetPath)) {
+        await createFileExclusive(targetPath, normalizeBlankLines(rendered));
+    } else {
+        await atomicWriteFile(targetPath, normalizeBlankLines(rendered));
+    }
 
     const envVars = Array.isArray(opts.envVars) ? opts.envVars : [];
     const upsertKeys = Array.isArray(opts.upsertKeys) ? opts.upsertKeys : [];
@@ -1476,7 +1627,7 @@ export async function scaffoldAddon(capability, resolvedOpts, { cwd, region } = 
     const envInjected = withVpc !== mainTfContent;
     const vpcInjected = withVpc !== updated;
     if (envInjected) {
-        await fs.writeFile(mainTfPath, withVpc);
+        await atomicWriteFile(mainTfPath, normalizeBlankLines(withVpc));
     }
 
     let workerEnvInjected = false;
@@ -1489,7 +1640,7 @@ export async function scaffoldAddon(capability, resolvedOpts, { cwd, region } = 
             finalWorker = ensureWorkerDesiredCountLifecycle(updatedWorker);
         }
         if (finalWorker !== workerTfContent) {
-            await fs.writeFile(workerTfPath, finalWorker);
+            await atomicWriteFile(workerTfPath, normalizeBlankLines(finalWorker));
         }
     }
 

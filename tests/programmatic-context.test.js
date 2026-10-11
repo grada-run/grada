@@ -14,6 +14,25 @@ import { runDiagnose } from '../src/commands/diagnose.js';
 import { runDoctor } from '../src/commands/doctor.js';
 import { runDomain } from '../src/commands/domain.js';
 import { runExec } from '../src/commands/exec.js';
+import { runAlerts } from '../src/commands/alerts.js';
+import { runGc } from '../src/commands/gc.js';
+import { runLogs } from '../src/commands/logs.js';
+import { runRollback } from '../src/commands/rollback.js';
+import { runSleep } from '../src/commands/sleep.js';
+import { runWake } from '../src/commands/wake.js';
+import { applyStack } from '../src/commands/apply.js';
+import { destroyStack } from '../src/commands/destroy.js';
+import { ejectStack } from '../src/commands/eject.js';
+import { mainStack } from '../src/commands/init.js';
+import { syncAi } from '../src/commands/sync-ai.js';
+import { runDb } from '../src/commands/db.js';
+import { runDbBackup } from '../src/commands/db/backup.js';
+import { runDbConnect } from '../src/commands/db/connect.js';
+import { runDbEnableVector } from '../src/commands/db/enable-vector.js';
+import { runDbImport } from '../src/commands/db/import.js';
+import { runDbMigrate } from '../src/commands/db/migrate.js';
+import { runDbRestore } from '../src/commands/db/restore.js';
+import { pushSecrets, pullSecrets, auditSecrets } from '../src/commands/secrets.js';
 
 vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
@@ -96,6 +115,68 @@ describe('programmatic command context', () => {
         } finally {
             cwdSpy.mockRestore();
         }
+    });
+
+    // Stamp-only entries: every remaining command wrapper must pair set
+    // with reset. These stay out of `cases` above because their early
+    // failure shapes differ (no headless noExit contract, or a throw
+    // before project resolution) — the wrapper pairing is what matters
+    // here, so outcomes are swallowed and only the pairing is asserted.
+    const stampCases = [
+        ['alerts', () => runAlerts({})],
+        ['gc', () => runGc({})],
+        ['logs', () => runLogs({})],
+        ['rollback', () => runRollback({})],
+        ['sleep', () => runSleep({})],
+        ['wake', () => runWake({})],
+        ['db_backup', () => runDbBackup({})],
+        ['db_connect', () => runDbConnect({})],
+        ['db_enable_vector', () => runDbEnableVector({})],
+        ['db_import', () => runDbImport({})],
+        ['db_migrate', () => runDbMigrate({})],
+        ['db_restore', () => runDbRestore({})],
+        // Broken cwd throws before these resolve anything (no side effects).
+        ['apply', () => applyStack({})],
+        ['destroy', () => destroyStack({})],
+        ['eject', () => ejectStack({})],
+        ['secrets_push', () => pushSecrets('.env', 'myapp', {})],
+        ['secrets_pull', () => pullSecrets('.env', 'myapp', {})],
+        ['secrets_audit', () => auditSecrets('.env', 'myapp', {})],
+    ];
+
+    it.each(stampCases)('%s stamps and resets its command name', async (name, invoke) => {
+        const cwdSpy = breakCwd();
+        try {
+            await invoke().catch(() => {});
+        } finally {
+            cwdSpy.mockRestore();
+        }
+        expect(spies.setSpy).toHaveBeenCalledWith(name);
+        expect(spies.resetSpy).toHaveBeenCalled();
+    });
+
+    it('init stamps its name on the fail-fast validation path', async () => {
+        // checkDependency is mocked true above; the bogus capability hits
+        // init's validation return before any prompt, AWS call, or write.
+        const result = await mainStack({ isHeadless: true, headlessOptions: {}, initOptions: { with: ['bogus-cap'] } });
+        expect(result).toMatchObject({ ok: false, reason: 'unsupported-capability' });
+        expect(spies.setSpy).toHaveBeenCalledWith('init');
+        expect(spies.resetSpy).toHaveBeenCalled();
+    });
+
+    it('sync_ai stamps its name without selecting assistants', async () => {
+        // The mocked multiselect answers undefined: no assistants match, so
+        // no rule files are written; the wrapper pairing still holds.
+        await syncAi();
+        expect(spies.setSpy).toHaveBeenCalledWith('sync_ai');
+        expect(spies.resetSpy).toHaveBeenCalled();
+    });
+
+    it('db stamps its name on the unknown-subcommand path', async () => {
+        const result = await runDb(['bogus-sub']);
+        expect(result).toMatchObject({ ok: false, reason: 'unknown-db-subcommand' });
+        expect(spies.setSpy).toHaveBeenCalledWith('db');
+        expect(spies.resetSpy).toHaveBeenCalled();
     });
 
     it('doctor stamps its name without taking options', async () => {

@@ -106,6 +106,22 @@ describe('Secrets Push Command', () => {
         expect(JSON.parse(keysContent)).toEqual(['GITHUB_TOKEN', 'DB_PASS']);
     });
 
+    it('addresses the suffixed vault on suffixed trees', async () => {
+        await fs.writeFile('.env', 'GITHUB_TOKEN=ghp_12345\nDB_PASS=supersecret');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        await fs.writeFile(
+            path.join('terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+
+        await pushSecrets('.env', 'my-project');
+
+        expect(MockUpdateSecretCommand).toHaveBeenCalledWith({
+            SecretId: 'my-project-a1b2c3-secrets',
+            SecretString: JSON.stringify({ GITHUB_TOKEN: 'ghp_12345', DB_PASS: 'supersecret' })
+        });
+    });
+
     it('handles a missing AWS vault (ResourceNotFoundException) gracefully', async () => {
         // Setup: GetSecretValue finds no vault (new vault path), then UpdateSecret also fails
         mockSend.mockRejectedValueOnce({ name: 'ResourceNotFoundException', message: 'Vault missing' });

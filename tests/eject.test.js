@@ -19,6 +19,35 @@ describe('eject metadata stripping', () => {
         expect(cleaned).toContain('region = "us-east-2"');
     });
 
+    it('strips tag blocks carrying the GradaProject ownership tag', () => {
+        const content = 'provider "aws" {\n'
+            + '  region = "us-east-2"\n\n'
+            + '  default_tags {\n'
+            + '    tags = {\n'
+            + '      ManagedBy    = "grada"\n'
+            + '      GradaProject = "myapp"\n'
+            + '    }\n'
+            + '  }\n'
+            + '}\n';
+        const cleaned = stripTerraformMetadata(content);
+        expect(cleaned).not.toContain('ManagedBy');
+        expect(cleaned).not.toContain('GradaProject');
+        expect(cleaned).toContain('provider "aws"');
+        expect(cleaned).toContain('region = "us-east-2"');
+    });
+
+    it('leaves default_tags blocks with hand-added tags in place', () => {
+        const content = 'provider "aws" {\n'
+            + '  default_tags {\n'
+            + '    tags = {\n'
+            + '      ManagedBy = "grada"\n'
+            + '      CostCenter = "hand-added"\n'
+            + '    }\n'
+            + '  }\n'
+            + '}\n';
+        expect(stripTerraformMetadata(content)).toContain('CostCenter');
+    });
+
     it('strips legacy deploy-stack headers, tag blocks, and lambda suffixes', () => {
         const content = '# deploy-stack generated infrastructure (Lambda target)\n'
             + 'provider "aws" {\n'

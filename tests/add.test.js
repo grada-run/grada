@@ -585,7 +585,7 @@ describe('queue:sqs generated terraform', () => {
         expect(rendered).toContain('message_retention_seconds = 1209600');
         expect(rendered).toContain('resource "aws_sqs_queue" "main"');
         expect(rendered).toContain('visibility_timeout_seconds = 30');
-        expect(rendered).toContain('receive_wait_time_seconds = 20');
+        expect(rendered).toContain('receive_wait_time_seconds  = 20');
         expect(rendered).toContain('sqs_managed_sse_enabled   = true');
         expect(rendered).toContain('deadLetterTargetArn = aws_sqs_queue.dlq.arn');
         expect(rendered).toContain('maxReceiveCount     = 3');
@@ -1873,6 +1873,46 @@ describe('cron generated terraform', () => {
         expect(rendered).toContain(`["sh", "-c", ${JSON.stringify('node -e "console.log(1)"')}]`);
     });
 
+    it('headless cron refuses the npm default against a stripped runner', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        const result = await runAdd({ cwd: dir, capability: 'cron', region: 'us-east-2' });
+        expect(result).toMatchObject({ ok: false, reason: 'npm-cmd-stripped-runner' });
+        expect(fs.existsSync(path.join(dir, 'terraform', 'cron.tf'))).toBe(false);
+    });
+
+    it('interactive cron warns but proceeds on a stripped runner', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            const result = await runAdd({
+                cwd: dir, capability: 'cron', region: 'us-east-2', interactive: true,
+                schedule: 'rate(1 hour)', cronCommand: 'npm run cron',
+            });
+            expect(result.ok).toBe(true);
+            expect(logSpy.mock.calls.flat().join('\n')).toContain('npm run cron');
+            expect(trackEvent).toHaveBeenCalledWith('npm_cmd_stripped_runner', expect.objectContaining({
+                capability: 'cron',
+                cmd_source: 'explicit',
+            }));
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('node-based cron commands pass the stripped-runner guard', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        const result = await runAdd({
+            cwd: dir, capability: 'cron', region: 'us-east-2', cronCommand: 'node ./dist/cron.cjs',
+        });
+        expect(result.ok).toBe(true);
+    });
+
     it('injects no container env vars and skips the env list in outro', async () => {
         const dir = makeTmp();
         writeMainTf(dir);
@@ -1967,8 +2007,8 @@ function writeLambdaMainTf(dir, mainTf = LAMBDA_MAIN_TF) {
 describe('injectLambdaEnvVars', () => {
     it('inserts map entries and renders lone interpolations as bare references', () => {
         const updated = injectLambdaEnvVars(LAMBDA_MAIN_TF, S3_ENV);
-        expect(updated).toContain('S3_BUCKET_NAME = aws_s3_bucket.storage.id');
-        expect(updated).toContain('S3_CDN_URL = "https://${aws_cloudfront_distribution.storage_cdn.domain_name}"');
+        expect(updated).toContain('S3_BUCKET_NAME  = aws_s3_bucket.storage.id');
+        expect(updated).toContain('S3_CDN_URL      = "https://${aws_cloudfront_distribution.storage_cdn.domain_name}"');
     });
 
     it('skips existing keys and replaces upsert keys in place', () => {
@@ -2011,8 +2051,8 @@ describe('lambda generated terraform', () => {
         const result = await runAdd({ cwd: dir, capability: 'storage:s3' });
         expect(result.ok).toBe(true);
         const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
-        expect(mainTf).toContain('S3_BUCKET_NAME = aws_s3_bucket.storage.id');
-        expect(mainTf).toContain('S3_CDN_URL = "https://${aws_cloudfront_distribution.storage_cdn.domain_name}"');
+        expect(mainTf).toContain('S3_BUCKET_NAME  = aws_s3_bucket.storage.id');
+        expect(mainTf).toContain('S3_CDN_URL      = "https://${aws_cloudfront_distribution.storage_cdn.domain_name}"');
     });
 
     it('scaffolds the Lambda-targeted cron schedule', async () => {
@@ -2036,7 +2076,7 @@ describe('lambda generated terraform', () => {
         expect(result.ok).toBe(true);
         const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
         expect(mainTf).toContain('vpc_config {');
-        expect(mainTf).toContain('REDIS_URL = ');
+        expect(mainTf).toContain('REDIS_URL       = ');
     });
 });
 
@@ -2137,8 +2177,8 @@ describe('injectContainerSecrets', () => {
     it('injects into the empty TASK_SECRETS slot, leaving the for-expression alone', () => {
         const before = secretsMainTf('');
         const after = injectContainerSecrets(before, DB_SECRETS);
-        expect(after).toContain('{ "name": "DB_USER", "valueFrom": "${aws_db_instance.postgres.master_user_secret[0].secret_arn}:username::" }');
-        expect(after).toContain('{ "name": "DB_PASSWORD", "valueFrom": "${aws_db_instance.postgres.master_user_secret[0].secret_arn}:password::" }');
+        expect(after).toContain('{ "name" : "DB_USER", "valueFrom" : "${aws_db_instance.postgres.master_user_secret[0].secret_arn}:username::" }');
+        expect(after).toContain('{ "name" : "DB_PASSWORD", "valueFrom" : "${aws_db_instance.postgres.master_user_secret[0].secret_arn}:password::" }');
         // The for-expression array is untouched: exactly one for-key block.
         expect(after.match(/for key in local\.secret_keys/g)).toHaveLength(1);
         // Appends after existing entries without doubling commas.
@@ -2150,8 +2190,8 @@ describe('injectContainerSecrets', () => {
         const before = secretsMainTf('          { "name": "DB_USER", "valueFrom": "stale" }');
         const after = injectContainerSecrets(before, DB_SECRETS);
         expect(after).not.toContain('"stale"');
-        expect(after.match(/"name": "DB_USER"/g)).toHaveLength(1);
-        expect(after).toContain('"name": "DB_PASSWORD"');
+        expect(after.match(/"name"\s*:\s*"DB_USER"/g)).toHaveLength(1);
+        expect(after).toContain('"name" : "DB_PASSWORD"');
     });
 
     it('returns the content unchanged when the resource, name, or array is missing', () => {
@@ -2174,6 +2214,6 @@ describe('injectContainerSecrets', () => {
             '',
         ].join('\n');
         const after = injectContainerSecrets(direct, DB_SECRETS.slice(0, 1));
-        expect(after).toContain('{ "name": "DB_USER"');
+        expect(after).toContain('{ "name" : "DB_USER"');
     });
 });

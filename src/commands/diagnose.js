@@ -7,7 +7,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { normalizeOptions } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 
 export const LOG_FETCH_LIMIT = 50;
 
@@ -87,7 +87,7 @@ export async function runLambdaDiagnose(input = {}) {
     const logGroup = options.logGroup;
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : `${projectName}-fn`;
+        : `${projectName}${readResourceSuffix(options.cwd)}-fn`;
     const runSync = options.spawnSyncImpl || spawnSync;
 
     intro(color.bgCyan(color.black(' grada diagnose 🩺 ')));

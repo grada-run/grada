@@ -8,7 +8,9 @@ Pause a non-production or idle environment with a single command, and wake it ba
 ## What it does
 
 - `sleep [env]` scales your ECS services (`app` and `worker`, when present) to `0` and stops the RDS instance or Aurora cluster, printing the estimated hourly/monthly compute savings.
-- `wake [env]` starts the database first (waiting until it is `available`), then restores the exact ECS desired counts recorded at sleep time. Waking an already-awake environment is a no-op that issues no AWS writes (`already-awake`).
+- `sleep` also writes `terraform/sleep.auto.tfvars` (`asleep = true`), so Terraform itself knows the stack is paused: guarded resources (cron schedules, autoscaling) plan to their slept shape instead of fighting the sleep, and adding an un-slept marker changes nothing in the plan. Never edit or commit this file — `wake` deletes it before restoring anything, so wake never fights its own auto-vars.
+- `sleep` refuses when an `add` scaffold is still in progress (a racing or crashed `add` would record a ledger for half-built infrastructure) — re-run in a few seconds, or pass `--force` when your automation sequences commands itself.
+- `wake [env]` starts the database first (waiting until it is `available`), then restores the exact ECS desired counts recorded at sleep time. Waking an already-awake environment is a no-op that issues no AWS writes (`already-awake`). While waiting for tasks, `wake` watches for failure: two distinct fresh stops short-circuit the wait with `ECS_WAKE_CRASH_LOOP`, and a single `PENDING` task with a fatal pull reason (`CannotPullContainerError`, `InspectFailed`, pull backoff) short-circuits immediately with `ECS_WAKE_PULL_FAILURE` — either way the message names the most recent failure (`stoppedReason` + container exit code), and a plain timeout names it too when one exists.
 - `sleep` also pauses the `add cron` schedule (when configured) and suspends SQS worker auto-scaling, so no scheduled task or queued message wakes the environment back up; `wake` resumes both. Schedules that were never deployed and unregistered scaling targets are skipped gracefully.
 - Sleeping the default (production) environment requires confirmation (`--yes` in automation); named environments sleep without prompting.
 - AWS automatically restarts stopped RDS databases after 7 consecutive days — `sleep` prints the exact restart timestamp, and `wake` warns if the window already elapsed.
@@ -16,6 +18,7 @@ Pause a non-production or idle environment with a single command, and wake it ba
 - On `--target lambda` projects, compute is already scale-to-zero, so `sleep`/`wake` manage only the database (and pause/resume the cron schedule) — no services are scaled or restored. With no database provisioned (or with `--skip-db`), both exit successfully with nothing to do instead of failing.
 - On `--target static` projects there is nothing to pause — no compute or database exists — so `sleep`/`wake` exit successfully before any AWS call or confirmation prompt.
 - Every no-op reports a machine-readable `skipped` reason (`static-target`, `lambda-skip-db`, `lambda-no-database`, `already-awake`) in the result and telemetry, and exits 0. With `--strict`, skips exit 2 instead (distinct from failure's 1) so shell scripts can tell "nothing to do" apart from both success and error; telemetry still records the run as successful.
+- While an environment is asleep, `apply` refuses (offering wake-first interactively, `--force` to override), while `add` and `rollback` proceed with a loud warning that apply will block until you wake.
 - Emits `sleep_run` / `wake_run` telemetry events recording the outcome.
 
 ## Usage
@@ -42,6 +45,7 @@ npx grada-run sleep staging --skip-db
 | `--skip-db` | Scale ECS services only; leave the database running. |
 | `--no-wait` | On `wake`, return immediately instead of waiting for RDS `available` and ECS tasks to reach their desired counts. |
 | `--yes` | Skip the production confirmation prompt on `sleep` (also accepts `--force`; required in `--headless`/CI runs, which fail instead of prompting). |
+| `--force` | On `sleep`, also bypass the add-in-progress gate when your automation sequences commands itself. |
 | `--strict` | Exit 2 (instead of 0) when the command has nothing to do, with the `skipped` reason preserved. |
 
 Both commands are idempotent: re-sleeping an asleep environment (or waking an awake one) reports the current state instead of failing.

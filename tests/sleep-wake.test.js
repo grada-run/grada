@@ -86,7 +86,7 @@ function mockClients({ ecs = {}, db = null, onCommand = null } = {}) {
                 throw Object.assign(new Error('not found'), { name: 'DBClusterNotFoundFault' });
             }
             if (name === 'StopDBInstanceCommand' && db?.instance) {
-                db.instance.Status = 'stopping';
+                db.instance.DBInstanceStatus = 'stopping';
                 return {};
             }
             if (name === 'StopDBClusterCommand' && db?.cluster) {
@@ -94,7 +94,7 @@ function mockClients({ ecs = {}, db = null, onCommand = null } = {}) {
                 return {};
             }
             if (name === 'StartDBInstanceCommand' && db?.instance) {
-                db.instance.Status = 'starting';
+                db.instance.DBInstanceStatus = 'starting';
                 return {};
             }
             if (name === 'StartDBClusterCommand' && db?.cluster) {
@@ -194,6 +194,21 @@ describe('resolveSleepTarget', () => {
             cluster: 'myapp-staging-cluster',
             workerService: 'myapp-staging-worker-service',
             dbIdentifier: 'myapp-staging-db',
+        });
+    });
+
+    it('suffixes every AWS name once on suffixed trees', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n');
+        const target = resolveSleepTarget({ projectName: 'myapp', env: 'staging' }, dir);
+        expect(target).toMatchObject({
+            appPrefix: 'myapp-staging',
+            cluster: 'myapp-staging-a1b2c3-cluster',
+            appService: 'myapp-staging-a1b2c3-service',
+            workerService: 'myapp-staging-a1b2c3-worker-service',
+            dbIdentifier: 'myapp-staging-a1b2c3-db',
+            dbClusterIdentifier: 'myapp-staging-a1b2c3-db-cluster',
         });
     });
 
@@ -329,7 +344,7 @@ describe('runSleep', () => {
                 'myapp-staging-service': activeService('myapp-staging-service', 1),
                 'myapp-staging-worker-service': activeService('myapp-staging-worker-service', 2),
             },
-            db: { instance: { Engine: 'postgres', Status: 'available', DBName: 'db' } },
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'available', DBName: 'db' } },
         });
         const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient }));
         expect(result.ok).toBe(true);
@@ -374,7 +389,7 @@ describe('runSleep', () => {
         const dir = makeTmp();
         const { ecsClient, rdsClient, seen } = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 0) },
-            db: { instance: { Engine: 'postgres', Status: 'stopped' } },
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'stopped' } },
         });
         const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient }));
         expect(result.ok).toBe(true);
@@ -389,10 +404,10 @@ describe('runSleep', () => {
     it('preserves the original replica counts on a repeat sleep', async () => {
         const dir = makeTmp();
         const ecs = { 'myapp-staging-service': activeService('myapp-staging-service', 3) };
-        const first = mockClients({ ecs, db: { instance: { Engine: 'postgres', Status: 'available' } } });
+        const first = mockClients({ ecs, db: { instance: { Engine: 'postgres', DBInstanceStatus: 'available' } } });
         await runSleep(sleepOptions(dir, { ecsClient: first.ecsClient, rdsClient: first.rdsClient }));
         expect(readSleepState(dir).staging.services.app).toBe(3);
-        const second = mockClients({ ecs, db: { instance: { Engine: 'postgres', Status: 'stopping' } } });
+        const second = mockClients({ ecs, db: { instance: { Engine: 'postgres', DBInstanceStatus: 'stopping' } } });
         await runSleep(sleepOptions(dir, { ecsClient: second.ecsClient, rdsClient: second.rdsClient }));
         expect(readSleepState(dir).staging.services.app).toBe(3);
     });
@@ -401,14 +416,14 @@ describe('runSleep', () => {
         const dir = makeTmp();
         const skipped = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 1) },
-            db: { instance: { Engine: 'postgres', Status: 'available' } },
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'available' } },
         });
         await runSleep(sleepOptions(dir, { ecsClient: skipped.ecsClient, rdsClient: skipped.rdsClient, skipDb: true }));
         expect(skipped.seen).not.toContain('DescribeDBInstancesCommand');
 
         const transitional = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 1) },
-            db: { instance: { Engine: 'postgres', Status: 'starting' } },
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'starting' } },
         });
         const result = await runSleep(sleepOptions(dir, { ecsClient: transitional.ecsClient, rdsClient: transitional.rdsClient }));
         expect(result.ok).toBe(true);
@@ -472,7 +487,7 @@ describe('runWake', () => {
                 dbKind: 'instance',
             },
         });
-        const db = { instance: { Engine: 'postgres', Status: 'stopped' } };
+        const db = { instance: { Engine: 'postgres', DBInstanceStatus: 'stopped' } };
         const order = [];
         const { ecsClient, rdsClient } = mockClients({
             ecs: {
@@ -489,12 +504,12 @@ describe('runWake', () => {
         rdsClient.send.mockImplementation(async (command) => {
             const name = command.constructor.name;
             if (name === 'DescribeDBInstancesCommand') {
-                if (db.instance.Status === 'starting') db.instance.Status = 'available';
+                if (db.instance.DBInstanceStatus === 'starting') db.instance.DBInstanceStatus = 'available';
                 return { DBInstances: [db.instance] };
             }
             if (name === 'StartDBInstanceCommand') {
                 order.push('start-db');
-                db.instance.Status = 'starting';
+                db.instance.DBInstanceStatus = 'starting';
                 return {};
             }
             if (name === 'DescribeDBClustersCommand') throw Object.assign(new Error('x'), { name: 'DBClusterNotFoundFault' });
@@ -545,7 +560,7 @@ describe('runWake', () => {
         const rdsClient = {
             send: vi.fn(async (command) => {
                 if (command.constructor.name === 'DescribeDBInstancesCommand') {
-                    return { DBInstances: [{ Engine: 'postgres', Status: 'available' }] };
+                    return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'available' }] };
                 }
                 throw new Error(`unexpected RDS command: ${command.constructor.name}`);
             }),
@@ -567,7 +582,7 @@ describe('runWake', () => {
         const rdsClient = {
             send: vi.fn(async (command) => {
                 if (command.constructor.name === 'DescribeDBInstancesCommand') {
-                    return { DBInstances: [{ Engine: 'postgres', Status: 'starting' }] };
+                    return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'starting' }] };
                 }
                 if (command.constructor.name === 'StartDBInstanceCommand') return {};
                 throw new Error(`unexpected: ${command.constructor.name}`);
@@ -578,7 +593,7 @@ describe('runWake', () => {
         const inner = rdsClient.send.getMockImplementation();
         rdsClient.send.mockImplementation(async (command) => {
             if (command.constructor.name === 'DescribeDBInstancesCommand' && calls++ === 0) {
-                return { DBInstances: [{ Engine: 'postgres', Status: 'stopped' }] };
+                return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'stopped' }] };
             }
             return inner(command);
         });
@@ -614,7 +629,7 @@ describe('runWake', () => {
         const rdsClient = {
             send: vi.fn(async (command) => {
                 if (command.constructor.name === 'DescribeDBInstancesCommand') {
-                    return { DBInstances: [{ Engine: 'postgres', Status: 'available' }] };
+                    return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'available' }] };
                 }
                 throw Object.assign(new Error('x'), { name: 'DBClusterNotFoundFault' });
             }),
@@ -642,6 +657,46 @@ describe('sleep-targets: cron schedule discovery', () => {
         fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
         fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), '# nothing scheduled here\n');
         expect(readCronScheduleName(dir, 'myapp')).toBeNull();
+    });
+
+    it('appends the resource suffix between prefix and schedule', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            'resource "aws_scheduler_schedule" "cron" {\n  name = "${local.app_name}-cron-nightly-cleanup"\n}\n'
+        );
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        expect(readCronScheduleName(dir, 'myapp-staging')).toBe('myapp-staging-a1b2c3-cron-nightly-cleanup');
+    });
+
+    it('ignores the IAM role/policy names that precede the schedule block', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            [
+                'resource "aws_iam_role" "scheduler_cron_role" {',
+                '  name = "${local.app_name}-cron-scheduler-role"',
+                '}',
+                'resource "aws_iam_role_policy" "scheduler_cron_policy" {',
+                '  name = "${local.app_name}-cron-scheduler-policy"',
+                '}',
+                'resource "aws_scheduler_schedule" "cron" {',
+                '  name = "${local.app_name}-cron-nightly-cleanup"',
+                '  state = var.asleep ? "DISABLED" : "ENABLED"',
+                '}',
+                '',
+            ].join('\n')
+        );
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        expect(readCronScheduleName(dir, 'myapp-staging')).toBe('myapp-staging-a1b2c3-cron-nightly-cleanup');
     });
 });
 
@@ -750,10 +805,36 @@ describe('runSleep: cron pause, scaling suspend, and cache note', () => {
 
     function writeCronTf(dir, slug = 'nightly') {
         fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        // Mirrors the real template order: the IAM role/policy share the
+        // `-cron-` prefix and precede the schedule block. A resolver that
+        // matches the first `-cron-` interpolation resolves the role name
+        // and suspends a schedule that doesn't exist.
         fs.writeFileSync(
             path.join(dir, 'terraform', 'cron.tf'),
-            `resource "aws_scheduler_schedule" "cron" {\n  name = "\${local.app_name}-cron-${slug}"\n}\n`
+            [
+                'resource "aws_iam_role" "scheduler_cron_role" {',
+                '  name = "${local.app_name}-cron-scheduler-role"',
+                '}',
+                'resource "aws_iam_role_policy" "scheduler_cron_policy" {',
+                '  name = "${local.app_name}-cron-scheduler-policy"',
+                '}',
+                'resource "aws_scheduler_schedule" "cron" {',
+                `  name = "\${local.app_name}-cron-${slug}"`,
+                '  state = var.asleep ? "DISABLED" : "ENABLED"',
+                '}',
+                '',
+            ].join('\n')
         );
+    }
+
+    // Backdates scaffold files past the add-in-progress freshness window:
+    // these rows pin pause/suspend behavior, not freshness detection.
+    function settleScaffolds(dir) {
+        const past = new Date(Date.now() - 120_000);
+        for (const file of ['cron.tf', 'sqs.tf', 'worker.tf', 'redis.tf']) {
+            const full = path.join(dir, 'terraform', file);
+            if (fs.existsSync(full)) fs.utimesSync(full, past, past);
+        }
     }
 
     it('pauses the cron schedule and suspends worker scaling', async () => {
@@ -761,6 +842,7 @@ describe('runSleep: cron pause, scaling suspend, and cache note', () => {
         writeCronTf(dir);
         fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), '# queue\n');
         fs.writeFileSync(path.join(dir, 'terraform', 'worker.tf'), '# worker\n');
+        settleScaffolds(dir);
         const { ecsClient, rdsClient } = mockClients({
             ecs: {
                 'myapp-staging-service': activeService('myapp-staging-service', 1),
@@ -812,6 +894,7 @@ describe('runSleep: cron pause, scaling suspend, and cache note', () => {
         writeCronTf(dir);
         fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), '# queue\n');
         fs.writeFileSync(path.join(dir, 'terraform', 'worker.tf'), '# worker\n');
+        settleScaffolds(dir);
         const { ecsClient, rdsClient } = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 1) },
         });
@@ -833,6 +916,7 @@ describe('runSleep: cron pause, scaling suspend, and cache note', () => {
         const dir = makeTmp();
         fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
         fs.writeFileSync(path.join(dir, 'terraform', 'redis.tf'), '# valkey\n');
+        settleScaffolds(dir);
         const { ecsClient, rdsClient } = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 1) },
         });
@@ -858,13 +942,179 @@ describe('runSleep: cron pause, scaling suspend, and cache note', () => {
     });
 });
 
-describe('runWake: cron resume and scaling resume', () => {
-    it('resumes the cron schedule and worker scaling', async () => {
+describe('runSleep: add-in-progress gates and already-asleep fast path', () => {
+    function sleepOptions(dir, overrides = {}) {
+        return {
+            cwd: dir,
+            projectName: 'myapp',
+            region: 'us-east-2',
+            env: 'staging',
+            ...overrides,
+        };
+    }
+
+    function ecsUp() {
+        return mockClients({
+            ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 1) },
+        });
+    }
+
+    function updateServiceCalls(ecsClient) {
+        return ecsClient.send.mock.calls.filter(([command]) => command.constructor.name === 'UpdateServiceCommand');
+    }
+
+    // Simulates a racing `add` by planting a foreign lockdir directly:
+    // going through withProjectLock in-test would bypass via the
+    // same-chain exemption instead of contending.
+    function plantLock(dir, scope, createdAt) {
+        const lockDir = path.join(dir, '.grada', 'locks', scope);
+        fs.mkdirSync(lockDir, { recursive: true });
+        fs.writeFileSync(path.join(lockDir, 'meta.json'), JSON.stringify({ pid: 999999, createdAt }));
+    }
+
+    function settle(dir, file) {
+        const past = new Date(Date.now() - 120_000);
+        fs.utimesSync(path.join(dir, 'terraform', file), past, past);
+    }
+
+    it('refuses with zero AWS calls while an addon lock is held', async () => {
+        const dir = makeTmp();
+        plantLock(dir, 'terraform', Date.now());
+        const { ecsClient, rdsClient } = ecsUp();
+        const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(result).toMatchObject({ ok: false, reason: 'add-in-progress' });
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(trackEvent).toHaveBeenCalledWith('sleep_add_in_progress', expect.objectContaining({
+            trigger: 'lock-held',
+            scope: 'terraform',
+        }));
+    });
+
+    it('takes over a stale addon lock instead of refusing', async () => {
+        const dir = makeTmp();
+        plantLock(dir, 'terraform', Date.now() - 300_000);
+        const { ecsClient, rdsClient } = ecsUp();
+        const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(result.ok).toBe(true);
+        expect(updateServiceCalls(ecsClient)).toHaveLength(1);
+    });
+
+    it('refuses when a scaffold file is fresher than the settle window', async () => {
         const dir = makeTmp();
         fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
         fs.writeFileSync(
             path.join(dir, 'terraform', 'cron.tf'),
             'resource "aws_scheduler_schedule" "cron" {\n  name = "${local.app_name}-cron-nightly"\n}\n'
+        );
+        const { ecsClient, rdsClient } = ecsUp();
+        const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(result).toMatchObject({ ok: false, reason: 'add-in-progress' });
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(trackEvent).toHaveBeenCalledWith('sleep_add_in_progress', expect.objectContaining({
+            trigger: 'fresh-file',
+            file: 'cron.tf',
+        }));
+    });
+
+    it('proceeds once scaffold files settle', async () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            'resource "aws_scheduler_schedule" "cron" {\n  name = "${local.app_name}-cron-nightly"\n}\n'
+        );
+        settle(dir, 'cron.tf');
+        const { ecsClient, rdsClient } = ecsUp();
+        const spawnSyncImpl = vi.fn(() => ({ status: 254, stdout: '', stderr: 'ResourceNotFoundException' }));
+        const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true, spawnSyncImpl }));
+        expect(result.ok).toBe(true);
+    });
+
+    it('treats an unparseable scaffold file as in-progress, never skips silently', async () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), '# nothing scheduled here\n');
+        settle(dir, 'cron.tf');
+        const { ecsClient, rdsClient } = ecsUp();
+        const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(result).toMatchObject({ ok: false, reason: 'add-in-progress' });
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(trackEvent).toHaveBeenCalledWith('sleep_add_in_progress', expect.objectContaining({
+            trigger: 'unparseable-file',
+            file: 'cron.tf',
+        }));
+    });
+
+    it('--force bypasses the add-in-progress gate', async () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            'resource "aws_scheduler_schedule" "cron" {\n  name = "${local.app_name}-cron-nightly"\n}\n'
+        );
+        const { ecsClient, rdsClient } = ecsUp();
+        const spawnSyncImpl = vi.fn(() => ({ status: 254, stdout: '', stderr: 'ResourceNotFoundException' }));
+        const result = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true, force: true, spawnSyncImpl }));
+        expect(result.ok).toBe(true);
+    });
+
+    it('repeat sleep on an already-asleep env short-circuits without duplicate mutations', async () => {
+        const dir = makeTmp();
+        const { ecsClient, rdsClient } = ecsUp();
+        const first = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(first.ok).toBe(true);
+        expect(first.fastPath).toBeUndefined();
+        const sleptAt = readSleepState(dir).staging.sleptAt;
+        ecsClient.send.mockClear();
+        rdsClient.send.mockClear();
+        const second = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(second.ok).toBe(true);
+        expect(second.fastPath).toBe(true);
+        expect(updateServiceCalls(ecsClient)).toHaveLength(0);
+        expect(readSleepState(dir).staging.sleptAt).toBe(sleptAt);
+        expect(trackEvent).toHaveBeenCalledWith('sleep_run', expect.objectContaining({
+            fast_path: true,
+            success: true,
+        }));
+    });
+
+    it('re-sleeps when live services diverged from the ledger', async () => {
+        const dir = makeTmp();
+        const service = activeService('myapp-staging-service', 1);
+        const { ecsClient, rdsClient } = mockClients({ ecs: { 'myapp-staging-service': service } });
+        const first = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(first.ok).toBe(true);
+        // Out-of-band wake: live desired count leaves the ledger behind.
+        service.desiredCount = 1;
+        ecsClient.send.mockClear();
+        const second = await runSleep(sleepOptions(dir, { ecsClient, rdsClient, skipDb: true }));
+        expect(second.ok).toBe(true);
+        expect(second.fastPath).toBeUndefined();
+        expect(updateServiceCalls(ecsClient)).toHaveLength(1);
+    });
+});
+
+describe('runWake: cron resume and scaling resume', () => {
+    it('resumes the cron schedule and worker scaling', async () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        // Realistic template order: role/policy `-cron-` names precede the
+        // schedule block (see the sleep-side writeCronTf note).
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            [
+                'resource "aws_iam_role" "scheduler_cron_role" {',
+                '  name = "${local.app_name}-cron-scheduler-role"',
+                '}',
+                'resource "aws_iam_role_policy" "scheduler_cron_policy" {',
+                '  name = "${local.app_name}-cron-scheduler-policy"',
+                '}',
+                'resource "aws_scheduler_schedule" "cron" {',
+                '  name = "${local.app_name}-cron-nightly"',
+                '  state = var.asleep ? "DISABLED" : "ENABLED"',
+                '}',
+                '',
+            ].join('\n')
         );
         fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), '# queue\n');
         fs.writeFileSync(path.join(dir, 'terraform', 'worker.tf'), '# worker\n');
@@ -928,6 +1178,156 @@ describe('runWake: cron resume and scaling resume', () => {
     });
 });
 
+describe('runWake: crash-loop short-circuit', () => {
+    function writeAwakeableState(dir) {
+        writeSleepState(dir, {
+            staging: {
+                env: 'staging',
+                sleptAt: new Date().toISOString(),
+                autoRestartAt: new Date(Date.now() + 3600_000).toISOString(),
+                services: { app: 1 },
+            },
+        });
+    }
+
+    function stoppedTask(arn, stoppedAtMs) {
+        return {
+            taskArn: arn,
+            lastStatus: 'STOPPED',
+            stoppedAt: new Date(stoppedAtMs),
+            stoppedReason: 'Essential container in task exited',
+            containers: [{ name: 'web', exitCode: 1, reason: 'Essential container in task exited' }],
+        };
+    }
+
+    // Services never reach desired count; stopped tasks are fixed in time
+    // (stoppedAt 5000 > any wait-start clock below).
+    function crashingEcsClient(tasksByArn, pendingTasksByArn = {}) {
+        const stoppedArns = Object.keys(tasksByArn);
+        const pendingArns = Object.keys(pendingTasksByArn);
+        const pool = { ...tasksByArn, ...pendingTasksByArn };
+        return {
+            send: vi.fn(async (command) => {
+                const name = command.constructor.name;
+                if (name === 'DescribeServicesCommand') {
+                    return {
+                        services: (command.input.services || []).map((serviceName) => ({
+                            serviceName, status: 'ACTIVE', desiredCount: 1, runningCount: 0,
+                        })),
+                    };
+                }
+                if (name === 'UpdateServiceCommand') return {};
+                if (name === 'ListTasksCommand') {
+                    return { taskArns: command.input.desiredStatus === 'PENDING' ? pendingArns : stoppedArns };
+                }
+                if (name === 'DescribeTasksCommand') {
+                    return { tasks: (command.input.tasks || []).map((arn) => pool[arn]).filter(Boolean) };
+                }
+                throw new Error(`unexpected ECS command: ${name}`);
+            }),
+        };
+    }
+
+    function output() {
+        return stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
+    }
+
+    it('short-circuits with the root cause when tasks keep crashing', async () => {
+        const dir = makeTmp();
+        writeAwakeableState(dir);
+        const ecsClient = crashingEcsClient({
+            'arn-1': stoppedTask('arn-1', 5000),
+            'arn-2': stoppedTask('arn-2', 5001),
+        });
+        const result = await runWake({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
+            pollIntervalMs: 1, timeoutMs: 600_000,
+            sleepFn: async () => {},
+            nowFn: () => 1000,
+            ecsClient, skipDb: true,
+        });
+        expect(result).toMatchObject({ ok: false, reason: 'ecs-wake-crash-loop' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(output()).toContain('are crashing instead of starting');
+        expect(output()).toContain('Essential container in task exited (exit 1)');
+        // Short-circuit: exactly one non-ready tick ran its crash probe
+        // (one batched DescribeTasks), then out — the 10-minute timeout
+        // never elapses.
+        expect(ecsClient.send.mock.calls.filter(([cmd]) => cmd.constructor.name === 'DescribeTasksCommand')).toHaveLength(1);
+        expect(trackEvent).toHaveBeenCalledWith('wake_run', expect.objectContaining({
+            error_code: 'ECS_WAKE_CRASH_LOOP', crash_detected: true,
+        }));
+        expect(readSleepState(dir).staging).toBeTruthy();
+    });
+
+    it('short-circuits immediately on a single pending pull failure', async () => {
+        const dir = makeTmp();
+        writeAwakeableState(dir);
+        const ecsClient = crashingEcsClient({}, {
+            'arn-pending': {
+                taskArn: 'arn-pending',
+                lastStatus: 'PENDING',
+                containers: [{ name: 'web', reason: 'CannotPullContainerError: manifest unknown' }],
+            },
+        });
+        const result = await runWake({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
+            pollIntervalMs: 1, timeoutMs: 600_000,
+            sleepFn: async () => {},
+            nowFn: () => 1000,
+            ecsClient, skipDb: true,
+        });
+        expect(result).toMatchObject({ ok: false, reason: 'ecs-wake-pull-failure' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(output()).toContain('cannot start');
+        expect(output()).toContain('Most recent failure: CannotPullContainerError: manifest unknown');
+        expect(trackEvent).toHaveBeenCalledWith('wake_run', expect.objectContaining({
+            error_code: 'ECS_WAKE_PULL_FAILURE', crash_detected: true,
+        }));
+        expect(readSleepState(dir).staging).toBeTruthy();
+    });
+
+    it('names the most recent failure on timeout below the crash threshold', async () => {
+        const dir = makeTmp();
+        writeAwakeableState(dir);
+        const ecsClient = crashingEcsClient({ 'arn-1': stoppedTask('arn-1', 5000) });
+        let now = 1000;
+        const result = await runWake({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
+            pollIntervalMs: 1, timeoutMs: 5,
+            sleepFn: async () => {},
+            nowFn: () => now++,
+            ecsClient, skipDb: true,
+        });
+        expect(result).toMatchObject({ ok: false, reason: 'ecs-wake-timeout' });
+        expect(output()).toContain('did not reach the desired count');
+        expect(output()).toContain('Most recent failure: Essential container in task exited (exit 1)');
+        expect(trackEvent).toHaveBeenCalledWith('wake_run', expect.objectContaining({
+            error_code: 'ECS_WAKE_TIMEOUT', crash_detected: true,
+        }));
+    });
+
+    it('keeps the generic timeout message when no task stopped', async () => {
+        const dir = makeTmp();
+        writeAwakeableState(dir);
+        const ecsClient = crashingEcsClient({});
+        let now = 1000;
+        const result = await runWake({
+            cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
+            pollIntervalMs: 1, timeoutMs: 5,
+            sleepFn: async () => {},
+            nowFn: () => now++,
+            ecsClient, skipDb: true,
+        });
+        expect(result).toMatchObject({ ok: false, reason: 'ecs-wake-timeout' });
+        expect(output()).toContain('did not reach the desired count');
+        expect(output()).not.toContain('Most recent failure');
+        expect(trackEvent).toHaveBeenCalledWith('wake_run', expect.objectContaining({
+            error_code: 'ECS_WAKE_TIMEOUT', crash_detected: false,
+        }));
+    });
+});
+
 describe('runSleep on --target lambda projects', () => {
     function lambdaDir() {
         const dir = makeTmp();
@@ -943,7 +1343,7 @@ describe('runSleep on --target lambda projects', () => {
         const dir = lambdaDir();
         const { ecsClient, rdsClient, seen } = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 1) },
-            db: { instance: { Engine: 'postgres', Status: 'available', DBName: 'db' } },
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'available', DBName: 'db' } },
         });
         const result = await runSleep({
             cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',
@@ -1048,7 +1448,7 @@ describe('runWake on --target lambda projects', () => {
         });
         const { ecsClient, rdsClient, seen } = mockClients({
             ecs: { 'myapp-staging-service': activeService('myapp-staging-service', 0) },
-            db: { instance: { Engine: 'postgres', Status: 'stopped', DBName: 'db' } },
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'stopped', DBName: 'db' } },
         });
         const result = await runWake({
             cwd: dir, projectName: 'myapp', region: 'us-east-2', env: 'staging',

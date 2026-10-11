@@ -1,5 +1,6 @@
 import fsSync from 'fs';
 import path from 'path';
+import { randomBytes } from 'crypto';
 import { normalizeOptions } from './args.js';
 
 export const FALLBACK_REGION = 'us-east-2';
@@ -111,7 +112,7 @@ export function readTerraformProjectName(cwd = process.cwd()) {
     const base = resolveCwd({}, cwd);
     const mainTf = readFileSafe(path.join(base, 'terraform', 'main.tf'));
     if (!mainTf) return null;
-    const appNameMatch = mainTf.match(/app_name\s*=\s*"([^"$]+)\$\{local\.env_suffix\}"/);
+    const appNameMatch = mainTf.match(/app_name\s*=\s*"([^"$]+)\$\{local\.env_suffix\}(?:\$\{local\.grada_resource_suffix\})?"/);
     if (appNameMatch) return appNameMatch[1];
     // Hand-written files may set a plain app_name (possibly with some other
     // ${...} suffix); it still outranks the ECR heuristic below.
@@ -123,6 +124,34 @@ export function readTerraformProjectName(cwd = process.cwd()) {
     const ecrMatch = mainTf.match(/resource\s+"aws_ecr_repository"\s+"app"\s*\{[^}]*?name\s*=\s*"([^"]+)-repo"/);
     if (ecrMatch) return ecrMatch[1];
     return null;
+}
+
+// Collision-resistant naming: init mints a `-a1b2c3` suffix per project,
+// rendered into `grada_resource_suffix` in terraform/main.tf. AWS-name
+// builders append it to whatever base they assemble (bare or
+// workspace-namespaced); bare display/telemetry/tag names never include
+// it. Strict mint-shape match only — anything else reads as '' so a
+// hand-edited value can never poison lookups, and unsuffixed trees
+// resolve byte-identical names.
+export function readResourceSuffix(cwd = process.cwd()) {
+    const base = resolveCwd({}, cwd);
+    const mainTf = readFileSafe(path.join(base, 'terraform', 'main.tf'));
+    const match = mainTf ? /grada_resource_suffix\s*=\s*"([^"]*)"/.exec(mainTf) : null;
+    const value = match ? match[1] : '';
+    return /^-[a-f0-9]{6}$/.test(value) ? value : '';
+}
+
+export function mintResourceSuffix() {
+    return `-${randomBytes(3).toString('hex')}`;
+}
+
+// Init-time suffix resolution. Fresh trees (no main.tf) mint; existing
+// trees reuse their rendered suffix; pre-suffix trees (main.tf without
+// the local) stay '' forever — minting for them would rename live
+// singletons on re-init.
+export function resolveInitSuffix(targetDir) {
+    if (!fsSync.existsSync(path.join(targetDir, 'terraform', 'main.tf'))) return mintResourceSuffix();
+    return readResourceSuffix(targetDir);
 }
 
 export function resolveProjectName(options = {}, cwd = process.cwd()) {
@@ -140,7 +169,7 @@ export function resolveCluster(options = {}, cwd = process.cwd()) {
     if (typeof process.env.ECS_CLUSTER === 'string' && process.env.ECS_CLUSTER.trim()) {
         return process.env.ECS_CLUSTER.trim();
     }
-    return `${resolveProjectName(opts, cwd)}-cluster`;
+    return `${resolveProjectName(opts, cwd)}${readResourceSuffix(cwd)}-cluster`;
 }
 
 export function resolveService(options = {}, cwd = process.cwd()) {
@@ -150,7 +179,7 @@ export function resolveService(options = {}, cwd = process.cwd()) {
     if (typeof process.env.ECS_SERVICE === 'string' && process.env.ECS_SERVICE.trim()) {
         return process.env.ECS_SERVICE.trim();
     }
-    return `${resolveProjectName(opts, cwd)}-service`;
+    return `${resolveProjectName(opts, cwd)}${readResourceSuffix(cwd)}-service`;
 }
 
 export function resolveLogGroup(options = {}, cwd = process.cwd()) {
@@ -166,12 +195,13 @@ export function resolveLogGroup(options = {}, cwd = process.cwd()) {
     }
     const base = resolveCwd(opts, cwd);
     const projectName = resolveProjectName(opts, base);
+    const suffixed = `${projectName}${readResourceSuffix(base)}`;
     // Lambda functions log to /aws/lambda/<fn> (see main-lambda.tf), where
     // the function name is `<app>-fn`.
     if (readTerraformComputeTarget(base) === 'lambda') {
-        return `/aws/lambda/${projectName}-fn`;
+        return `/aws/lambda/${suffixed}-fn`;
     }
-    return `/ecs/${projectName}`;
+    return `/ecs/${suffixed}`;
 }
 
 // True when prompts must not block: explicit headless flags, CI/test

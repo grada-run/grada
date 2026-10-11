@@ -1,4 +1,5 @@
 import color from 'picocolors';
+import { setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, isProgrammaticCall } from '../utils/command.js';
 import { guardComputeTarget } from '../utils/resolvers.js';
 import { normalizeOptions, normalizeArgv } from '../utils/args.js';
@@ -42,7 +43,21 @@ function printDbUsage() {
     console.log('  grada db import (--file <path> | --from <url>) [--yes] [--project-name <name>] [--workspace <name>] [--region <region>] [--db-identifier <id>]');
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
+// Leaf subcommands restamp with their own name while they run (the command
+// stack restores 'db' when they return); the dispatcher stamp covers the
+// guard and unknown-subcommand paths that never reach a leaf.
 export async function runDb(argv = [], extraOptions = {}) {
+    setActiveCommandName('db');
+    try {
+        return await runDbMain(argv, extraOptions);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbMain(argv = [], extraOptions = {}) {
     const args = normalizeArgv(argv);
     const extra = normalizeOptions(extraOptions);
     if (args[0] === 'db') args.shift();

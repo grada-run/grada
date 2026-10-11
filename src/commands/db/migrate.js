@@ -2,7 +2,7 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner, text, isCancel } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../../core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -15,8 +15,9 @@ import {
     resolveAppName,
     resolveHeadless,
     resolveCwd,
+    readFileSafe,
 } from '../../utils/resolvers.js';
-import { detectMigrationCommand } from '../../utils/detector.js';
+import { detectMigrationCommand, isNpmShimCommand, dockerfileStripsNpmShims } from '../../utils/detector.js';
 import { resolveContainer } from '../../utils/ecs.js';
 import { runEphemeralEcsTask } from '../../utils/ecs-runner.js';
 import { parseTimeoutSeconds } from '../../utils/system.js';
@@ -215,7 +216,18 @@ async function flushRemainingLogs({ logsClient, logGroupName, logStreamName, see
     }
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDbMigrate(input = {}) {
+    setActiveCommandName('db_migrate');
+    try {
+        return await runDbMigrateMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbMigrateMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;
@@ -300,6 +312,27 @@ export async function runDbMigrate(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
+    }
+
+    // 1b. Stripped-runner guard: Grada's node-family images
+    // remove npm/npx/yarn from the runner stage, so an npm-shim command
+    // is a guaranteed `command not found` inside the task. Fail fast
+    // headless; warn loudly (and proceed) interactively. Fail-open when
+    // no Dockerfile is present — nothing to prove breakage against.
+    if (isNpmShimCommand(resolvedCmd) && dockerfileStripsNpmShims(readFileSafe(path.join(cwd, 'Dockerfile')))) {
+        if (headless) {
+            return failCommand({
+                message: `\n✖ Refusing to run "${resolvedCmd}": your Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" inside the task.\n`,
+                hint: '  Bundle a framework-compiled runner instead and re-run with an explicit node-based command, e.g. --cmd "node ./dist/migrate.cjs".\n',
+                event: 'db_migrate_run',
+                telemetry: { projectName, cmd_source: cmdSource, ci_setup: setupCi, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
+                errorCode: 'NPM_CMD_STRIPPED_RUNNER',
+                reason: 'npm-cmd-stripped-runner',
+                resultExtra: { cluster, service, region },
+            });
+        }
+        console.log(color.yellow(`⚠️  "${resolvedCmd}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs").`));
+        trackEvent('npm_cmd_stripped_runner', { projectName, cmd_source: cmdSource, ci_setup: setupCi });
     }
 
     // 2. --setup-ci: patch the workflow file, no AWS calls.

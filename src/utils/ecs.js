@@ -1,7 +1,7 @@
 import { spawnSync } from 'child_process';
 import color from 'picocolors';
-import { DescribeServicesCommand } from '@aws-sdk/client-ecs';
-import { resolveProjectName } from './resolvers.js';
+import { DescribeServicesCommand, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/client-ecs';
+import { resolveProjectName, readResourceSuffix } from './resolvers.js';
 import { normalizeOptions } from './args.js';
 import { AWS_CLI_INSTALL_URL } from './aws.js';
 
@@ -18,7 +18,7 @@ export function resolveContainer(options = {}, cwd = process.cwd()) {
     if (typeof process.env.ECS_CONTAINER === 'string' && process.env.ECS_CONTAINER.trim()) {
         return process.env.ECS_CONTAINER.trim();
     }
-    return `${resolveProjectName(opts, cwd)}-container`;
+    return `${resolveProjectName(opts, cwd)}${readResourceSuffix(cwd)}-container`;
 }
 
 // Shared active-service lookup: the service object when it exists and is
@@ -89,4 +89,116 @@ export function printNoTasksGuidance(service, cluster, reason = 'to open an inte
     console.log(`  The ECS service ${color.cyan(service)} in cluster ${color.cyan(cluster)} has no RUNNING tasks.`);
     console.log(`  A running container is required ${reason}.`);
     console.log(`  Check status with ${color.green('npx grada-run status')}, then run ${color.green('npx grada-run apply')} to start your service.\n`);
+}
+
+// Distinct stopped tasks before a service-ready wait concludes crash-loop
+// instead of slow start. One crash can be a flake; two is a pattern.
+export const ECS_CRASH_LOOP_THRESHOLD = 2;
+
+// Best-effort crash evidence for service-ready waits: lists STOPPED tasks
+// per service and describes them, keeping only tasks that stopped after
+// `sinceMs` (older stops predate the wait — e.g. sleep's own scale-to-0).
+// Never throws: detection must not break the wait it informs.
+export async function findRecentStoppedTasks({ ecsClient, cluster, services, sinceMs }) {
+    try {
+        const arns = [];
+        for (const service of services || []) {
+            const listed = await ecsClient.send(new ListTasksCommand({ cluster, serviceName: service, desiredStatus: 'STOPPED' }));
+            arns.push(...(listed.taskArns || []));
+        }
+        if (arns.length === 0) return [];
+        const described = await ecsClient.send(new DescribeTasksCommand({ cluster, tasks: arns }));
+        return uniqueTasks(described.tasks).filter((task) => {
+            const stoppedAt = task.stoppedAt instanceof Date ? task.stoppedAt.getTime() : Number(task.stoppedAt);
+            return Number.isFinite(stoppedAt) && stoppedAt >= sinceMs;
+        });
+    } catch {
+        return [];
+    }
+}
+
+// Fatal container reasons on a PENDING task: the task will never start no
+// matter how long the waiter waits (missing image, bad auth, dead
+// registry path). A pending task with no (or any other) reason is still
+// possibly starting and must NOT match.
+const PENDING_FATAL_REASON_PATTERNS = [
+    /cannotpullcontainererror/i,
+    /inspectfailed/i,
+    /imagepullbackoff/i,
+    /unable to pull/i,
+    /manifest unknown/i,
+];
+
+// Best-effort pull-failure evidence: PENDING tasks whose container reason
+// matches a fatal pull pattern. Unlike stopped tasks there is no time
+// filter — a pending task failing to pull right now is actionable no
+// matter when it was created. Never throws.
+export async function findPendingPullFailures({ ecsClient, cluster, services }) {
+    try {
+        const arns = [];
+        for (const service of services || []) {
+            const listed = await ecsClient.send(new ListTasksCommand({ cluster, serviceName: service, desiredStatus: 'PENDING' }));
+            arns.push(...(listed.taskArns || []));
+        }
+        if (arns.length === 0) return [];
+        const described = await ecsClient.send(new DescribeTasksCommand({ cluster, tasks: arns }));
+        return uniqueTasks(described.tasks).filter((task) => {
+            const reasons = (task.containers || []).map((container) => container?.reason || '');
+            return reasons.some((reason) => PENDING_FATAL_REASON_PATTERNS.some((pattern) => pattern.test(reason)));
+        });
+    } catch {
+        return [];
+    }
+}
+
+function uniqueTasks(tasks) {
+    const seen = new Set();
+    return (tasks || []).filter((task) => {
+        if (!task?.taskArn || seen.has(task.taskArn)) return false;
+        seen.add(task.taskArn);
+        return true;
+    });
+}
+
+function mostRecentStopped(stopped) {
+    return stopped.reduce((a, b) => {
+        const aMs = a.stoppedAt instanceof Date ? a.stoppedAt.getTime() : Number(a.stoppedAt);
+        const bMs = b.stoppedAt instanceof Date ? b.stoppedAt.getTime() : Number(b.stoppedAt);
+        return bMs > aMs ? b : a;
+    });
+}
+
+// One composed probe for service-ready waits. A single pending pull
+// failure is already fatal (no threshold — an unpullable image never
+// resolves by waiting) and takes precedence as the live blocker; the
+// stopped-task crash loop stays thresholded. `kind` drives the
+// short-circuit decision; `detail` is always the best cause found (even
+// sub-threshold, for timeout messages). Returns `{ kind: null |
+// 'pull-failure' | 'crash-loop', detail, stoppedTasks }`.
+export async function detectTaskFailure({ ecsClient, cluster, services, sinceMs }) {
+    const pending = await findPendingPullFailures({ ecsClient, cluster, services });
+    const stopped = await findRecentStoppedTasks({ ecsClient, cluster, services, sinceMs });
+    const detail = pending.length > 0
+        ? formatTaskFailure(pending[0])
+        : stopped.length > 0 ? formatTaskFailure(mostRecentStopped(stopped)) : null;
+    if (pending.length > 0) {
+        return { kind: 'pull-failure', detail, stoppedTasks: stopped.length };
+    }
+    if (stopped.length >= ECS_CRASH_LOOP_THRESHOLD) {
+        return { kind: 'crash-loop', detail, stoppedTasks: stopped.length };
+    }
+    return { kind: null, detail, stoppedTasks: stopped.length };
+}
+
+// One-line human cause for a stopped task: the failed container's exit
+// reason/code first, the task stoppedReason as fallback.
+export function formatTaskFailure(task) {
+    const containers = Array.isArray(task?.containers) ? task.containers : [];
+    const failed = containers.find((c) => typeof c?.exitCode === 'number' && c.exitCode !== 0)
+        || containers.find((c) => c?.reason);
+    if (failed) {
+        const reason = failed.reason || 'container exited';
+        return typeof failed.exitCode === 'number' ? `${reason} (exit ${failed.exitCode})` : reason;
+    }
+    return task?.stoppedReason || 'unknown reason';
 }

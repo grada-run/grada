@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import zlib from 'node:zlib';
 import color from 'picocolors';
 import { intro, outro, spinner, select, text, password, confirm, cancel, isCancel } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../../core/telemetry.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -152,7 +152,18 @@ function printDbNoTasksGuidance(service, cluster) {
     printNoTasksGuidance(service, cluster, 'to act as a jump host for the import tunnel');
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runDbImport(input = {}) {
+    setActiveCommandName('db_import');
+    try {
+        return await runDbImportMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runDbImportMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;

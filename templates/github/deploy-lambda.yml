@@ -9,8 +9,8 @@ on:
 
 env:
   AWS_REGION: {{REGION}}
-  ECR_REPOSITORY: {{PROJECT_NAME}}-repo
-  LAMBDA_FUNCTION: {{PROJECT_NAME}}-fn
+  ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
+  LAMBDA_FUNCTION: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-fn
 
 permissions:
   id-token: write
@@ -52,7 +52,7 @@ jobs:
         uses: grada-run/grada-action@v1
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           terraform-dir: 'terraform'
 
       # --- 3. BUILD & PUSH ---

@@ -1,8 +1,11 @@
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { S3Client, CreateBucketCommand, PutBucketVersioningCommand, PutBucketTaggingCommand } from '@aws-sdk/client-s3';
 import { DeleteBucketCommand, ListObjectVersionsCommand, DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import { ListMultipartUploadsCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { spawnSync } from 'child_process';
 import color from 'picocolors';
+import { chunkArray } from './batch.js';
+import { sanitizeProjectName } from './prompts.js';
 
 export const AWS_CLI_INSTALL_URL = 'https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html';
 export const AWS_CLI_CACHE_TTL_MS = 5000;
@@ -94,9 +97,23 @@ export async function checkAwsCredentials(region) {
     return { accountId: Account, awsAccountId: Account, region: resolvedRegion };
 }
 
+// Single home for state-bucket naming: init, offline scaffolds, the
+// offline checklist, and bucket recovery all format through here, so a
+// raw basename (recovery) and a sanitized name (init) land on one bucket.
+// Truncation cuts the project segment only — the old whole-string cut
+// could sever the account suffix that makes the name unique.
+export function formatStateBucketName(projectName, accountId) {
+    const suffix = `-tfstate-${accountId}`;
+    const room = Math.max(63 - suffix.length, 1);
+    let project = sanitizeProjectName(projectName);
+    if (project.length > room) project = project.substring(0, room).replace(/-+$/, '');
+    if (project === '') project = 'app';
+    return `${project}${suffix}`;
+}
+
 export async function provisionStateBucket(region, projectName) {
     if (process.env.CI_MOCK_AWS === 'true') {
-        return { awsAccountId: '123456789012', stateBucketName: 'mock-tf-state-bucket' };
+        return { awsAccountId: '123456789012', stateBucketName: 'mock-tf-state-bucket', s3Client: null };
     }
     const stsClient = new STSClient({ region });
     let awsAccountId;
@@ -106,21 +123,37 @@ export async function provisionStateBucket(region, projectName) {
     awsAccountId = Account;
 
     // 2. Format Bucket Name
-    let stateBucketName = `${projectName}-tfstate-${awsAccountId}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    if (stateBucketName.length > 63) {
-        stateBucketName = stateBucketName.substring(0, 63).replace(/-$/, '');
-    }
+    const stateBucketName = formatStateBucketName(projectName, awsAccountId);
 
     // 3. Create S3 Bucket & Enable Versioning
     const s3Client = new S3Client({ region });
+    await createVersionedBucket(s3Client, stateBucketName, region);
+
+    return { awsAccountId, stateBucketName, s3Client };
+}
+
+// Creates (or re-creates) one explicitly named state bucket with the same
+// tagging + versioning provisionStateBucket applies. Recovery reads the
+// bucket from backend.tf and lands here instead of re-deriving the name,
+// which would miss on suffixed trees.
+export async function ensureStateBucketExists({ region, bucket }) {
+    if (process.env.CI_MOCK_AWS === 'true') {
+        return { bucket, mocked: true };
+    }
+    const s3Client = new S3Client({ region });
+    await createVersionedBucket(s3Client, bucket, region);
+    return { bucket };
+}
+
+async function createVersionedBucket(s3Client, bucket, region) {
     try {
         await s3Client.send(new CreateBucketCommand({
-            Bucket: stateBucketName,
+            Bucket: bucket,
             CreateBucketConfiguration: region === 'us-east-1' ? undefined : { LocationConstraint: region }
         }));
 
         await s3Client.send(new PutBucketTaggingCommand({
-            Bucket: stateBucketName,
+            Bucket: bucket,
             Tagging: {
                 TagSet: [
                     { Key: "ManagedBy", Value: "grada" }
@@ -129,7 +162,7 @@ export async function provisionStateBucket(region, projectName) {
         }));
 
         await s3Client.send(new PutBucketVersioningCommand({
-            Bucket: stateBucketName,
+            Bucket: bucket,
             VersioningConfiguration: { Status: 'Enabled' }
         }));
     } catch (error) {
@@ -138,41 +171,116 @@ export async function provisionStateBucket(region, projectName) {
             throw error;
         }
     }
-
-    return { awsAccountId, stateBucketName };
 }
 
-export async function teardownStateBucket(region, bucketName) {
+export async function teardownStateBucket(region, bucketName, options = {}) {
     if (process.env.CI_MOCK_AWS === 'true') {
-        return true;
+        return { deleted: 0, remaining: [], bucket: bucketName, mocked: true };
     }
-    const client = new S3Client({ region });
+    const client = options.s3Client || new S3Client({ region });
+    const retryDelayMs = options.retryDelayMs ?? 500;
 
     try {
-        // 1. Fetch all object versions and delete markers
-        const listCommand = new ListObjectVersionsCommand({ Bucket: bucketName });
-        const { Versions, DeleteMarkers } = await client.send(listCommand);
+        const { deleted, failed } = await drainBucketObjects({ s3Client: client, bucket: bucketName });
 
-        const objectsToDelete = [];
-        if (Versions) objectsToDelete.push(...Versions.map(v => ({ Key: v.Key, VersionId: v.VersionId })));
-        if (DeleteMarkers) objectsToDelete.push(...DeleteMarkers.map(v => ({ Key: v.Key, VersionId: v.VersionId })));
-
-        // 2. Delete all contents if any exist
-        if (objectsToDelete.length > 0) {
-            const deleteCommand = new DeleteObjectsCommand({
-                Bucket: bucketName,
-                Delete: { Objects: objectsToDelete }
-            });
-            await client.send(deleteCommand);
+        // Delete the now-empty bucket, retrying transient failures.
+        let bucketError = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                await client.send(new DeleteBucketCommand({ Bucket: bucketName }));
+                bucketError = null;
+                break;
+            } catch (error) {
+                if (error.name === 'NoSuchBucket') {
+                    bucketError = null;
+                    break;
+                }
+                bucketError = error;
+                await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (attempt + 1)));
+            }
         }
 
-        // 3. Delete the now-empty bucket
-        const deleteBucketCommand = new DeleteBucketCommand({ Bucket: bucketName });
-        await client.send(deleteBucketCommand);
-
-        return true;
+        // A precise residual inventory instead of a boolean: callers
+        // render what is left rather than punting to the AWS Console.
+        const remaining = [...failed];
+        if (bucketError) {
+            remaining.push({ key: bucketName, reason: String(bucketError.message || bucketError) });
+        }
+        return { deleted, remaining, bucket: bucketName };
     } catch (error) {
         if (error.name === 'NoSuchBucket') return true; // Already deleted
         throw error;
     }
+}
+
+// Drains every object version, delete marker, and in-flight multipart
+// upload from one bucket (the bucket itself is left in place for the
+// caller to delete or hand to Terraform). Both listings paginate to
+// exhaustion and deletes go out in 1000-key batches. Returns
+// `{ deleted, failed }` — failed entries carry `{ key, reason }`.
+// Throws NoSuchBucket for a missing bucket (callers map it to
+// already-gone) and anything else fails loud: handing Terraform a
+// non-empty bucket just moves the BucketNotEmpty failure downstream.
+export async function drainBucketObjects({ s3Client, bucket: bucketName }) {
+    // 1. List every object version and delete marker to exhaustion.
+    const objectsToDelete = [];
+    let keyMarker;
+    let versionIdMarker;
+    let truncated = true;
+    while (truncated) {
+        const listCommand = new ListObjectVersionsCommand({
+            Bucket: bucketName,
+            ...(keyMarker === undefined ? {} : { KeyMarker: keyMarker, VersionIdMarker: versionIdMarker }),
+        });
+        const { Versions, DeleteMarkers, IsTruncated, NextKeyMarker, NextVersionIdMarker } = await s3Client.send(listCommand);
+        if (Versions) objectsToDelete.push(...Versions.map(v => ({ Key: v.Key, VersionId: v.VersionId })));
+        if (DeleteMarkers) objectsToDelete.push(...DeleteMarkers.map(v => ({ Key: v.Key, VersionId: v.VersionId })));
+        truncated = IsTruncated === true;
+        keyMarker = NextKeyMarker;
+        versionIdMarker = NextVersionIdMarker;
+    }
+
+    // 2. Delete contents in 1000-key batches (the S3 per-request cap).
+    let deleted = 0;
+    const failed = [];
+    for (const chunk of chunkArray(objectsToDelete, 1000)) {
+        const deleteCommand = new DeleteObjectsCommand({
+            Bucket: bucketName,
+            Delete: { Objects: chunk }
+        });
+        const response = await s3Client.send(deleteCommand);
+        deleted += response?.Deleted?.length ?? chunk.length;
+        for (const entry of response?.Errors || []) {
+            failed.push({ key: entry.Key, reason: entry.Message || entry.Code || 'DeleteObjects error' });
+        }
+    }
+
+    // 3. Abort in-flight multipart uploads (they block bucket deletion
+    // too). Uploads that vanish mid-drain completed concurrently.
+    let uploadKeyMarker;
+    let uploadIdMarker;
+    let uploadsTruncated = true;
+    while (uploadsTruncated) {
+        const uploadsCommand = new ListMultipartUploadsCommand({
+            Bucket: bucketName,
+            ...(uploadKeyMarker === undefined ? {} : { KeyMarker: uploadKeyMarker, UploadIdMarker: uploadIdMarker }),
+        });
+        const { Uploads, IsTruncated, NextKeyMarker, NextUploadIdMarker } = await s3Client.send(uploadsCommand);
+        for (const upload of Uploads || []) {
+            try {
+                await s3Client.send(new AbortMultipartUploadCommand({
+                    Bucket: bucketName, Key: upload.Key, UploadId: upload.UploadId,
+                }));
+                deleted += 1;
+            } catch (error) {
+                if (error?.name === 'NoSuchUpload') continue;
+                failed.push({ key: upload.Key, reason: error?.message || error?.name || 'AbortMultipartUpload error' });
+            }
+        }
+        uploadsTruncated = IsTruncated === true;
+        uploadKeyMarker = NextKeyMarker;
+        uploadIdMarker = NextUploadIdMarker;
+    }
+
+    return { deleted, failed };
 }

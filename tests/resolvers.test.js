@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -275,5 +275,66 @@ describe('resolvers: fuzzer hardening', () => {
         expect(readFileSafe(42)).toBeNull();
         expect(readFileSafe(null)).toBeNull();
         expect(readFileSafe({})).toBeNull();
+    });
+});
+
+describe('resource suffix (collision-resistant naming)', () => {
+    function writeMainTf(dir, suffix) {
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            `locals {\n  grada_resource_suffix = "${suffix}"\n  app_name = "myapp\${local.env_suffix}\${local.grada_resource_suffix}"\n}\n`
+        );
+    }
+
+    it('reads a minted suffix and rejects anything else', () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '-a1b2c3');
+        expect(readResourceSuffix(dir)).toBe('-a1b2c3');
+
+        for (const bad of ['', 'xyz', '-A1B2C3', '-abc', '-a1b2c3d', 'a1b2c3']) {
+            const other = makeTmp();
+            writeMainTf(other, bad);
+            expect(readResourceSuffix(other)).toBe('');
+        }
+        expect(readResourceSuffix(makeTmp())).toBe('');
+    });
+
+    it('readTerraformProjectName returns the bare name on suffixed trees', () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '-a1b2c3');
+        expect(readTerraformProjectName(dir)).toBe('myapp');
+        expect(resolveProjectName({}, dir)).toBe('myapp');
+    });
+
+    it('cluster, service, and log group carry the suffix; unsuffixed trees are unchanged', () => {
+        const suffixed = makeTmp();
+        writeMainTf(suffixed, '-a1b2c3');
+        expect(resolveCluster({ projectName: 'myapp' }, suffixed)).toBe('myapp-a1b2c3-cluster');
+        expect(resolveService({ projectName: 'myapp' }, suffixed)).toBe('myapp-a1b2c3-service');
+        expect(resolveLogGroup({ projectName: 'myapp' }, suffixed)).toBe('/ecs/myapp-a1b2c3');
+
+        const plain = makeTmp();
+        fs.mkdirSync(path.join(plain, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(plain, 'terraform', 'main.tf'), 'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n');
+        expect(resolveCluster({ projectName: 'myapp' }, plain)).toBe('myapp-cluster');
+        expect(resolveService({ projectName: 'myapp' }, plain)).toBe('myapp-service');
+        expect(resolveLogGroup({ projectName: 'myapp' }, plain)).toBe('/ecs/myapp');
+    });
+
+    it('explicit cluster/service/log-group overrides win over the suffix', () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '-a1b2c3');
+        expect(resolveCluster({ cluster: 'custom' }, dir)).toBe('custom');
+        expect(resolveService({ service: 'custom' }, dir)).toBe('custom');
+        expect(resolveLogGroup({ logGroup: '/custom' }, dir)).toBe('/custom');
+    });
+
+    it('workspace suffix stays ahead of the resource suffix', () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '-a1b2c3');
+        fs.mkdirSync(path.join(dir, '.terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.terraform', 'environment'), 'staging');
+        expect(resolveCluster({ projectName: 'myapp-staging' }, dir)).toBe('myapp-staging-a1b2c3-cluster');
     });
 });

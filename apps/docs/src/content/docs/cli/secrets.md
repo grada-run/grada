@@ -7,6 +7,8 @@ Sync your local `.env` file with the Secrets Manager vault provisioned for this 
 
 Compute-target notes: on `--target static` projects no vault exists, so `push`, `pull`, and `audit` exit immediately with an unsupported-target error instead of calling Secrets Manager. On `--target lambda` projects values apply to fresh invocations with no restart step.
 
+On [ejected](/grada/cli/eject/) projects the tree is user-owned, so all three subcommands refuse unless `--force` is passed (headless fails, interactive confirms once).
+
 ## secrets push
 
 Uploads a local env file to the `<project-name>-secrets` vault via `UpdateSecretCommand`, then writes the pushed key names to `terraform/secret_keys.json` so Terraform and CI redeploy know which variables exist.

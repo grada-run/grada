@@ -13,10 +13,11 @@ vi.mock('../src/utils/aws.js', () => ({
         awsAccountId: '123456789012',
         stateBucketName: 'mock-tf-state-bucket',
     }),
+    ensureStateBucketExists: vi.fn().mockResolvedValue({ bucket: 'mock-tf-state-bucket' }),
 }));
 
 import { promptStateBucketRecovery, recreateStateBucket } from '../src/utils/recovery.js';
-import { provisionStateBucket } from '../src/utils/aws.js';
+import { provisionStateBucket, ensureStateBucketExists } from '../src/utils/aws.js';
 import { confirm } from '@clack/prompts';
 
 const tmp = createTmpDirTracker();
@@ -58,29 +59,73 @@ describe('promptStateBucketRecovery', () => {
 });
 
 describe('recreateStateBucket', () => {
-    it('wipes the stale .terraform cache and re-provisions the bucket', async () => {
+    const BACKEND_TF = [
+        'backend "s3" {',
+        '  bucket = "myapp-a1b2c3-tfstate-123456789012"',
+        '  key    = "state/terraform.tfstate"',
+        '  region = "us-east-2"',
+        '}',
+        '',
+    ].join('\n');
+
+    function writeBackend(tfDir, content = BACKEND_TF) {
+        fs.mkdirSync(tfDir, { recursive: true });
+        fs.writeFileSync(path.join(tfDir, 'backend.tf'), content);
+    }
+
+    it('wipes the stale .terraform cache and re-provisions the backend.tf bucket', async () => {
         const dir = tmp.makeTmp('recovery-');
         const tfDir = path.join(dir, 'terraform');
         fs.mkdirSync(path.join(tfDir, '.terraform'), { recursive: true });
         fs.writeFileSync(path.join(tfDir, '.terraform', 'cache'), 'stale');
         fs.writeFileSync(path.join(tfDir, 'main.tf'), '# keep me\n');
+        writeBackend(tfDir);
 
-        await recreateStateBucket({ tfDir, region: 'us-east-2', projectName: 'myapp' });
+        await recreateStateBucket({ tfDir, region: 'us-east-2' });
 
         expect(fs.existsSync(path.join(tfDir, '.terraform'))).toBe(false);
         expect(fs.existsSync(path.join(tfDir, 'main.tf'))).toBe(true);
-        expect(provisionStateBucket).toHaveBeenCalledWith('us-east-2', 'myapp');
+        expect(ensureStateBucketExists).toHaveBeenCalledWith({
+            region: 'us-east-2',
+            bucket: 'myapp-a1b2c3-tfstate-123456789012',
+        });
+        // Recomputing the name from the project would land on the wrong
+        // bucket for suffixed trees - the backend is the only source.
+        expect(provisionStateBucket).not.toHaveBeenCalled();
+    });
+
+    it('prefers the backend region over the caller region', async () => {
+        const dir = tmp.makeTmp('recovery-');
+        const tfDir = path.join(dir, 'terraform');
+        writeBackend(tfDir, BACKEND_TF.replace('region = "us-east-2"', 'region = "eu-west-1"'));
+
+        await recreateStateBucket({ tfDir, region: 'us-east-2' });
+
+        expect(ensureStateBucketExists).toHaveBeenCalledWith({
+            region: 'eu-west-1',
+            bucket: 'myapp-a1b2c3-tfstate-123456789012',
+        });
+    });
+
+    it('fails loud when backend.tf names no bucket', async () => {
+        const dir = tmp.makeTmp('recovery-');
+        const tfDir = path.join(dir, 'terraform');
+        writeBackend(tfDir, 'backend "s3" {\n  key = "state/terraform.tfstate"\n}\n');
+
+        await expect(recreateStateBucket({ tfDir, region: 'us-east-2' }))
+            .rejects.toThrow(/backend\.tf.*bucket/);
+        expect(ensureStateBucketExists).not.toHaveBeenCalled();
     });
 
     it('provisions even without a stale cache and propagates failures', async () => {
         const dir = tmp.makeTmp('recovery-');
         const tfDir = path.join(dir, 'terraform');
-        fs.mkdirSync(tfDir, { recursive: true });
-        await recreateStateBucket({ tfDir, region: 'us-east-2', projectName: 'myapp' });
-        expect(provisionStateBucket).toHaveBeenCalledWith('us-east-2', 'myapp');
+        writeBackend(tfDir);
+        await recreateStateBucket({ tfDir, region: 'us-east-2' });
+        expect(ensureStateBucketExists).toHaveBeenCalledTimes(1);
 
-        vi.mocked(provisionStateBucket).mockRejectedValueOnce(new Error('no creds'));
-        await expect(recreateStateBucket({ tfDir, region: 'us-east-2', projectName: 'myapp' }))
+        vi.mocked(ensureStateBucketExists).mockRejectedValueOnce(new Error('no creds'));
+        await expect(recreateStateBucket({ tfDir, region: 'us-east-2' }))
             .rejects.toThrow('no creds');
     });
 });

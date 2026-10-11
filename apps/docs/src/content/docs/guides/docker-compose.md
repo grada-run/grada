@@ -13,7 +13,13 @@ Only the repo root is checked, trying `docker-compose.yml`, `docker-compose.yaml
 
 ## Which service is "web"
 
-The service used as the ECS web service is the **first service with an exposed port**; if none exposes a port, the first service listed wins. Every other service becomes an ECS **sidecar** in the same task definition. Structure your file accordingly: the publicly reachable app must be the port-exposing service.
+The service used as the ECS web service is selected by these rules, in order:
+
+1. The service with a **`build:`** key — image-only services are dependencies by definition.
+2. A service whose port matches your framework's default container port.
+3. The first non-datastore service with an exposed port (else the first non-datastore service).
+
+Datastore images (`postgres`, `mysql`, `redis`, `valkey`, `mongo`, and similar) are never selected while any other service exists. When **every** service is a datastore there is no app to merge, so the merge is skipped entirely with a loud warning (and the container port is left untouched) instead of baking a database port into the task definition. If a datastore is selected anyway (e.g. you gave it a `build:` key), setup warns loudly and names the service — verify the merged port and env vars before applying. Every other service becomes an ECS **sidecar** in the same task definition.
 
 ## Port mapping
 
@@ -23,13 +29,14 @@ The container port is taken from the **last segment of the first port entry** �
 
 - **Environment** supports both Compose styles: `environment:` as a mapping is used as-is; as a list (`- KEY=value`) each entry is split on the first `=`.
 - The web service's variables are injected directly into the ECS task definition, and its `command` overrides the container start command — but only when no `Procfile` `web:` process already set one (`Procfile` wins; see [Dockerfiles](/grada/guides/dockerfiles/)).
-- Sidecars get the same treatment: their environment is injected, their `command` is preserved, a missing `image` defaults to `alpine:latest`, and each sidecar logs to the shared CloudWatch log group under an `ecs-<service>` stream prefix.
+- **Secret-like variables are never inlined.** Names matching `*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*PRIVATE_KEY*`, `*CREDENTIALS*`, `*API_KEY*`, or `*ACCESS_KEY*` — and values embedding `user:password@` credentials (connection strings like `DATABASE_URL`) — are withheld from the generated files with a warning naming each skipped variable. Push those with [`grada secrets push`](/grada/cli/secrets/) instead.
+- Sidecars get the same treatment: their environment is injected (same secret filter), their `command` is preserved, a missing `image` defaults to `alpine:latest`, and each sidecar logs to the shared CloudWatch log group under an `ecs-<service>` stream prefix. Sidecars render with `essential = false`, so a failing companion container (cache, helper) can't take down your web tasks — only the web container itself is essential.
 
 ## What this means in practice
 
 - Sidecars (Redis, Memcached, background helpers) run **in the same task** as the web container and share its lifecycle — this is co-location, not separate services.
 - The mapping is ECS-shaped on other targets too: on `--target lambda` the web service's environment still injects into the function (and the port override applies), sidecars are skipped with a warning, and the web service's `command` is preserved as the function's `image_config` entrypoint; on `--target static` there is no container or function to inject into, so Compose services are ignored.
-- Compose `build:` contexts are not used in AWS; the image is built from the generated `Dockerfile` by the [CI/CD pipeline](/grada/guides/cicd-pipeline/).
+- Compose `build:` contexts are not used to build the AWS image (the image is built from the generated `Dockerfile` by the [CI/CD pipeline](/grada/guides/cicd-pipeline/)) — the key only marks which service is your app for the selection rules above.
 - Runtime secrets still belong in AWS Secrets Manager, not in Compose `environment:`. See [Secrets Management](/grada/guides/secrets-management/).
 
 ## Migrating from Compose: sidecars and targets

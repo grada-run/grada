@@ -38,6 +38,7 @@ vi.mock('../src/utils/aws.js', () => ({
     stateBucketName: 'mock-tf-state-bucket',
   }),
   teardownStateBucket: vi.fn().mockResolvedValue(true),
+  drainBucketObjects: vi.fn().mockResolvedValue({ deleted: 0, failed: [] }),
   // Tests that inject no client exercise the no-database path (the
   // pre-destroy hook no-ops); hook tests inject a scripted client.
   resolveClient: (injected) => injected ?? {
@@ -65,7 +66,7 @@ vi.mock('../src/utils/system.js', async (importOriginal) => {
 vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 import { destroyStack } from '../src/commands/destroy.js';
-import { teardownStateBucket } from '../src/utils/aws.js';
+import { teardownStateBucket, drainBucketObjects } from '../src/utils/aws.js';
 import { checkDependency } from '../src/utils/system.js';
 import { trackEvent } from '../src/core/telemetry.js';
 
@@ -149,13 +150,15 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       .mockResolvedValueOnce(false); // retain bucket
     mockSpawn.mockImplementation((cmd, args = []) => {
       expect(cmd).toBe('terraform');
+      if (args[0] === 'init') return makeChild({ code: 0, stdout: 'init ok' });
+      if (args[0] === 'show') return makeChild({ code: 0, stdout: '{}' });
       expect(args).toEqual(['destroy', '-auto-approve']);
       return makeChild({ code: 0, stdout: 'destroy complete' });
     });
 
     await destroyStack(); // success path calls outro, not process.exit
 
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(mockSpawn).toHaveBeenCalledTimes(3);
     expect(teardownStateBucket).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_destroyed',
@@ -193,6 +196,76 @@ describe('Command: destroy (mocked terraform spawn)', () => {
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_destroyed',
       expect.objectContaining({ success: false })
+    );
+  });
+
+  it('headless destroy refuses a stale state lock with a named code', async () => {
+    writeBackend();
+    mockSpawn.mockImplementation(() =>
+      makeChild({ code: 1, stderr: 'Error: Error acquiring the state lock:\nLock Info:\n  ID:        destroy-lock-1\n' })
+    );
+
+    await expect(destroyStack({ isHeadless: true })).rejects.toMatchObject({ exitCode: 1 });
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(teardownStateBucket).not.toHaveBeenCalled();
+    expect(trackEvent).toHaveBeenCalledWith(
+      'state_lock_detected',
+      expect.objectContaining({ command: 'destroy' })
+    );
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_destroyed',
+      expect.objectContaining({ error_code: 'STATE_LOCK_HELD' })
+    );
+  });
+
+  it('interactive destroy confirms, unlocks, and retries once', async () => {
+    writeBackend();
+    clack.mockConfirm
+      .mockResolvedValueOnce(true) // proceed with destroy
+      .mockResolvedValueOnce(true) // force-unlock the stale lock
+      .mockResolvedValueOnce(false); // retain bucket
+    const seen = [];
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      seen.push(args[0]);
+      if (args[0] === 'force-unlock') return makeChild({ code: 0, stdout: 'unlocked' });
+      if (seen.filter((a) => a === 'destroy').length === 1) {
+        return makeChild({ code: 1, stderr: 'Error: Error acquiring the state lock:\nLock Info:\n  ID:        destroy-lock-2\n' });
+      }
+      return makeChild({ code: 0, stdout: 'destroy complete' });
+    });
+
+    await destroyStack();
+
+    expect(seen).toEqual(['init', 'show', 'destroy', 'force-unlock', 'destroy']);
+    const unlockCall = mockSpawn.mock.calls.find(([, args]) => args[0] === 'force-unlock');
+    expect(unlockCall[1]).toContain('destroy-lock-2');
+    expect(trackEvent).toHaveBeenCalledWith(
+      'state_lock_force_unlocked',
+      expect.objectContaining({ mode: 'interactive' })
+    );
+    expect(teardownStateBucket).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('headless destroy with forceUnlock unlocks without prompting', async () => {
+    writeBackend();
+    const seen = [];
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      seen.push(args[0]);
+      if (args[0] === 'force-unlock') return makeChild({ code: 0, stdout: 'unlocked' });
+      if (seen.filter((a) => a === 'destroy').length === 1) {
+        return makeChild({ code: 1, stderr: 'Error: Error acquiring the state lock:\nLock Info:\n  ID:        destroy-lock-3\n' });
+      }
+      return makeChild({ code: 0, stdout: 'destroy complete' });
+    });
+
+    await destroyStack({ isHeadless: true, forceUnlock: 'destroy-lock-3' });
+
+    expect(seen).toEqual(['init', 'show', 'destroy', 'force-unlock', 'destroy']);
+    expect(clack.mockConfirm).not.toHaveBeenCalled();
+    expect(trackEvent).toHaveBeenCalledWith(
+      'state_lock_force_unlocked',
+      expect.objectContaining({ mode: 'flag' })
     );
   });
 
@@ -240,23 +313,27 @@ describe('Command: destroy (mocked terraform spawn)', () => {
   describe('pre-destroy database wake hook', () => {
     const noopSleep = async () => {};
 
-    // Scripted RDS client: `statuses` is the Status sequence returned by
+    // Scripted RDS client: `statuses` is the status sequence returned by
     // Describe calls (first call feeds findDbTarget, the rest feed the
-    // wait loops); Start calls are recorded in `seen`.
-    function scriptedRdsClient({ kind = 'instance', statuses = [] } = {}) {
+    // wait loops); Start calls are recorded in `seen`. Instances carry
+    // DBInstanceStatus, clusters carry Status (true SDK shapes).
+    function scriptedRdsClient({ kind = 'instance', statuses = [], modifyError = null } = {}) {
       const seen = [];
+      const sent = [];
       let calls = 0;
       const nextStatus = () => statuses[Math.min(calls++, statuses.length - 1)];
       return {
         seen,
+        sent,
         send: vi.fn(async (command) => {
           const name = command.constructor.name;
           seen.push(name);
+          sent.push(command);
           if (name === 'DescribeDBInstancesCommand') {
             if (kind !== 'instance') {
               throw Object.assign(new Error('DBInstanceNotFound'), { name: 'DBInstanceNotFound' });
             }
-            return { DBInstances: [{ Status: nextStatus(), Engine: 'postgres' }] };
+            return { DBInstances: [{ DBInstanceStatus: nextStatus(), Engine: 'postgres' }] };
           }
           if (name === 'DescribeDBClustersCommand') {
             if (kind !== 'cluster') {
@@ -265,6 +342,11 @@ describe('Command: destroy (mocked terraform spawn)', () => {
             return { DBClusters: [{ Status: nextStatus(), Engine: 'aurora-postgresql' }] };
           }
           if (name === 'StartDBInstanceCommand' || name === 'StartDBClusterCommand') return {};
+          if (name === 'CreateDBSnapshotCommand' || name === 'CreateDBClusterSnapshotCommand') return {};
+          if (name === 'ModifyDBInstanceCommand' || name === 'ModifyDBClusterCommand') {
+            if (modifyError) throw modifyError;
+            return {};
+          }
           throw new Error(`unexpected command ${name}`);
         }),
       };
@@ -287,7 +369,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(rdsClient.seen).toContain('StartDBInstanceCommand');
       expect(rdsClient.seen).not.toContain('StartDBClusterCommand');
       expect(clack.mockSpinnerStart).toHaveBeenCalledWith('Waking database before destruction...');
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
       expect(clack.mockOutro).toHaveBeenCalled();
     });
 
@@ -302,7 +384,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       // (describe, describe, describe, start, ...).
       expect(rdsClient.seen.indexOf('StartDBClusterCommand')).toBeGreaterThan(2);
       expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
     });
 
     it('waits for a starting database without sending Start', async () => {
@@ -314,7 +396,40 @@ describe('Command: destroy (mocked terraform spawn)', () => {
 
       expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
       expect(rdsClient.seen).not.toContain('StartDBClusterCommand');
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+    });
+
+    it('exits the settle loop on DBInstanceStatus available (true SDK shape)', async () => {
+      // P2 live incident: the loop read `Status` off instance records, got
+      // undefined forever, and hung till timeout. True-shaped SDK responses
+      // must settle the loop instead. Own inline client (true shape) so this
+      // test reds independently of the shared scripted client above.
+      writeBackend();
+      confirmDestroy();
+      const seen = [];
+      let calls = 0;
+      const statuses = ['creating', 'available'];
+      const rdsClient = {
+        seen,
+        send: vi.fn(async (command) => {
+          const name = command.constructor.name;
+          seen.push(name);
+          if (name === 'DescribeDBInstancesCommand') {
+            return { DBInstances: [{ DBInstanceStatus: statuses[Math.min(calls++, statuses.length - 1)], Engine: 'postgres' }] };
+          }
+          if (name === 'DescribeDBClustersCommand') {
+            throw Object.assign(new Error('DBClusterNotFoundFault'), { name: 'DBClusterNotFoundFault' });
+          }
+          if (name === 'StartDBInstanceCommand' || name === 'StartDBClusterCommand') return {};
+          if (name === 'CreateDBSnapshotCommand' || name === 'CreateDBClusterSnapshotCommand') return {};
+          throw new Error(`unexpected command ${name}`);
+        }),
+      };
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+
+      expect(seen).not.toContain('StartDBInstanceCommand');
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
     });
 
     it('skips the hook when the database is already available', async () => {
@@ -326,7 +441,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
 
       expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
       expect(clack.mockSpinnerStart).not.toHaveBeenCalledWith('Waking database before destruction...');
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
     });
 
     it('aborts destroy when the database never becomes available', async () => {
@@ -336,10 +451,139 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['stopped'] });
 
       await expect(destroyStack({ rdsClient, sleepFn: noopSleep, timeoutMs: 0 })).rejects.toMatchObject({ exitCode: 1 });
-      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockSpawn.mock.calls.filter(([, args]) => args[0] === 'destroy')).toHaveLength(0);
       expect(trackEvent).toHaveBeenCalledWith(
         'infrastructure_destroyed',
         expect.objectContaining({ success: false, error_code: 'RDS_DESTROY_PREFLIGHT_TIMEOUT' })
+      );
+    });
+
+    it('proceeds immediately when the database is already deleting', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['deleting'] });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep });
+
+      expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
+      expect(rdsClient.seen).not.toContain('CreateDBSnapshotCommand');
+      expect(clack.mockSpinnerStart).not.toHaveBeenCalledWith('Waking database before destruction...');
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'rds_preflight_skipped',
+        expect.objectContaining({ reason: 'deleting' })
+      );
+    });
+
+    it('waits out a creating database with the settle budget', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'cluster', statuses: ['creating', 'creating', 'available'] });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep });
+
+      expect(rdsClient.seen).not.toContain('StartDBClusterCommand');
+      expect(rdsClient.seen).toContain('CreateDBClusterSnapshotCommand');
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'rds_preflight_waited',
+        expect.objectContaining({ from_state: 'creating' })
+      );
+    });
+
+    it('lifts deletion protection on the instance before terraform destroy', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+
+      const modify = rdsClient.sent.find((c) => c.constructor.name === 'ModifyDBInstanceCommand');
+      expect(modify.input).toMatchObject({ DBInstanceIdentifier: expect.any(String), DeletionProtection: false, ApplyImmediately: true });
+      expect(rdsClient.seen).not.toContain('CreateDBSnapshotCommand');
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'deletion_protection_lifted',
+        expect.objectContaining({ db_kind: 'instance', via: 'flag' })
+      );
+    });
+
+    it('lifts deletion protection on the cluster before terraform destroy', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'cluster', statuses: ['available'] });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+
+      const modify = rdsClient.sent.find((c) => c.constructor.name === 'ModifyDBClusterCommand');
+      expect(modify.input).toMatchObject({ DBClusterIdentifier: expect.any(String), DeletionProtection: false, ApplyImmediately: true });
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'deletion_protection_lifted',
+        expect.objectContaining({ db_kind: 'cluster', via: 'flag' })
+      );
+    });
+
+    it('lifts protection on the interactive-confirm path too (after the snapshot)', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+
+      expect(rdsClient.seen).toContain('CreateDBSnapshotCommand');
+      expect(rdsClient.seen).toContain('ModifyDBInstanceCommand');
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'deletion_protection_lifted',
+        expect.objectContaining({ via: 'prompt' })
+      );
+    });
+
+    it('warns and proceeds when the protection lift fails', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({
+        kind: 'instance',
+        statuses: ['available'],
+        modifyError: Object.assign(new Error('InvalidDBInstanceState'), { name: 'InvalidDBInstanceState' }),
+      });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'deletion_protection_lift_failed',
+        expect.objectContaining({ error_code: 'InvalidDBInstanceState' })
+      );
+    });
+
+    it('skips the lift when no database exists or it is already deleting', async () => {
+      writeBackend();
+      confirmDestroy();
+      const noDb = scriptedRdsClient({ kind: 'none' });
+      await destroyStack({ rdsClient: noDb, sleepFn: noopSleep, allowDataLoss: true });
+      expect(noDb.seen).not.toContain('ModifyDBInstanceCommand');
+      expect(noDb.seen).not.toContain('ModifyDBClusterCommand');
+
+      const deleting = scriptedRdsClient({ kind: 'instance', statuses: ['deleting'] });
+      confirmDestroy();
+      await destroyStack({ rdsClient: deleting, sleepFn: noopSleep, allowDataLoss: true });
+      expect(deleting.seen).not.toContain('ModifyDBInstanceCommand');
+    });
+
+    it('--force skips the database preflight entirely', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = { send: vi.fn(async () => { throw new Error('boom'); }) };
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, force: true });
+
+      expect(rdsClient.send).not.toHaveBeenCalled();
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'rds_preflight_skipped',
+        expect.objectContaining({ reason: 'force' })
       );
     });
 
@@ -360,6 +604,107 @@ describe('Command: destroy (mocked terraform spawn)', () => {
         'infrastructure_destroyed',
         expect.objectContaining({ success: false, error_code: 'RDS_DESTROY_PREFLIGHT_FAILED' })
       );
+    });
+  });
+
+  describe('pre-destroy S3 bucket drain', () => {
+    const SHOW_JSON = JSON.stringify({
+      values: {
+        root_module: {
+          resources: [
+            { type: 'aws_s3_bucket', values: { bucket: 'myapp-storage-123' } },
+            { type: 'aws_s3_bucket', values: { bucket: 'myapp-tfstate-123' } },
+            { type: 'aws_ecs_cluster', values: { name: 'x' } },
+          ],
+        },
+      },
+    });
+
+    function confirmAndSucceed(showStdout = '{}') {
+      // Abort paths below never reach the second confirm, and neither do
+      // failures in earlier describes — reset the once-queue so leftovers
+      // can't decline a later proceed prompt.
+      clack.mockConfirm.mockReset();
+      clack.mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      mockSpawn.mockImplementation((cmd, args = []) => {
+        if (args[0] === 'show') return makeChild({ code: 0, stdout: showStdout });
+        return makeChild({ code: 0, stdout: 'ok' });
+      });
+    }
+
+    it('drains managed buckets before destroy, excluding the state bucket', async () => {
+      writeBackend('myapp-tfstate-123', 'us-east-2');
+      confirmAndSucceed(SHOW_JSON);
+      drainBucketObjects.mockImplementation(async () => {
+        expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(false);
+        return { deleted: 1100, failed: [] };
+      });
+
+      await destroyStack();
+
+      expect(drainBucketObjects).toHaveBeenCalledTimes(1);
+      expect(drainBucketObjects).toHaveBeenCalledWith(expect.objectContaining({ bucket: 'myapp-storage-123' }));
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'bucket_drain_completed',
+        expect.objectContaining({ bucket_count: 1, deleted_count: 1100 })
+      );
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips silently when state holds no buckets', async () => {
+      writeBackend();
+      confirmAndSucceed('{}');
+
+      await destroyStack();
+
+      expect(drainBucketObjects).not.toHaveBeenCalled();
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('aborts with BUCKET_DRAIN_FAILED when the drain throws, before terraform runs', async () => {
+      writeBackend();
+      confirmAndSucceed(SHOW_JSON);
+      drainBucketObjects.mockRejectedValue(Object.assign(new Error('AccessDenied'), { name: 'AccessDenied' }));
+
+      await expect(destroyStack()).rejects.toMatchObject({ exitCode: 1 });
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(false);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ success: false, error_code: 'BUCKET_DRAIN_FAILED' })
+      );
+    });
+
+    it('aborts with the residual inventory when keys fail to delete', async () => {
+      writeBackend();
+      confirmAndSucceed(SHOW_JSON);
+      drainBucketObjects.mockResolvedValue({ deleted: 3, failed: [{ key: 'locked', reason: 'AccessDenied' }] });
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      let logged;
+      try {
+        await expect(destroyStack()).rejects.toMatchObject({ exitCode: 1 });
+        logged = consoleSpy.mock.calls.flat().join('\n');
+      } finally {
+        consoleSpy.mockRestore();
+      }
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(false);
+      expect(logged).toContain('locked');
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ success: false, error_code: 'BUCKET_DRAIN_FAILED' })
+      );
+    });
+
+    it('treats a manually deleted bucket as drained and proceeds', async () => {
+      writeBackend();
+      confirmAndSucceed(SHOW_JSON);
+      drainBucketObjects.mockRejectedValue(Object.assign(new Error('nope'), { name: 'NoSuchBucket' }));
+
+      await destroyStack();
+
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
+      expect(exitSpy).not.toHaveBeenCalled();
     });
   });
 });

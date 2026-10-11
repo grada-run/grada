@@ -20,10 +20,10 @@ resource "aws_cloudfront_distribution" "cdn" {
     origin_id   = "ALBOrigin"
 
     custom_origin_config {
-      http_port              = 80
-      https_port             = 443
+      http_port  = 80
+      https_port = 443
       # Because this is the free tier without a custom SSL domain, we route internally via HTTP
-      origin_protocol_policy = "http-only" 
+      origin_protocol_policy = "http-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }

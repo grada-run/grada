@@ -62,12 +62,14 @@ Run schema migrations or seed scripts (Prisma, Drizzle, Alembic, Django, Rails, 
 
 When you omit `--cmd`, the project is inspected for a known migration setup (`db:migrate` / `migrate` npm scripts, Prisma, Drizzle, Alembic, Django, Rails) and the detected command is used (in CI) or offered for confirmation (interactively).
 
+> **Stripped runners:** Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage for security, so `npm ...` / `npx ...` commands fail with `command not found` inside the task. Bundle a framework-compiled runner and pass it explicitly (e.g. `--cmd "node ./dist/migrate.cjs"`). When your `Dockerfile` strips those binaries, `db migrate` refuses `npm`/`npx` commands headless (`NPM_CMD_STRIPPED_RUNNER`) and warns loudly interactively — the same guard covers `add cron` and `init --setup-ci-migrate`.
+
 When your task definition carries discrete `DB_*` credentials, the command synthesizes the engine-matching `DATABASE_URL` at runtime — with `PGSSLMODE=require` for PostgreSQL, since RDS/Aurora enforces `rds.force_ssl = 1`.
 
 ```bash
-npx grada-run db migrate --cmd "npx prisma migrate deploy"
+npx grada-run db migrate --cmd "node ./dist/migrate.cjs"
 npx grada-run db migrate                     # auto-detect the command
-npx grada-run db migrate --cmd "npm run db:seed" --timeout 1200
+npx grada-run db migrate --cmd "node ./dist/seed.cjs" --timeout 1200
 ```
 
 | Flag | Description |
@@ -88,7 +90,7 @@ npx grada-run db migrate --cmd "npm run db:seed" --timeout 1200
 `db migrate --setup-ci` adds a step to your deploy workflow that runs migrations against the newly built image **before** the ECS service updates — a failing migration halts the release automatically:
 
 ```bash
-npx grada-run db migrate --cmd "npx prisma migrate deploy" --setup-ci
+npx grada-run db migrate --cmd "node ./dist/migrate.cjs" --setup-ci
 ```
 
 The step is re-installed cleanly on every run, so re-running the command updates the wired migration command in place.

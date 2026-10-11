@@ -14,7 +14,7 @@ To use headless mode, simply include the `--headless` flag.
 
 If `grada` cannot auto-detect your framework, you should also provide the `--framework` flag to ensure the correct infrastructure is generated.
 
-* **Valid `--framework` options:** `node`, `nestjs`, `nextjs`, `nuxt`, `svelte`, `python`, `django`, `rails`, `go`, `static`
+* **Valid `--framework` options:** `node`, `nestjs`, `nextjs`, `nuxt`, `svelte`, `python`, `django`, `rails`, `go`, `static` (anything else fails fast with a validation error — Express apps use `node`)
 
 ## Optional Configuration Flags
 
@@ -43,6 +43,7 @@ You can append any of these flags to customize the generated architecture. These
 | `--setup-ci-migrate` | Wire the pre-deploy database migration gate into the generated workflow when a database and migration command are detected. | `false` |
 | `--setup-ci-drift` | Scaffold `.github/workflows/drift.yml`: a daily 06:00 UTC `terraform plan` check that opens (or updates) a GitHub Issue labeled `iac-drift` on drift and closes it when resolved. | `false` |
 | `--force` | Re-run over modified files: back them up and regenerate. Without it, headless re-runs over hand edits fail with `MODIFIED_TREE`, and re-runs over ejected projects fail with `EJECTED_PROJECT`. | `false` |
+| `--adopt-state` | Take over existing remote state when the state bucket already holds a key for this project name. Without it, headless inits fail with `STATE_ALREADY_EXISTS`. | `false` |
 
 *(Note: Boolean flags like `--needsDatabase` and `--enablePrPreviews` can be passed alone or as `--flag=true`).*
 
@@ -74,15 +75,25 @@ npx grada-run --headless --framework=nestjs --needsDatabase \
 `--headless` also suppresses confirmations in the Day-2 lifecycle commands, so scripted pipelines can provision, tear down, and decouple without hanging on a prompt:
 
 ```bash
-npx grada-run apply --auto-approve   # provision without the preview confirmation
-npx grada-run destroy --yes          # tear down compute and delete the state bucket
-npx grada-run eject --yes            # strip CLI metadata without confirming
-npx grada-run sleep --strict         # exit 2 (not 0) when there is nothing to pause
+npx grada-run apply --auto-approve              # provision without the preview confirmation
+npx grada-run destroy --yes --allow-data-loss   # tear down compute (incl. database) and delete the state bucket
+npx grada-run eject --yes                       # strip CLI metadata without confirming
+npx grada-run sleep --strict                    # exit 2 (not 0) when there is nothing to pause
+npx grada-run gc --yes                          # delete orphaned images, log groups, and EIPs without confirming
 ```
 
 Each command also accepts `--headless` directly (implying the approval flag). Without an approval flag, a non-interactive invocation cancels with no changes rather than destroying anything.
 
-Two gates commonly bite scripted pipelines: `apply` fails with `SLEEPING_ENVIRONMENT` on an asleep environment (wake first, or pass `--force`), and re-running setup over modified files fails with `MODIFIED_TREE` (pass `--force` to back up and regenerate).
+Several gates commonly bite scripted pipelines — every one fails loud with a named error instead of prompting:
+
+- `apply` fails with `SLEEPING_ENVIRONMENT` on an asleep environment (wake first, or pass `--force`), with `TARGET_SWITCH_DESTROY_REVIEW` when the tree's compute target changed (re-run with `--destroy-previous-target`), and stops at an import runbook on post-recovery resource collisions (`--force-resume` proceeds anyway).
+- `destroy` fails with `DATA_LOSS_UNCONFIRMED` when a live database exists (pass `--allow-data-loss` to destroy without the snapshot checkpoint and lift deletion protection — snapshot by hand first if the data matters).
+- A stuck Terraform state lock fails `apply`/`destroy` until released (`--force-unlock <lock-id>`, only when no other run holds it).
+- `eject` fails with `EJECT_WHILE_ASLEEP` on a slept stack (wake first, or pass `--force` to migrate the ledger to `SLEEPING.md`).
+- `db migrate`, `add cron`, and `init --setup-ci-migrate` fail with `NPM_CMD_STRIPPED_RUNNER` when the command needs `npm`/`npx` but the `Dockerfile` strips those binaries — pass an explicit `node ...` command instead.
+- Re-running setup over modified files fails with `MODIFIED_TREE` (pass `--force` to back up and regenerate).
+- Fresh `init` over a state bucket that already holds this project's key fails with `STATE_ALREADY_EXISTS` (pass `--adopt-state` to take over that state, or rename the project).
+- `wake` fails with `ECS_WAKE_CRASH_LOOP` when restored tasks keep crashing, or `ECS_WAKE_PULL_FAILURE` when a task is stuck `PENDING` on an unpullable image (the message names the most recent failure in both cases), or `ECS_WAKE_TIMEOUT` when tasks never reach the desired count — every path applies the restore first, so inspect with `status` and fix the task before retrying.
 
 ## See also
 

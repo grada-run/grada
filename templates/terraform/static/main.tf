@@ -4,7 +4,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy = "grada"
+      ManagedBy    = "grada"
+      GradaProject = "{{PROJECT_NAME}}"
     }
   }
 }
@@ -13,8 +14,13 @@ locals {
   # Workspace suffix for PR preview environments (e.g., "-pr-123"). Empty for production.
   env_suffix = terraform.workspace == "default" ? "" : "-${terraform.workspace}"
 
-  # Dynamic naming variable to prevent collisions
-  app_name = "{{PROJECT_NAME}}${local.env_suffix}"
+  # Per-project collision suffix minted once at init ("-a1b2c3"). Empty for
+  # trees scaffolded before suffixes existed — never change it by hand:
+  # renaming replaces every singleton resource below.
+  grada_resource_suffix = "{{RESOURCE_SUFFIX}}"
+
+  # Full application name: project + workspace + collision suffix.
+  app_name = "{{PROJECT_NAME}}${local.env_suffix}${local.grada_resource_suffix}"
 }
 
 data "aws_caller_identity" "current" {}

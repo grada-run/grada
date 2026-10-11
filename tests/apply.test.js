@@ -35,6 +35,7 @@ vi.mock('../src/utils/aws.js', async (importOriginal) => {
       awsAccountId: '123456789012',
       stateBucketName: 'mock-tf-state-bucket',
     }),
+    ensureStateBucketExists: vi.fn().mockResolvedValue({ bucket: 'mock-tf-state-bucket' }),
   };
 });
 
@@ -50,7 +51,7 @@ vi.mock('../src/utils/visualizer.js', async (importOriginal) => {
 
 import { applyStack } from '../src/commands/apply.js';
 import { renderDryRunPreview } from '../src/utils/visualizer.js';
-import { provisionStateBucket } from '../src/utils/aws.js';
+import { provisionStateBucket, ensureStateBucketExists } from '../src/utils/aws.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
 const COST_PROPS_SHAPE = {
@@ -201,7 +202,9 @@ describe('Command: apply (mocked terraform spawn)', () => {
   });
 
   it('recovers from a missing state bucket: recreates bucket and resumes', async () => {
-    writeProject();
+    writeProject({
+      'terraform/backend.tf': 'backend "s3" {\n  bucket = "myapp-a1b2c3-tfstate-123456789012"\n  key = "state/terraform.tfstate"\n  region = "us-east-2"\n}\n',
+    });
     let applyCalls = 0;
     mockSpawn.mockImplementation((cmd, args = []) => {
       if (args[0] === 'init') return makeChild({ code: 0, stdout: 'init ok' });
@@ -212,7 +215,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
         return makeChild({ code: 0, stdout: 'apply complete' });
       }
       if (args[0] === 'output')
-        return makeChild({ code: 0, stdout: '{}' });
+        return makeChild({ code: 0, stdout: JSON.stringify({ alb_direct_url: { value: 'http://alb.example' }, ecr_repository_url: { value: 'repo' } }) });
       return makeChild({ code: 0 });
     });
     clack.mockConfirm.mockResolvedValue(true); // accept recovery prompt
@@ -222,21 +225,26 @@ describe('Command: apply (mocked terraform spawn)', () => {
     await applyStack({});
 
     expect(exitSpy).toHaveBeenCalledWith(0);
-    expect(provisionStateBucket).toHaveBeenCalledTimes(1);
+    expect(ensureStateBucketExists).toHaveBeenCalledWith({
+      region: 'us-east-2',
+      bucket: 'myapp-a1b2c3-tfstate-123456789012',
+    });
+    expect(provisionStateBucket).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith('recovery_accepted', expect.anything());
     expect(trackEvent).toHaveBeenCalledWith('recovery_successful', expect.anything());
     expect(applyCalls).toBe(2);
-    // Initial confirm-mode preview plus the print-only preview on the
-    // autoApprove recovery resume.
+    // Initial confirm-mode preview plus the confirm-mode preview on the
+    // recovery resume: the resume preserves the caller's approval mode
+    // (H5) instead of forcing auto-approve.
     expect(renderDryRunPreview).toHaveBeenCalledTimes(2);
     expect(renderDryRunPreview).toHaveBeenNthCalledWith(1, expect.anything(), false);
-    expect(renderDryRunPreview).toHaveBeenNthCalledWith(2, expect.anything(), true);
+    expect(renderDryRunPreview).toHaveBeenNthCalledWith(2, expect.anything(), false);
   });
 
   it('still prints the preview in print-only mode when autoApprove is true', async () => {
     writeProject();
     mockSpawn.mockImplementation((cmd, args = []) => {
-      if (args[0] === 'output') return makeChild({ code: 0, stdout: '{}' });
+      if (args[0] === 'output') return makeChild({ code: 0, stdout: JSON.stringify({ alb_direct_url: { value: 'http://alb.example' }, ecr_repository_url: { value: 'repo' } }) });
       return makeChild({ code: 0 });
     });
 
@@ -411,6 +419,26 @@ describe('Command: apply on --target lambda projects', () => {
     expect(outroText).toContain('App URL: https://d123.cloudfront.net');
     expect(outroText).toContain('API URL: https://abc.execute-api.us-east-2.amazonaws.com (bypasses the CDN — for debugging)');
     expect(outroText).not.toContain('Direct URL:');
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('seeds the suffixed ECR repo on suffixed trees', async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'terraform', 'main.tf'),
+      LAMBDA_MAIN_TF
+        .replace('locals {', 'locals {\n  grada_resource_suffix = "-a1b2c3"')
+        .replace('app_name = "myapp${local.env_suffix}"', 'app_name = "myapp${local.env_suffix}${local.grada_resource_suffix}"')
+    );
+    mockOutputs({ cloudfront_url: { value: 'https://d123.cloudfront.net' } });
+    const runTerraformImpl = vi.fn(async () => { });
+    const spawnSyncImpl = mockAws({ imageExists: true });
+
+    await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+
+    const describe = spawnSyncImpl.mock.calls.find(([, args]) => args[1] === 'describe-images');
+    expect(describe).toBeDefined();
+    const repoIdx = describe[1].indexOf('--repository-name');
+    expect(describe[1][repoIdx + 1]).toBe('myapp-a1b2c3-repo');
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 

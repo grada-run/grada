@@ -2,7 +2,7 @@ import fsSync from 'fs';
 import path from 'path';
 import color from 'picocolors';
 import { intro, outro, select, text, cancel, isCancel } from '@clack/prompts';
-import { trackSuccess } from '../core/telemetry.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, resolveHeadless, readFileSafe, readTerraformComputeTarget } from '../utils/resolvers.js';
@@ -383,7 +383,18 @@ async function promptDestinations() {
     return destinations;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runAlerts(input = {}) {
+    setActiveCommandName('alerts');
+    try {
+        return await runAlertsMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runAlertsMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;

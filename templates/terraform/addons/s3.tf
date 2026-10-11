@@ -39,13 +39,13 @@ resource "aws_s3_bucket_cors_configuration" "storage" {
   bucket = aws_s3_bucket.storage.id
 
   cors_rule {
-    allowed_methods  = ["GET", "PUT", "POST", "DELETE", "HEAD"]
+    allowed_methods = ["GET", "PUT", "POST", "DELETE", "HEAD"]
     # NOTE: intentionally open for zero-config presigned browser uploads.
     # Restrict to your app domain (e.g. ["https://example.com"]) once known.
-    allowed_origins  = ["*"]
-    allowed_headers  = ["*"]
-    expose_headers   = ["ETag"]
-    max_age_seconds  = 3000
+    allowed_origins = ["*"]
+    allowed_headers = ["*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
   }
 }
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import path from 'path';
 import { mainStack } from '../src/commands/init.js';
-import { destroyStack } from '../src/commands/destroy.js';
-import { runDoctor } from '../src/commands/doctor.js';
+import { destroyStack, parseDestroyArgs } from '../src/commands/destroy.js';
+import { runDoctor, parseDoctorArgs } from '../src/commands/doctor.js';
 import { pushSecrets, pullSecrets, auditSecrets } from '../src/commands/secrets.js';
-import { ejectStack } from '../src/commands/eject.js';
+import { ejectStack, parseEjectArgs } from '../src/commands/eject.js';
 import { applyStack, parseApplyArgs } from '../src/commands/apply.js';
 import { runDiagnose } from '../src/commands/diagnose.js';
 import { syncAi } from '../src/commands/sync-ai.js';
@@ -32,13 +32,13 @@ const HELP_TEXT = [
     '',
     'Commands:',
     '  init                 Provision infrastructure and CI/CD pipelines',
-    '  apply                Apply infrastructure changes (--auto-approve, --force)',
+    '  apply                Apply infrastructure changes (--auto-approve, --force, --force-unlock, --force-resume, --destroy-previous-target)',
     '  deploy               Alias of apply',
-    '  destroy              Tear down infrastructure (--yes)',
-    '  doctor               Run pre-flight dependency checks',
+    '  destroy              Tear down infrastructure (--yes, --allow-data-loss, --force-unlock, --force)',
+    '  doctor               Run pre-flight dependency checks (--deep)',
     '  logs [service]       Stream CloudWatch logs (--tail, -f/--follow, --error, --since, --region)',
     '  status               Service health dashboard (--region, --json, --watch)',
-    '  rollback [rev]       Roll back ECS service to a previous task revision',
+    '  rollback [rev]       Roll back ECS service to a previous task revision (ECS only — Lambda uses image tags)',
     '  exec                 Open an interactive shell in a running container (--cluster, --service, --container, --command, --region)',
     '  db connect           Open a secure local tunnel to your database (--port, --show-credentials, --workspace, --region)',
     '  db enable-vector     Enable the pgvector extension via a one-off ECS task (--task-def, --timeout)',
@@ -46,7 +46,7 @@ const HELP_TEXT = [
     '  db migrate           Run database migrations in a one-off ECS task (--cmd, --task-def, --timeout, --setup-ci)',
     '  db backup            Create an RDS snapshot checkpoint (--id, --timeout, --no-wait)',
     '  db restore           Restore the database from a snapshot ([snapshot-id], --yes)',
-    '  gc                   Discover and delete orphaned ECR images, log groups, and Elastic IPs (--region)',
+    '  gc                   Discover and delete orphaned ECR images, log groups, and Elastic IPs (--region, --deep, --yes)',
     '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes, --strict)',
     '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait, --strict)',
     '  drift                Detect Terraform drift locally or scaffold scheduled checks (--setup)',
@@ -57,7 +57,7 @@ const HELP_TEXT = [
     '  secrets push         Push environment secrets',
     '  secrets pull         Pull environment secrets',
     '  secrets audit        Audit local vs remote secrets drift',
-    '  eject                Eject to self-managed configs (--yes)',
+    '  eject                Eject to self-managed configs (--yes, --force)',
     '  sync-ai              Sync AI assistant rules',
     '  mcp [--install <editor>] [--transport stdio|http]  Start the MCP server (stdio default; http serves /mcp for tunnels), or write IDE config (windsurf, zed, cursor, vscode, claude-desktop, gemini-cli)',
     '  telemetry off|on|status  Persistently disable, enable, or inspect anonymous usage telemetry',
@@ -65,6 +65,8 @@ const HELP_TEXT = [
     'Init options:',
     '  --target <ecs|lambda|static>  Compute architecture: always-on Fargate + ALB (~$31/mo flat, best for steady traffic), scale-to-zero Lambda + API Gateway ($0/mo idle, best for sporadic traffic), or zero-compute S3 + CloudFront (static sites only). Tradeoffs: Stack Architecture guide → Fargate vs Lambda.',
     '  --force  Re-run over modified files: back them up and regenerate (headless re-runs refuse without it)',
+    '  --offline  Scaffold without AWS calls: emits YOUR_AWS_ACCOUNT_ID placeholders plus a reconciliation checklist (no state bucket is created)',
+    '  --adopt-state  Take over remote state when the state bucket already holds a key for this project name (headless inits refuse without it)',
     '',
     'Global options:',
     '  --no-telemetry  Disable telemetry for this run only (persistent: grada telemetry off; every run: DO_NOT_TRACK=1)',
@@ -123,11 +125,11 @@ if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
 } else if (dispatchCommand === 'apply') {
     runCommand(applyStack({ ...parseApplyArgs(rawArgs), isDryRun, ...(autoApprove ? { autoApprove: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'doctor') {
-    runCommand(runDoctor());
+    runCommand(runDoctor({ ...parseDoctorArgs(rawArgs) }));
 } else if (positionalArgs[0] === 'destroy') {
-    runCommand(destroyStack({ ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(destroyStack({ ...parseDestroyArgs(rawArgs), ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'eject') {
-    runCommand(ejectStack({ ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(ejectStack({ ...parseEjectArgs(rawArgs), ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'sync-ai') {
     runCommand(syncAi());
 } else if (positionalArgs[0] === 'diagnose' || positionalArgs[0] === 'wtf') {

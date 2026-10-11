@@ -3,6 +3,58 @@ import path from 'path';
 
 export { detectProjectCapabilities } from './capabilities.js';
 
+// Default container ports per framework preset. Single source for the
+// interactive port prompt and the compose web-service matcher.
+export const FRAMEWORK_DEFAULT_PORTS = {
+    static: '8080',
+    go: '8080',
+    python: '8000',
+    django: '8000',
+};
+
+export function frameworkDefaultPort(frameworkId) {
+    return FRAMEWORK_DEFAULT_PORTS[frameworkId] || '3000';
+}
+
+// Frameworks whose generated Dockerfiles strip npm/npx/yarn from the
+// runner stage (ADR-0012): `npm ...` / `npx ...` task commands are
+// guaranteed `command not found` inside those images. Must stay in sync
+// with templates/docker/*.Dockerfile.
+export const STRIPPED_RUNNER_FRAMEWORKS = ['node', 'nestjs', 'nextjs', 'nuxt', 'svelte'];
+
+// Every framework id init accepts: the detector's output ids, the
+// interactive preset values, and the docker template basenames — one list
+// for all three, pinned against the templates by dockerfile-hardening.
+export const SUPPORTED_FRAMEWORKS = [
+    'node', 'nestjs', 'nextjs', 'nuxt', 'svelte',
+    'python', 'django', 'rails', 'go', 'static',
+];
+
+export function frameworkUsesStrippedRunner(frameworkId) {
+    return STRIPPED_RUNNER_FRAMEWORKS.includes(frameworkId);
+}
+
+// First-token match for JS package-runner shims, tolerating leading
+// `VAR=value` assignments and absolute paths.
+const NPM_SHIM_BINARIES = ['npm', 'npx', 'yarn', 'yarnpkg', 'pnpm', 'pnpx', 'bun', 'bunx'];
+
+export function isNpmShimCommand(cmd) {
+    if (typeof cmd !== 'string') return false;
+    const tokens = cmd.trim().split(/\s+/).filter(Boolean);
+    const first = tokens.find((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token));
+    if (!first) return false;
+    const binary = first.split('/').pop();
+    return NPM_SHIM_BINARIES.includes(binary);
+}
+
+// True when a Dockerfile removes the npx binary from its runtime image
+// (the Grada node-family templates all carry this line). Any Dockerfile
+// that strips npx breaks npm-shim task commands, Grada-authored or not.
+export function dockerfileStripsNpmShims(content) {
+    if (typeof content !== 'string' || content === '') return false;
+    return content.includes('/usr/local/bin/npx');
+}
+
 // Detects the framework based on the presence of framework-specific files.
 export function detectFramework(targetDir) {
     const packageJsonPath = path.join(targetDir, 'package.json');

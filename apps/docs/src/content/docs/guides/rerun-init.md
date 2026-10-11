@@ -35,10 +35,14 @@ After backing up, setup appends a `# grada backups` block (`*.bak.*`) to `.gitig
 `src/utils/generator.js` writes a fixed file set and handles pre-existing files explicitly:
 
 - `terraform/*.tf`, `Dockerfile`, `.github/workflows/deploy.yml`, plus `preview.yml`/`teardown.yml` only when PR previews are enabled. Switching `--target` on a re-run regenerates a different set (e.g. static drops the `Dockerfile`); `preview.yml`/`teardown.yml` are never in the conflict set, so delete them by hand when moving to a target without previews.
-- `terraform/secret_keys.json` is preserved when it already exists (only created as `[]` on first setup) — but on Backup & Regenerate, `terraform/` moves to `terraform.bak.<timestamp>` wholesale, so the fresh tree starts with `[]`. Restore your key map from the `.bak` copy (or re-push) before the next deploy.
+- `terraform/secret_keys.json` is preserved when it already exists (only created as `[]` on first setup) — on Backup & Regenerate its contents are automatically restored over the fresh tree (recorded in a `preserved_files_restored` telemetry event), so your key map survives even though `terraform/` moves to `terraform.bak.<timestamp>` wholesale.
 - If your repo already has a `README.md`, it is kept and gets a short Deployment pointer appended; the generated guide goes to `DEPLOYMENT.md` instead (`GRADA.md` when both files are yours — see [`npx grada-run`](/grada/cli/init/)).
 - Existing `.gitignore` / `.dockerignore` files are preserved with only the grada entries appended (Terraform state paths, `.env`); missing ones are created with framework-appropriate presets.
 - **Rails only:** if `ci.yml` or `dependabot.yml` exist, setup asks whether to disable them by renaming to `.bak` (default CI usually crashes without a database service); in headless mode they are disabled automatically.
+
+## The resource suffix survives re-runs
+
+The random resource suffix (`grada_resource_suffix`, e.g. `-a1b2c3`) minted on first setup is parsed out of the existing tree and reused on every re-run — target pivots and flag changes never re-mint it, since a new suffix would rename live singletons like the RDS identifier. Treat the local as immutable: editing it by hand replaces those resources. Trees scaffolded before suffixes keep rendering unsuffixed names (zero drift).
 
 ## Suggested workflow
 

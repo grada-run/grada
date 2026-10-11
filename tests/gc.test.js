@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
 import { clackPromptsMockFactory, clackMocks as clack } from './helpers/clack.js';
@@ -143,7 +146,7 @@ function setupMixedDiscoveryFixtures() {
             return {
                 Addresses: [
                     { PublicIp: '1.2.3.4', AllocationId: 'eipalloc-attached', AssociationId: 'eipassoc-1', InstanceId: 'i-123' },
-                    { PublicIp: '5.6.7.8', AllocationId: 'eipalloc-orphan' },
+                    { PublicIp: '5.6.7.8', AllocationId: 'eipalloc-orphan', Tags: [{ Key: 'GradaProject', Value: PROJECT }] },
                 ],
             };
         }
@@ -176,9 +179,12 @@ describe('gc: CLI args', () => {
         expect(parseGcArgs(['gc'])).toEqual({});
     });
 
-    it('offers no --yes bypass flag', () => {
-        expect(parseGcArgs(['gc', '--yes'])).toEqual({});
-        expect(parseGcArgs(['gc', '--yes', '--region', 'us-east-1'])).toEqual({ region: 'us-east-1' });
+    it('parses --yes (explicit delete-confirm opt-in) and --deep', () => {
+        // R23: --yes now auto-confirms the delete prompt explicitly; the
+        // default no-flags path still prompts (pinned below in safety guards).
+        expect(parseGcArgs(['gc', '--yes'])).toMatchObject({ yes: true });
+        expect(parseGcArgs(['gc', '--yes', '--region', 'us-east-1'])).toMatchObject({ yes: true, region: 'us-east-1' });
+        expect(parseGcArgs(['gc', '--deep'])).toMatchObject({ deep: true });
     });
 
     it('uses the spec confirmation wording', () => {
@@ -462,5 +468,33 @@ describe('gc: lambda log group discovery', () => {
         });
         expect(seenPrefixes).toEqual([`/aws/lambda/${PROJECT}-`]);
         expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-pr-123-fn`]);
+    });
+
+    it('excludes the live function group with the rendered resource suffix', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'main.tf'),
+                'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\nresource "aws_lambda_function" "app" {}\n'
+            );
+            mockLogsSend.mockImplementation(async (cmd) => {
+                if (cmd instanceof MockDescribeLogGroupsCommand) {
+                    return {
+                        logGroups: [
+                            { logGroupName: `/aws/lambda/${PROJECT}-a1b2c3-fn` },
+                            { logGroupName: `/aws/lambda/${PROJECT}-a1b2c3-pr-9-fn` },
+                        ],
+                    };
+                }
+                if (cmd instanceof MockDeleteLogGroupCommand) return {};
+                throw new Error(`Unexpected Logs command: ${cmd?.commandName}`);
+            });
+            clack.mockConfirm.mockResolvedValue(false);
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', cwd: dir });
+            expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-a1b2c3-pr-9-fn`]);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

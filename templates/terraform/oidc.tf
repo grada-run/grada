@@ -31,7 +31,7 @@ locals {
 # Create the IAM Role that GitHub Actions will assume
 resource "aws_iam_role" "github_actions" {
   count = terraform.workspace == "default" ? 1 : 0
-  name  = "{{PROJECT_NAME}}-github-actions-role"
+  name  = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

@@ -74,6 +74,41 @@ export const ADDON_REGISTRY = {
     },
 };
 
+// Capability-vs-target policy: what `grada add` may do per compute
+// target. Every registry capability plus every relational engine carries
+// an explicit row — no capability falls through to an implicit default.
+// Dispositions: `allow` (proceed), `warn` (proceed with an unwired
+// warning), `refuse` (fail STATIC_TARGET_UNSUPPORTED). Consulted once at
+// the top of runAdd/runAddDatabase, before the TOCTOU guards.
+export const ADDON_TARGET_POLICY = {
+    'storage:s3': { ecs: 'allow', lambda: 'allow', static: 'allow' },
+    'db:dynamodb': { ecs: 'allow', lambda: 'allow', static: 'allow' },
+    'db:redis': { ecs: 'allow', lambda: 'allow', static: 'allow' },
+    'queue:sqs': { ecs: 'allow', lambda: 'warn', static: 'warn' },
+    'ai:bedrock': { ecs: 'allow', lambda: 'allow', static: 'allow' },
+    'email:ses': { ecs: 'allow', lambda: 'allow', static: 'allow' },
+    'cron': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'db:postgres': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'db:mysql': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'db:aurora-postgresql': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+};
+
+// Resolves a capability's disposition for a compute target. Unknown
+// capabilities default open — they fail later with UNSUPPORTED_CAPABILITY.
+export function addonTargetDisposition(capability, target) {
+    const row = ADDON_TARGET_POLICY[capability];
+    if (!row) return 'allow';
+    return row[target] ?? 'allow';
+}
+
+// Targets a capability may be added to (allow + warn rows). Feeds the
+// refuse-level guardComputeTarget descriptor.
+export function addonSupportedTargets(capability) {
+    const row = ADDON_TARGET_POLICY[capability];
+    if (!row) return ['ecs', 'lambda', 'static'];
+    return ['ecs', 'lambda', 'static'].filter((target) => row[target] !== 'refuse');
+}
+
 // Container environment variables injected into the ECS task definitions
 // per capability. Values are static HCL expressions or `(ctx) => string`
 // resolvers for dynamic values (model IDs, SES sender/region). Lone

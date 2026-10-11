@@ -9,10 +9,10 @@ on:
 
 env:
   AWS_REGION: {{REGION}}
-  ECR_REPOSITORY: {{PROJECT_NAME}}-repo
-  ECS_CLUSTER: {{PROJECT_NAME}}-cluster
-  ECS_SERVICE: {{PROJECT_NAME}}-service
-  ECS_TASK_FAMILY: {{PROJECT_NAME}}-task
+  ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
+  ECS_CLUSTER: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cluster
+  ECS_SERVICE: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-service
+  ECS_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-task
 
 permissions:
   id-token: write
@@ -54,7 +54,7 @@ jobs:
         uses: grada-run/grada-action@v1
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           terraform-dir: 'terraform'
 
       # --- 3. BUILD & PUSH ---

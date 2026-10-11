@@ -7,7 +7,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy = "grada"
+      ManagedBy    = "grada"
+      GradaProject = "{{PROJECT_NAME}}"
     }
   }
 }
@@ -22,7 +23,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy = "grada"
+      ManagedBy    = "grada"
+      GradaProject = "{{PROJECT_NAME}}"
     }
   }
 }
@@ -31,8 +33,13 @@ locals {
   # Workspace suffix for PR preview environments (e.g., "-pr-123"). Empty for production.
   env_suffix = terraform.workspace == "default" ? "" : "-${terraform.workspace}"
 
-  # Dynamic naming variable to prevent collisions
-  app_name = "{{PROJECT_NAME}}${local.env_suffix}"
+  # Per-project collision suffix minted once at init ("-a1b2c3"). Empty for
+  # trees scaffolded before suffixes existed — never change it by hand:
+  # renaming replaces every singleton resource below.
+  grada_resource_suffix = "{{RESOURCE_SUFFIX}}"
+
+  # Full application name: project + workspace + collision suffix.
+  app_name = "{{PROJECT_NAME}}${local.env_suffix}${local.grada_resource_suffix}"
 }
 
 # --- CloudWatch Logs ---
@@ -43,8 +50,8 @@ resource "aws_cloudwatch_log_group" "app" {
 
 # --- ECR Repository (Shared across workspaces) ---
 resource "aws_ecr_repository" "app" {
-  count                = terraform.workspace == "default" ? 1 : 0
-  name                 = "{{PROJECT_NAME}}-repo"
+  count = terraform.workspace == "default" ? 1 : 0
+  name  = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo"
   # trivy:ignore:AVD-AWS-0031 - Mutable tags allow the CI/CD pipeline to reuse the 'latest' tag for simplified deployments
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -57,7 +64,7 @@ resource "aws_ecr_repository" "app" {
 # In PR workspaces, fetch the existing production repository
 data "aws_ecr_repository" "existing_app" {
   count = terraform.workspace != "default" ? 1 : 0
-  name  = "{{PROJECT_NAME}}-repo"
+  name  = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo"
 }
 
 locals {
@@ -124,8 +131,8 @@ resource "aws_iam_role_policy" "app_secrets_access" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
         Resource = [local.secret_arn]
       }
     ]

@@ -15,7 +15,7 @@ resource "aws_ecs_task_definition" "worker" {
       essential = true
 
       environment = [
-        { "name": "NODE_ENV", "value": "production" },
+        { "name" : "NODE_ENV", "value" : "production" },
         {{DB_ENV_VARS}}
       ]
 

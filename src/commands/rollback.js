@@ -7,11 +7,19 @@ import {
 } from '@aws-sdk/client-ecs';
 import color from 'picocolors';
 import { intro, outro, spinner, select, isCancel } from '@clack/prompts';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { requireManagedTree } from '../utils/terraform-metadata.js';
+import { guardSleepingEnv, resolveSleepTarget } from '../utils/sleep-state.js';
+import {
+    discoverEligibleRevisions as discoverWithAdapter,
+    createEcsRevisionAdapter,
+    pickNewestEligible,
+    INTERACTIVE_CANDIDATE_LIMIT,
+} from '../utils/revision-discovery.js';
 import { sleep } from '../utils/system.js';
 
 export const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -46,21 +54,24 @@ function formatRegisteredAt(registeredAt) {
 }
 
 // Discovers ACTIVE revisions older than the deployed one, newest first.
-// Pure over the injected client so the filtering is unit-testable
-// without the prompt flow.
+// Thin ECS wrapper over the target-agnostic revision-discovery seam
+// (kept as the pinned import for existing callers).
 export async function discoverEligibleRevisions(ecsClient, family, currentRevNum) {
-    const listResp = await ecsClient.send(new ListTaskDefinitionsCommand({
-        familyPrefix: family,
-        status: 'ACTIVE',
-        sort: 'DESC',
-        maxResults: 10,
-    }));
-    return (listResp.taskDefinitionArns || []).filter(
-        (arn) => Number(arn.split(':').pop()) < currentRevNum
-    );
+    return discoverWithAdapter(createEcsRevisionAdapter(ecsClient), family, currentRevNum);
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runRollback(input = {}) {
+    setActiveCommandName('rollback');
+    try {
+        return await runRollbackMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runRollbackMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;
@@ -89,25 +100,48 @@ export async function runRollback(input = {}) {
     const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
-
-    intro(color.bgCyan(color.black(' grada rollback ⏪ ')));
+    // Ejected trees refuse before anything else; the target guard sits
+    // above client construction and the banner so unsupported targets
+    // fail with zero AWS contact and zero noise.
+    const managedTree = await requireManagedTree({
+        cwd, command: 'rollback', options, event: 'rollback_run', projectName,
+    });
+    if (!managedTree.proceed) return managedTree.result;
 
     const targetGuard = guardComputeTarget({ cwd, command: 'Rollback', supported: ['ecs'] });
     if (targetGuard) {
-        const functionName = `${projectName}-fn`;
+        const functionName = `${projectName}${readResourceSuffix(cwd)}-fn`;
+        trackEvent('rollback_target_unsupported', { projectName, actual: targetGuard.actual });
         return failCommand({
             message: targetGuard.message,
             hint: targetGuard.actual === 'lambda'
-                ? `Redeploy a previous image instead: aws lambda update-function-code --function-name ${functionName} --image-uri <ecr-repo>:<sha-tag> --region ${region}\n  List past image tags with: aws ecr describe-images --repository-name ${projectName}-repo --region ${region}`
+                ? `Redeploy a previous image instead: aws lambda update-function-code --function-name ${functionName} --image-uri <ecr-repo>:<sha-tag> --region ${region}\n  List past image tags with: aws ecr describe-images --repository-name ${projectName}${readResourceSuffix(cwd)}-repo --region ${region}`
                 : 'Static sites have no revisions — push to redeploy.',
             event: 'rollback_run',
             telemetry: { projectName },
             errorCode: targetGuard.errorCode,
             reason: targetGuard.reason,
-            resultExtra: { cluster, service, region },
+            resultExtra: { cluster, service, region, actual: targetGuard.actual },
+            // Dedicated refusal code: distinct from failure's 1 and
+            // strict-skip's 2 so automation can tell "wrong target" apart.
+            exitCode: 3,
         });
     }
+
+    // Rollback is a warner, not a refuser: an asleep env proceeds (the
+    // restore targets stopped services), with apply gated until wake.
+    await guardSleepingEnv({
+        cwd,
+        envKey: resolveSleepTarget(options, cwd).envKey,
+        options,
+        command: 'rollback',
+        mode: 'warn',
+        projectName,
+    });
+
+    const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
+
+    intro(color.bgCyan(color.black(' grada rollback ⏪ ')));
 
     const s = spinner();
     s.start('Inspecting service and task revisions...');
@@ -128,6 +162,7 @@ export async function runRollback(input = {}) {
                 telemetry: { projectName, error_code: 'SERVICE_NOT_FOUND' },
                 reason: 'service-not-found',
                 resultExtra: { cluster, service, region },
+                exitCode: 1,
             });
         }
 
@@ -138,9 +173,7 @@ export async function runRollback(input = {}) {
         let targetRevisionNum;
 
         if (options.revision !== undefined && options.revision !== null && String(options.revision).trim() !== '') {
-            // Case A: explicit revision. A request for the currently deployed
-            // revision is accepted silently; UpdateService with
-            // forceNewDeployment still redeploys it.
+            // Case A: explicit revision.
             const rawRevision = String(options.revision).trim();
             const targetInput = /^\d+$/.test(rawRevision) ? `${family}:${rawRevision}` : rawRevision;
             let descResp;
@@ -158,14 +191,31 @@ export async function runRollback(input = {}) {
                     telemetry: { projectName, error_code: 'REVISION_NOT_FOUND' },
                     reason: 'revision-not-found',
                     resultExtra: { cluster, service, region },
+                    exitCode: 1,
                 });
             }
             targetTaskDefArn = descResp.taskDefinition.taskDefinitionArn;
             targetRevisionNum = String(descResp.taskDefinition.revision);
+            // A request for the currently deployed revision warns instead
+            // of silently redeploying it.
+            if (Number(targetRevisionNum) === currentRevNum) {
+                s.stop(color.yellow('Already on the requested revision.'));
+                trackEvent('rollback_current_revision_warned', { projectName, revision: targetRevisionNum });
+                return failCommand({
+                    message: `\n⚠ Service ${service} is already on revision ${targetRevisionNum} — nothing to roll back.`,
+                    tone: 'yellow',
+                    hint: '  Request a different revision, or deploy again to create rollback history.\n',
+                    event: 'rollback_run',
+                    telemetry: { projectName, error_code: 'CURRENT_REVISION_REQUESTED' },
+                    reason: 'rollback-current-revision',
+                    resultExtra: { cluster, service, region },
+                    exitCode: 1,
+                });
+            }
             s.stop(`Resolved revision ${targetRevisionNum}.`);
         } else {
-            // Case B: discover eligible older revisions.
-            const eligibleArns = await discoverEligibleRevisions(ecsClient, family, currentRevNum);
+            // Case B: discover eligible older revisions via the shared seam.
+            const eligibleArns = await discoverWithAdapter(createEcsRevisionAdapter(ecsClient), family, currentRevNum);
 
             if (eligibleArns.length === 0) {
                 s.stop(color.yellow('No previous revisions.'));
@@ -176,15 +226,16 @@ export async function runRollback(input = {}) {
                     telemetry: { projectName, error_code: 'NO_PRIOR_REVISIONS' },
                     reason: 'no-prior-revisions',
                     resultExtra: { cluster, service, region },
+                    exitCode: 1,
                 });
             }
 
             if (headless) {
-                targetTaskDefArn = eligibleArns[0];
+                targetTaskDefArn = pickNewestEligible(eligibleArns);
                 targetRevisionNum = targetTaskDefArn.split(':').pop();
                 s.stop(`Selected previous revision ${targetRevisionNum}.`);
             } else {
-                const candidates = eligibleArns.slice(0, 5);
+                const candidates = eligibleArns.slice(0, INTERACTIVE_CANDIDATE_LIMIT);
                 const settled = await Promise.allSettled(
                     candidates.map((arn) => ecsClient.send(new DescribeTaskDefinitionCommand({ taskDefinition: arn })))
                 );
@@ -268,6 +319,7 @@ export async function runRollback(input = {}) {
                     telemetry: { projectName, error_code: 'ROLLOUT_FAILED', targetRevision: String(targetRevisionNum) },
                     reason: 'rollout-failed',
                     resultExtra: { cluster, service, region },
+                    exitCode: 1,
                 });
             }
 
@@ -299,6 +351,7 @@ export async function runRollback(input = {}) {
                     telemetry: { projectName, error_code: 'ROLLOUT_TIMEOUT', targetRevision: String(targetRevisionNum) },
                     reason: 'rollout-timeout',
                     resultExtra: { cluster, service, region },
+                    exitCode: 1,
                 });
             }
 
@@ -321,6 +374,7 @@ export async function runRollback(input = {}) {
             hint: 'Check your AWS credentials and region, then try again.',
             reason: 'error',
             resultExtra: { cluster, service, region },
+            exitCode: 1,
         });
     }
 }

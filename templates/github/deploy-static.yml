@@ -9,9 +9,9 @@ on:
 
 env:
   AWS_REGION: {{REGION}}
-  S3_BUCKET: {{PROJECT_NAME}}-site-{{AWS_ACCOUNT_ID}}
+  S3_BUCKET: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-site-{{AWS_ACCOUNT_ID}}
   BUILD_DIR: {{BUILD_DIR}}
-  CF_COMMENT: {{PROJECT_NAME}}-cdn
+  CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn
 
 permissions:
   id-token: write
@@ -53,7 +53,7 @@ jobs:
         uses: grada-run/grada-action@v1
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           terraform-dir: 'terraform'
 
       # --- 3. BUILD ---

@@ -1,16 +1,24 @@
 import fsSync from 'fs';
 import path from 'path';
 import color from 'picocolors';
-import { outro } from '@clack/prompts';
+import { confirm, outro, log, cancel } from '@clack/prompts';
 import { normalizeOptions } from './args.js';
-import { failCommand } from './command.js';
-import { trackSuccess } from '../core/telemetry.js';
-import { resolveProjectName, resolveWorkspaceSuffix, resolveCluster, resolveService, resolveCwd } from './resolvers.js';
+import { failCommand, shouldAutoApprove } from './command.js';
+import { atomicWriteFileSync } from './atomic-write.js';
+import { withProjectLock } from './file-lock.js';
+import { ensureGitignoreRules, GITIGNORE_RULE_GRADA_DIR } from './gitignore.js';
+import { trackEvent, trackSuccess, flushTelemetry } from '../core/telemetry.js';
+import { resolveProjectName, resolveWorkspaceSuffix, resolveCluster, resolveService, resolveCwd, readResourceSuffix } from './resolvers.js';
 import { resolveDbIdentifier, resolveDbClusterIdentifier } from './rds.js';
 
 export const SLEEP_STATE_DIRNAME = '.grada';
 export const LEGACY_SLEEP_STATE_DIRNAME = '.deploy-stack';
 export const SLEEP_STATE_FILENAME = 'sleep-state.json';
+// Terraform-visible sleep marker: committed (never gitignored) so raw
+// `terraform apply` on an ejected-but-asleep tree keeps desired counts at
+// 0 and schedulers disabled instead of half-waking the stack.
+export const SLEEP_AUTO_TFVARS_FILENAME = 'sleep.auto.tfvars';
+export const SLEEP_AUTO_TFVARS_CONTENT = '# Managed by grada sleep/wake — deleted automatically on wake.\nasleep = true\n';
 export const RDS_AUTO_RESTART_DAYS = 7;
 export const RDS_AUTO_RESTART_MS = RDS_AUTO_RESTART_DAYS * 24 * 60 * 60 * 1000;
 
@@ -55,7 +63,7 @@ export function resolveSleepTarget(options = {}, cwd = process.cwd()) {
         appPrefix,
         cluster: resolveCluster(prefixed, base),
         appService: resolveService(prefixed, base),
-        workerService: `${appPrefix}-worker-service`,
+        workerService: `${appPrefix}${readResourceSuffix(base)}-worker-service`,
         dbIdentifier: resolveDbIdentifier(unprefixed, base),
         dbClusterIdentifier: resolveDbClusterIdentifier(unprefixed, base),
     };
@@ -69,20 +77,48 @@ export function legacySleepStatePath(cwd = process.cwd()) {
     return path.join(resolveCwd({}, cwd), LEGACY_SLEEP_STATE_DIRNAME, SLEEP_STATE_FILENAME);
 }
 
-function readLedgerFile(filePath) {
+// Quarantines a corrupt ledger file aside (`<name>.corrupt.<ts>`) instead
+// of reading it as `{}` and discarding the bytes on the next write.
+// Telemetry is best-effort: reads must never throw.
+function quarantineLedgerFile(filePath) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     try {
-        const parsed = JSON.parse(fsSync.readFileSync(filePath, 'utf8'));
+        fsSync.renameSync(filePath, `${filePath}.corrupt.${stamp}`);
+    } catch {
+        return;
+    }
+    try {
+        trackEvent('sleep_ledger_quarantined', {
+            projectName: path.basename(path.resolve(filePath, '..', '..')),
+        });
+    } catch {
+        // Telemetry never breaks reads.
+    }
+}
+
+function readLedgerFile(filePath) {
+    let raw;
+    try {
+        raw = fsSync.readFileSync(filePath, 'utf8');
+    } catch {
+        // Missing or unreadable: fall through to the next source below.
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
     } catch {
-        // Fall through to null below.
+        // Unparseable: fall through to quarantine below.
     }
+    quarantineLedgerFile(filePath);
     return null;
 }
 
 // Reads the per-env sleep ledger (`{ [env]: entry }`). The new `.grada/`
 // path wins; the legacy `.deploy-stack/` path is a read fallback so
-// pre-rebrand projects wake cleanly. Missing or corrupt files read as
-// empty so a hand-edited file never crashes wake/sleep.
+// pre-rebrand projects wake cleanly. Missing files read as empty;
+// corrupt bytes quarantine aside so a hand-edited file never crashes
+// wake/sleep and is never silently discarded.
 export function readSleepState(cwd = process.cwd()) {
     return readLedgerFile(sleepStatePath(cwd))
         ?? readLedgerFile(legacySleepStatePath(cwd))
@@ -92,7 +128,7 @@ export function readSleepState(cwd = process.cwd()) {
 export function writeSleepState(cwd = process.cwd(), state = {}) {
     const filePath = sleepStatePath(cwd);
     fsSync.mkdirSync(path.dirname(filePath), { recursive: true });
-    fsSync.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    atomicWriteFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 }
 
 export function removeSleepStateEntry(cwd = process.cwd(), envKey = 'default') {
@@ -103,6 +139,31 @@ export function removeSleepStateEntry(cwd = process.cwd(), envKey = 'default') {
     return true;
 }
 
+export function sleepAutoTfvarsPath(cwd = process.cwd()) {
+    return path.join(resolveCwd({}, cwd), 'terraform', SLEEP_AUTO_TFVARS_FILENAME);
+}
+
+// Records the asleep state for Terraform. Idempotent: re-writing an
+// existing marker is a no-op byte-wise.
+export function writeSleepAutoTfvars(cwd = process.cwd()) {
+    const filePath = sleepAutoTfvarsPath(cwd);
+    fsSync.mkdirSync(path.dirname(filePath), { recursive: true });
+    atomicWriteFileSync(filePath, SLEEP_AUTO_TFVARS_CONTENT, 'utf8');
+}
+
+// Deletes the marker before a restore apply so wake never fights its own
+// auto-vars. Returns true when a marker existed. Never throws: an absent
+// marker is the common case (awake trees, legacy sleeps).
+export function clearSleepAutoTfvars(cwd = process.cwd()) {
+    try {
+        if (!fsSync.existsSync(sleepAutoTfvarsPath(cwd))) return false;
+        fsSync.rmSync(sleepAutoTfvarsPath(cwd), { force: true });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 // Shared awake gate for commands that must not run against an asleep
 // environment (apply). Pure over the ledger: returns the env's ledger
 // entry when asleep, null when awake. Callers own prompting/exit.
@@ -110,6 +171,106 @@ export function requireAwakeEnvironment(cwd = process.cwd(), envKey = 'default')
     const state = readSleepState(cwd);
     const entry = state?.[envKey];
     return entry && typeof entry === 'object' ? entry : null;
+}
+
+// Lock scope serializing every ledger read→modify→write (sleep's
+// record, wake/destroy clears, eject's migrate). A dedicated scope (not
+// `project`) avoids false contention with addon scaffolds; an in-band
+// version field is unnecessary because every writer holds this lock.
+export const LEDGER_LOCK_SCOPE = 'ledger';
+
+// Central asleep-environment gate, extracted from apply's preflight.
+// Ownership: sleep=writer, wake=clearer, apply=refuser, add/rollback=
+// warners, destroy=clearer-on-success, eject=preflighter (eject hand-rolls
+// its preflight in eject.js, mirroring the refuse shape below).
+//
+// Modes:
+// - `refuse`: apply's exact behavior — --force overrides with telemetry,
+//   headless fails SLEEPING_ENVIRONMENT, interactive offers wake-first via
+//   the `wakeImpl` seam (defaulting to the caller's own wake function).
+// - `warn`: prints "asleep, apply will block until wake" and proceeds.
+//   `warnEvent`/`warnTelemetry` are optional per-command extras.
+// - `clear-on-success`: post-action hook removing exactly `envKey` under
+//   the ledger lock; `clearedBy` names the clearer in telemetry.
+//
+// Returns `{ proceed, entry, cleared?, result? }`: `result` is the
+// command's return value when `proceed` is false.
+export async function guardSleepingEnv({
+    cwd = process.cwd(),
+    envKey = 'default',
+    options = {},
+    command,
+    mode,
+    event = null,
+    projectName = null,
+    wakeImpl = null,
+    warnEvent = null,
+    warnTelemetry = {},
+    clearedBy = null,
+} = {}) {
+    const opts = normalizeOptions(options);
+    const project = projectName ?? path.basename(resolveCwd({}, cwd));
+    const entry = requireAwakeEnvironment(cwd, envKey);
+    if (!entry) return { proceed: true, entry: null };
+
+    if (mode === 'warn') {
+        console.log(color.yellow(`⚠ Environment "${envKey}" is asleep — ${command} continues, but apply will block until you run npx grada-run wake.`));
+        if (warnEvent) trackEvent(warnEvent, { projectName: project, ...warnTelemetry });
+        return { proceed: true, entry };
+    }
+
+    if (mode === 'clear-on-success') {
+        const cleared = await withProjectLock(cwd, async () => removeSleepStateEntry(cwd, envKey), { scope: LEDGER_LOCK_SCOPE });
+        if (cleared) trackEvent('sleep_entry_cleared', { projectName: project, by: clearedBy ?? command });
+        return { proceed: true, entry: null, cleared };
+    }
+
+    // Refuse mode. Only apply uses it; the strings below are apply's
+    // historical preflight text, kept byte-identical.
+    if (opts.force === true || opts.force === 'true') {
+        log.warn(color.yellow(`⚠ Environment "${envKey}" is asleep and --force was passed. Tasks will start against a stopped database until you run ${color.green('npx grada-run wake')}.`));
+        trackEvent(`forced_${command}_while_asleep`, { projectName: project, env: envKey });
+        await flushTelemetry();
+        return { proceed: true, entry };
+    }
+    if (shouldAutoApprove(opts)) {
+        return {
+            proceed: false,
+            result: await failCommand({
+                message: `\n✖ Environment "${envKey}" is asleep. Apply would start tasks against a stopped database.`,
+                hint: '  Run npx grada-run wake first, or re-run with --force to proceed anyway.\n',
+                event,
+                telemetry: { projectName: project },
+                errorCode: 'SLEEPING_ENVIRONMENT',
+                reason: 'sleeping-environment',
+                resultExtra: { env: envKey },
+            }),
+        };
+    }
+    const wakeFirst = await confirm({
+        message: `Environment "${envKey}" is asleep. Wake it now and continue with apply?`,
+        initialValue: true,
+    });
+    if (wakeFirst !== true) {
+        cancel('Apply aborted. The environment is still asleep.');
+        return { proceed: false, result: { ok: false, reason: 'cancelled', env: envKey } };
+    }
+    const woken = await wakeImpl({ cwd, env: envKey });
+    if (!woken || woken.ok !== true) {
+        return {
+            proceed: false,
+            result: await failCommand({
+                message: '\n✖ Wake did not complete — apply aborted.',
+                hint: '  Resolve the wake failure, then re-run apply.\n',
+                event,
+                telemetry: { projectName: project },
+                errorCode: 'WAKE_FAILED',
+                reason: 'wake-failed',
+                resultExtra: { env: envKey, wakeReason: woken?.reason ?? null },
+            }),
+        };
+    }
+    return { proceed: true, entry };
 }
 
 // Pure target-intercept decision shared by sleep/wake: static targets
@@ -191,28 +352,7 @@ export async function reportSleepWakeSkip({ command, reason, target, projectName
 // Keeps the advisory sleep ledger out of git. Returns true when the file was
 // created or amended, false when the rule already existed or the write failed.
 export function ensureSleepGitignore(cwd = process.cwd()) {
-    const base = resolveCwd({}, cwd);
-    const file = path.join(base, '.gitignore');
-    let content = null;
-    try {
-        if (fsSync.existsSync(file)) content = fsSync.readFileSync(file, 'utf8');
-    } catch {
-        content = null;
-    }
-    if (typeof content === 'string' && content.split('\n').some((line) => line.trim() === `${SLEEP_STATE_DIRNAME}/`)) {
-        return false;
-    }
-    const entry = `# Local grada runtime state (sleep/wake)\n${SLEEP_STATE_DIRNAME}/\n`;
-    try {
-        if (content === null) {
-            fsSync.writeFileSync(file, entry, 'utf8');
-        } else {
-            fsSync.appendFileSync(file, content.endsWith('\n') ? `\n${entry}` : `\n\n${entry}`, 'utf8');
-        }
-    } catch {
-        return false;
-    }
-    return true;
+    return ensureGitignoreRules(resolveCwd({}, cwd), [GITIGNORE_RULE_GRADA_DIR]);
 }
 
 // AWS automatically restarts stopped RDS instances and Aurora clusters after

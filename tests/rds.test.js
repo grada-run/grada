@@ -6,6 +6,7 @@ import {
     findDbInstance,
     findDbCluster,
     findDbTarget,
+    dbStatusOf,
     generateSnapshotId,
     isValidSnapshotId,
     resolveDbIdentifier,
@@ -130,6 +131,18 @@ describe('resolveDbIdentifier', () => {
         expect(resolveDbIdentifier({ projectName: 'myapp' }, 42)).toBe(resolveDbIdentifier({ projectName: 'myapp' }));
         expect(resolveDbIdentifier({ projectName: 'myapp', cwd: 42 }, dir)).toBe('myapp-db');
     });
+
+    it('inserts the resource suffix after the workspace segment', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rds-id-'));
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        expect(resolveDbIdentifier({ projectName: 'myapp' }, dir)).toBe('myapp-a1b2c3-db');
+        expect(resolveDbIdentifier({ projectName: 'myapp', workspace: 'pr-1' }, dir)).toBe('myapp-pr-1-a1b2c3-db');
+        expect(resolveDbClusterIdentifier({ projectName: 'myapp' }, dir)).toBe('myapp-a1b2c3-db-cluster');
+    });
 });
 
 describe('resolveDbClusterIdentifier', () => {
@@ -173,7 +186,7 @@ describe('findDbTarget', () => {
     const instance = {
         DBInstanceIdentifier: 'myapp-db',
         Engine: 'postgres',
-        Status: 'available',
+        DBInstanceStatus: 'available',
         Endpoint: { Address: 'myapp-db.abc.us-east-2.rds.amazonaws.com', Port: 5432 },
         DBName: 'myapp',
         MasterUserSecret: { SecretArn: 'arn:secret' },
@@ -240,5 +253,26 @@ describe('findDbTarget', () => {
         const client = mockClient(() => Promise.resolve({ DBInstances: [mysql] }));
         const target = await findDbTarget(client, { dbIdentifier: 'myapp-db' });
         expect(target.port).toBe('3306');
+    });
+});
+
+describe('dbStatusOf', () => {
+    // RDS API asymmetry: instances report DBInstanceStatus, clusters
+    // report Status. Reading Status off an instance yields undefined and
+    // hung the destroy/wake wait loops forever (P2 live incident).
+    it('reads DBInstanceStatus for instances', () => {
+        expect(dbStatusOf({ DBInstanceStatus: 'creating' }, 'instance')).toBe('creating');
+        expect(dbStatusOf({ DBInstanceStatus: 'available' }, 'instance')).toBe('available');
+    });
+
+    it('reads Status for clusters', () => {
+        expect(dbStatusOf({ Status: 'available' }, 'cluster')).toBe('available');
+    });
+
+    it('returns null for missing records and missing fields', () => {
+        expect(dbStatusOf(null, 'instance')).toBeNull();
+        expect(dbStatusOf({}, 'instance')).toBeNull();
+        expect(dbStatusOf({ Status: 'available' }, 'instance')).toBeNull();
+        expect(dbStatusOf({ DBInstanceStatus: 'available' }, 'cluster')).toBeNull();
     });
 });

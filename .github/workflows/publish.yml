@@ -37,15 +37,16 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Terraform on PATH before the tests: the unit suite shells out to
+      # `terraform fmt -check` (tests/terraform-fmt.test.js).
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
       # --- Phase 1: Static Generation Validation ---
       - name: Run Unit & Snapshot Tests
         run: npm test
 
       # --- Phase 2: Execution & Security Validation ---
-      # grada init shells out to `terraform fmt` while rendering templates,
-      # so the CLI fails without Terraform on PATH.
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
 
       - name: Render templates for IaC scanning
         env:

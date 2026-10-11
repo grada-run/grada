@@ -98,6 +98,8 @@ export function parseCliArgs(processArgs) {
     const initOptions = {
         with: parseWithFlag(),
         force: getBoolFlag('force') === true,
+        offline: getBoolFlag('offline') === true,
+        adoptState: getBoolFlag('adopt-state') === true,
         model: getValueFlag('model'),
         domain: getValueFlag('domain'),
         zoneId: getValueFlag('zone-id'),

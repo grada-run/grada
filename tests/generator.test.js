@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
 import { generateTemplates, resolveDocDest, isManagedDoc, MANAGED_DOC_FALLBACK, LEGACY_MANAGED_DOC_FALLBACK, injectLambdaAdapter, convertDatabaseTfForLambda, addRandomProvider } from '../src/utils/generator.js';
@@ -146,6 +146,22 @@ describe('Infrastructure Generator', () => {
             expect(deployYmlContent).toContain('register-task-definition');
             expect(deployYmlContent).toContain('--task-definition');
 
+            // No template placeholder may survive rendering (a new
+            // placeholder without a config default leaks `{{...}}`
+            // literals into user trees).
+            for (const [label, content] of [
+                ['main.tf', mainTfContent],
+                ['network.tf', networkTfContent],
+                ['database.tf', databaseTfContent],
+                ['worker.tf', workerTfContent],
+                ['deploy.yml', deployYmlContent],
+                ['preview.yml', previewYmlContent],
+                ['teardown.yml', teardownYmlContent],
+                ['Dockerfile', dockerfileContent],
+            ]) {
+                expect(content, `${tc.name} ${label} keeps placeholders`).not.toMatch(/\{\{[A-Z_]+\}\}/);
+            }
+
             // Snapshot everything
             expect(mainTfContent).toMatchSnapshot(`${tc.name} - main.tf`);
             expect(networkTfContent).toMatchSnapshot(`${tc.name} - network.tf`);
@@ -260,9 +276,9 @@ describe('database env vars render as bare HCL references', () => {
         const mainTf = await fs.readFile(path.join(dbDir, 'terraform', 'main.tf'), 'utf-8');
         // The container port is always injected so app code (node, nestjs,
         // svelte, go) can bind process.env.PORT / $PORT to the ALB target.
-        expect(mainTf).toContain('{ "name": "PORT", "value": "8000" }');
-        expect(mainTf).toContain('{ "name": "DB_HOST", "value": aws_db_instance.postgres.address }');
-        expect(mainTf).toContain('{ "name": "DB_NAME", "value": aws_db_instance.postgres.db_name }');
+        expect(mainTf).toContain('{ "name" : "PORT", "value" : "8000" }');
+        expect(mainTf).toContain('{ "name" : "DB_HOST", "value" : aws_db_instance.postgres.address }');
+        expect(mainTf).toContain('{ "name" : "DB_NAME", "value" : aws_db_instance.postgres.db_name }');
         expect(mainTf).not.toContain('"${aws_db_instance.postgres.address}"');
         expect(mainTf).not.toContain('"${aws_db_instance.postgres.db_name}"');
 
@@ -328,9 +344,9 @@ describe('multi-engine database generation', () => {
         expect(databaseTf).toContain('engine            = "mysql"');
         expect(databaseTf).toContain('engine_version    = "8.0"');
         expect(databaseTf).toContain('from_port       = 3306');
-        expect(mainTf).toContain('{ "name": "DB_PORT", "value": "3306" }');
-        expect(mainTf).toContain('{ "name": "DB_ENGINE", "value": "mysql" }');
-        expect(mainTf).toContain('{ "name": "DB_HOST", "value": aws_db_instance.postgres.address }');
+        expect(mainTf).toContain('{ "name" : "DB_PORT", "value" : "3306" }');
+        expect(mainTf).toContain('{ "name" : "DB_ENGINE", "value" : "mysql" }');
+        expect(mainTf).toContain('{ "name" : "DB_HOST", "value" : aws_db_instance.postgres.address }');
         // RDS MySQL db_name is alphanumeric-only: dashes are stripped, not underscored.
         expect(databaseTf).toContain('db_name  = replace(local.app_name, "-", "")');
         expect(databaseTf).not.toContain('replace(local.app_name, "-", "_")');
@@ -350,9 +366,9 @@ describe('multi-engine database generation', () => {
         expect(databaseTf).toContain('max_capacity             = 2');
         expect(databaseTf).toContain('seconds_until_auto_pause = 300');
         expect(databaseTf).toContain('ignore_changes = [availability_zones]');
-        expect(mainTf).toContain('{ "name": "DB_HOST", "value": aws_rds_cluster.postgres.endpoint }');
-        expect(mainTf).toContain('{ "name": "DB_NAME", "value": aws_rds_cluster.postgres.database_name }');
-        expect(mainTf).toContain('{ "name": "DB_ENGINE", "value": "aurora-postgresql" }');
+        expect(mainTf).toContain('{ "name" : "DB_HOST", "value" : aws_rds_cluster.postgres.endpoint }');
+        expect(mainTf).toContain('{ "name" : "DB_NAME", "value" : aws_rds_cluster.postgres.database_name }');
+        expect(mainTf).toContain('{ "name" : "DB_ENGINE", "value" : "aurora-postgresql" }');
         expect(mainTf).toContain('aws_rds_cluster.postgres.master_user_secret[0].secret_arn');
         // Aurora database_name is alphanumeric-only: dashes are stripped, not underscored.
         expect(databaseTf).toContain('database_name   = replace(local.app_name, "-", "")');
@@ -689,9 +705,9 @@ describe('Infrastructure Generator: --target lambda', () => {
         const mainTf = await readTf('main.tf');
         expect(mainTf).toContain('vpc_config {');
         expect(mainTf).toContain('DB_PASSWORD = random_password.db_password.result');
-        expect(mainTf).toContain('DB_USER = "dbadmin"');
+        expect(mainTf).toContain('DB_USER     = "dbadmin"');
         if (engine !== 'postgres') {
-            expect(mainTf).toContain(`DB_ENGINE = "${engine}"`);
+            expect(mainTf).toContain(`DB_ENGINE   = "${engine}"`);
         }
 
         const databaseTf = await readTf('database.tf');
@@ -927,5 +943,300 @@ describe('Lambda generator helpers', () => {
         expect(once).toContain('hashicorp/random');
         expect(addRandomProvider(once)).toBe(once);
         expect(addRandomProvider('unrelated')).toBe('unrelated');
+    });
+});
+
+describe('R18: sleep auto-vars guards (plan-identity fixtures)', () => {
+    const r18Dir = path.join(process.cwd(), 'tests', '.tmp-r18-env');
+
+    function dummyConfig(target, overrides = {}) {
+        return {
+            PROJECT_NAME: 'test-r18',
+            REGION: 'us-east-2',
+            PORT: '8000',
+            CPU: '256',
+            MEMORY: '512',
+            COMPUTE_TIER: 'Micro',
+            ESTIMATED_COST: '30.00',
+            STATE_BUCKET: 'test-bucket-123',
+            AWS_ACCOUNT_ID: '123456789012',
+            HEALTH_CHECK_PATH: '/health',
+            DESIRED_COUNT: '2',
+            DEPLOY_BRANCH: 'main',
+            BUILD_DIR: '',
+            finalFramework: 'node',
+            NEEDS_DATABASE: false,
+            TARGET: target,
+            DISABLE_DEFAULT_CI: false,
+            PROCFILE: null,
+            VERCEL_RULES: null,
+            VERCEL_EDGE_ROUTING: '',
+            DOCKER_COMPOSE: null,
+            ENABLE_PR_PREVIEWS: false,
+            TASK_COMMAND: '',
+            WORKER_COMMAND: '',
+            DB_ENV_VARS: '',
+            COMPOSE_WEB_ENV_VARS: '',
+            EXTRA_CONTAINERS: '',
+            TASK_SECRETS: '',
+            INITIAL_SECRET_MAP: '{\n  }',
+            SAFE_ALB_NAME: 'test-alb',
+            ...overrides,
+        };
+    }
+
+    afterAll(async () => {
+        await fs.rm(r18Dir, { recursive: true, force: true });
+    });
+
+    it('ecs desired_count guards on var.asleep with the configured count intact', async () => {
+        const dir = path.join(r18Dir, 'ecs');
+        await generateTemplates(dir, dummyConfig('ecs'));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        // Un-slept plans stay identical: the false branch is the configured
+        // literal, so asleep=false reproduces today's values exactly.
+        expect(mainTf).toContain('desired_count          = var.asleep ? 0 : 2');
+    });
+
+    it('variables.tf declares asleep defaulting to false on every target', async () => {
+        for (const target of ['ecs', 'lambda', 'static']) {
+            const dir = path.join(r18Dir, target);
+            await generateTemplates(dir, dummyConfig(target));
+            const variables = await fs.readFile(path.join(dir, 'terraform', 'variables.tf'), 'utf-8');
+            expect(variables).toContain('variable "asleep"');
+            expect(variables).toMatch(/default\s*=\s*false/);
+        }
+    });
+
+    it('cron addon templates pin the scheduler state while asleep', async () => {
+        for (const tpl of ['cron.tf', 'cron-lambda.tf']) {
+            const content = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'addons', tpl), 'utf-8');
+            expect(content).toContain('var.asleep ? "DISABLED" : "ENABLED"');
+        }
+    });
+
+    it('worker.tf keeps desired_count ignored (autoscaling-owned, no guard needed)', async () => {
+        const content = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'worker.tf'), 'utf-8');
+        expect(content).toContain('ignore_changes = [desired_count]');
+        expect(content).not.toContain('var.asleep');
+    });
+});
+
+describe('M2: GradaProject default tag in all provider blocks', () => {
+    const PROVIDER_FILES = [
+        'terraform/main.tf',
+        'terraform/main-lambda.tf',
+        'terraform/static/main.tf',
+    ];
+
+    it('every default_tags block pins GradaProject to the project name', async () => {
+        for (const rel of PROVIDER_FILES) {
+            const content = await fs.readFile(path.join(process.cwd(), 'templates', rel), 'utf-8');
+            const blocks = content.match(/default_tags\s*\{[\s\S]*?\n  \}/g) || [];
+            expect(blocks.length, rel).toBeGreaterThan(0);
+            for (const block of blocks) {
+                expect(block, rel).toContain('ManagedBy');
+                expect(block, rel).toContain('GradaProject = "{{PROJECT_NAME}}"');
+            }
+        }
+    });
+
+    it('rendered output carries the project tag value', async () => {
+        const dir = path.join(process.cwd(), 'tests', '.tmp-m2-tag');
+        try {
+            await generateTemplates(dir, {
+                PROJECT_NAME: 'taggy',
+                REGION: 'us-east-2',
+                PORT: '8000',
+                CPU: '256',
+                MEMORY: '512',
+                COMPUTE_TIER: 'Micro',
+                ESTIMATED_COST: '30.00',
+                STATE_BUCKET: 'taggy-bucket-123',
+                AWS_ACCOUNT_ID: '123456789012',
+                HEALTH_CHECK_PATH: '/health',
+                DESIRED_COUNT: '1',
+                DEPLOY_BRANCH: 'main',
+                BUILD_DIR: '',
+                finalFramework: 'node',
+                NEEDS_DATABASE: false,
+                TARGET: 'ecs',
+                DISABLE_DEFAULT_CI: false,
+                PROCFILE: null,
+                VERCEL_RULES: null,
+                VERCEL_EDGE_ROUTING: '',
+                DOCKER_COMPOSE: null,
+                ENABLE_PR_PREVIEWS: false,
+                TASK_COMMAND: '',
+                WORKER_COMMAND: '',
+                DB_ENV_VARS: '',
+                COMPOSE_WEB_ENV_VARS: '',
+                EXTRA_CONTAINERS: '',
+                TASK_SECRETS: '',
+                INITIAL_SECRET_MAP: '{\n  }',
+                SAFE_ALB_NAME: 'taggy-alb',
+            });
+            const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+            expect(mainTf).toContain('GradaProject = "taggy"');
+            expect(mainTf).not.toContain('{{PROJECT_NAME}}');
+        } finally {
+            await fs.rm(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('Compose merge safety', () => {
+    const dir = path.join(process.cwd(), 'tests', '.tmp-compose-safety');
+
+    function ecsConfig(overrides = {}) {
+        return {
+            PROJECT_NAME: 'composy',
+            REGION: 'us-east-2',
+            PORT: '3000',
+            CPU: '256',
+            MEMORY: '512',
+            COMPUTE_TIER: 'Micro',
+            ESTIMATED_COST: '30.00',
+            STATE_BUCKET: 'composy-bucket-123',
+            AWS_ACCOUNT_ID: '123456789012',
+            HEALTH_CHECK_PATH: '/health',
+            DESIRED_COUNT: '1',
+            DEPLOY_BRANCH: 'main',
+            BUILD_DIR: '',
+            finalFramework: 'nextjs',
+            NEEDS_DATABASE: false,
+            DISABLE_DEFAULT_CI: false,
+            PROCFILE: null,
+            VERCEL_RULES: null,
+            VERCEL_EDGE_ROUTING: '',
+            DOCKER_COMPOSE: null,
+            ENABLE_PR_PREVIEWS: false,
+            TASK_COMMAND: '',
+            WORKER_COMMAND: '',
+            DB_ENV_VARS: '',
+            COMPOSE_WEB_ENV_VARS: '',
+            EXTRA_CONTAINERS: '',
+            TASK_SECRETS: '',
+            INITIAL_SECRET_MAP: '{\n  }',
+            SAFE_ALB_NAME: 'composy-alb',
+            ...overrides,
+        };
+    }
+
+    async function readTf(name) {
+        return fs.readFile(path.join(dir, 'terraform', name), 'utf-8');
+    }
+
+    beforeEach(async () => {
+        await fs.rm(dir, { recursive: true, force: true });
+        await fs.mkdir(path.join(dir, '.github', 'workflows'), { recursive: true });
+    });
+
+    afterEach(async () => {
+        await fs.rm(dir, { recursive: true, force: true });
+        vi.restoreAllMocks();
+    });
+
+    it('skips the merge entirely for datastore-only compose files', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        await generateTemplates(dir, ecsConfig({
+            DOCKER_COMPOSE: [
+                { name: 'postgres', image: 'postgres:16', port: 5432, build: null, command: 'postgres -c max_connections=200', environment: { POSTGRES_USER: 'app', POSTGRES_PASSWORD: 's3cret' } },
+                { name: 'valkey', image: 'valkey/valkey:8', port: 6379, build: null, environment: {} },
+            ],
+        }));
+        const mainTf = await readTf('main.tf');
+        expect(mainTf).not.toContain('5432');
+        expect(mainTf).not.toContain('POSTGRES_USER');
+        expect(mainTf).not.toContain('POSTGRES_PASSWORD');
+        expect(mainTf).not.toContain('postgres -c max_connections=200');
+        expect(mainTf).not.toContain('valkey');
+        expect(mainTf).toContain('containerPort = 3000');
+        expect(logSpy.mock.calls.flat().join('\n')).toContain('No app service detected');
+    });
+
+    it('prefers the build service and merges its env, not the datastore', async () => {
+        await generateTemplates(dir, ecsConfig({
+            DOCKER_COMPOSE: [
+                { name: 'postgres', image: 'postgres:16', port: 5432, build: null, environment: { POSTGRES_USER: 'app' } },
+                { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, environment: { APP_KEY: 'yes' } },
+            ],
+        }));
+        const mainTf = await readTf('main.tf');
+        expect(mainTf).toContain('APP_KEY');
+        // POSTGRES_USER may survive inside the postgres sidecar's own
+        // env block, but must not leak into the web container def.
+        const webDef = mainTf.slice(0, mainTf.indexOf('name      = "postgres"'));
+        expect(webDef).not.toContain('POSTGRES_USER');
+    });
+
+    it('withholds secret-like web env and escapes quotes in safe values', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        await generateTemplates(dir, ecsConfig({
+            DOCKER_COMPOSE: [
+                {
+                    name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' },
+                    environment: {
+                        APP_NAME: 'composy',
+                        GREETING: 'say "hi"',
+                        POSTGRES_PASSWORD: 's3cret',
+                        DATABASE_URL: 'postgres://app:s3cret@db:5432/app',
+                    },
+                },
+            ],
+        }));
+        const mainTf = await readTf('main.tf');
+        expect(mainTf).toContain('APP_NAME');
+        expect(mainTf).toContain('say \\"hi\\"');
+        expect(mainTf).not.toContain('POSTGRES_PASSWORD');
+        expect(mainTf).not.toContain('s3cret');
+        expect(mainTf).not.toContain('DATABASE_URL');
+        const logged = logSpy.mock.calls.flat().join('\n');
+        expect(logged).toContain('POSTGRES_PASSWORD');
+        expect(logged).toContain('secrets push');
+    });
+
+    it('withholds secret-like web env on lambda targets too', async () => {
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        await generateTemplates(dir, ecsConfig({
+            TARGET: 'lambda',
+            DOCKER_COMPOSE: [
+                {
+                    name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' },
+                    environment: { APP_KEY: 'yes', AUTH_TOKEN: 'tok123' },
+                },
+            ],
+        }));
+        const mainTf = await readTf('main.tf');
+        expect(mainTf).toContain('APP_KEY');
+        expect(mainTf).not.toContain('AUTH_TOKEN');
+        expect(mainTf).not.toContain('tok123');
+    });
+
+    it('withholds secret-like sidecar env too', async () => {
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        await generateTemplates(dir, ecsConfig({
+            DOCKER_COMPOSE: [
+                { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, environment: {} },
+                { name: 'cache', image: 'myapp-cache:latest', port: null, build: null, environment: { CACHE_TOKEN: 'abc', CACHE_SIZE: '128' } },
+            ],
+        }));
+        const mainTf = await readTf('main.tf');
+        expect(mainTf).toContain('CACHE_SIZE');
+        expect(mainTf).not.toContain('CACHE_TOKEN');
+        expect(mainTf).not.toContain('abc');
+    });
+
+    it('renders sidecars non-essential while the app stays essential', async () => {
+        await generateTemplates(dir, ecsConfig({
+            DOCKER_COMPOSE: [
+                { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, environment: {} },
+                { name: 'cache', image: 'myapp-cache:latest', port: null, build: null, environment: {} },
+            ],
+        }));
+        const mainTf = await readTf('main.tf');
+        const sidecarBlock = mainTf.slice(mainTf.indexOf('name      = "cache"'));
+        expect(sidecarBlock).toContain('essential = false');
+        expect(mainTf).toContain('essential = true');
     });
 });

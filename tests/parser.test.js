@@ -48,6 +48,8 @@ describe('CLI Argument Parser', () => {
         expect(headless.initOptions).toEqual({
             with: [],
             force: false,
+            offline: false,
+            adoptState: false,
             model: null,
             domain: null,
             zoneId: null,
@@ -58,6 +60,8 @@ describe('CLI Argument Parser', () => {
             setupCiDrift: false,
         });
         expect(parseCliArgs(['--force']).initOptions.force).toBe(true);
+        expect(parseCliArgs(['--offline']).initOptions.offline).toBe(true);
+        expect(parseCliArgs(['--adopt-state']).initOptions.adoptState).toBe(true);
 
         const interactive = parseCliArgs(['init', '--with', 'db:redis']);
         expect(interactive.isPreconfigured).toBe(false);

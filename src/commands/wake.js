@@ -1,23 +1,27 @@
+import path from 'path';
 import { spawnSync } from 'child_process';
 import { ECSClient, DescribeServicesCommand, UpdateServiceCommand } from '@aws-sdk/client-ecs';
 import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, StartDBInstanceCommand, StartDBClusterCommand } from '@aws-sdk/client-rds';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure } from '../core/telemetry.js';
+import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
-import { findDbTarget } from '../utils/rds.js';
-import { fetchActiveService } from '../utils/ecs.js';
+import { requireManagedTree } from '../utils/terraform-metadata.js';
+import { findDbTarget, dbStatusOf } from '../utils/rds.js';
+import { fetchActiveService, detectTaskFailure } from '../utils/ecs.js';
 import { pollUntil } from '../utils/system.js';
 import {
     resolveSleepTarget,
     readSleepState,
-    removeSleepStateEntry,
+    guardSleepingEnv,
+    clearSleepAutoTfvars,
     resolveTargetIntercept,
     reportSleepWakeSkip,
 } from '../utils/sleep-state.js';
+import { runTerraformCommand, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
 import {
     readCronScheduleName,
     hasCronAddon,
@@ -42,7 +46,18 @@ export function parseWakeArgs(argv = []) {
     return options;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runWake(input = {}) {
+    setActiveCommandName('wake');
+    try {
+        return await runWakeMain(input);
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function runWakeMain(input = {}) {
     const options = normalizeOptions(input);
     let cwd;
     let region;
@@ -76,6 +91,13 @@ export async function runWake(input = {}) {
             resultExtra: { cluster: target.cluster, region },
         });
     }
+
+    // Ejected trees are user-owned: refuse unless --force. Runs before
+    // the intercepts so ejected static trees refuse instead of skipping.
+    const managedTree = await requireManagedTree({
+        cwd, command: 'wake', options, event: 'wake_run', projectName,
+    });
+    if (!managedTree.proceed) return managedTree.result;
 
     // Scale-to-zero intercept: static targets have no compute or database,
     // so there is nothing to wake. Runs before any state read or AWS call.
@@ -236,7 +258,7 @@ export async function runWake(input = {}) {
                     const current = isCluster
                         ? (resp.DBClusters || [])[0] || null
                         : (resp.DBInstances || [])[0] || null;
-                    if (current && current.Status === 'available') return { done: true, value: current };
+                    if (dbStatusOf(current, isCluster ? 'cluster' : 'instance') === 'available') return { done: true, value: current };
                     s.message(`Waiting for ${dbTarget.id}... [${Math.floor(elapsedMs / 1000)}s]`);
                     return { done: false };
                 },
@@ -285,6 +307,16 @@ export async function runWake(input = {}) {
 
         if (restored.length === 0 && !dbTarget) {
             s.stop(color.yellow('Nothing to wake.'));
+            // The ledger entry is stale (infra vanished out-of-band): clear
+            // it so later commands stop seeing a ghost asleep env, and drop
+            // a stale auto-vars marker with it — otherwise the next apply
+            // would provision with asleep=true. No restore apply: there is
+            // nothing to restore (an apply here would CREATE infra).
+            await guardSleepingEnv({
+                cwd, envKey: target.envKey, options, command: 'wake',
+                mode: 'clear-on-success', projectName, clearedBy: 'wake-nothing',
+            });
+            if (Object.keys(readSleepState(cwd)).length === 0) clearSleepAutoTfvars(cwd);
             return failCommand({
                 print: () => {
                     if (isLambda) {
@@ -347,6 +379,12 @@ export async function runWake(input = {}) {
 
         if (!noWait && restored.length > 0) {
             s.message('Waiting for ECS tasks to start...');
+            const waitClock = options.nowFn || Date.now;
+            const waitStartMs = waitClock();
+            const restoredNames = restored.map((r) => r.name);
+            const probeFailure = () => detectTaskFailure({
+                ecsClient, cluster: target.cluster, services: restoredNames, sinceMs: waitStartMs,
+            });
             const outcome = await pollUntil({
                 intervalMs: pollIntervalMs,
                 timeoutMs,
@@ -355,7 +393,7 @@ export async function runWake(input = {}) {
                 onTick: async ({ elapsedMs }) => {
                     const resp = await ecsClient.send(new DescribeServicesCommand({
                         cluster: target.cluster,
-                        services: restored.map((r) => r.name),
+                        services: restoredNames,
                     }));
                     const services = resp.services || [];
                     const ready = restored.every(({ name, desired }) => {
@@ -363,19 +401,50 @@ export async function runWake(input = {}) {
                         return svc && (svc.runningCount ?? 0) >= desired;
                     });
                     if (ready) return { done: true, value: true };
+                    // Active failure detection: crash-loops and unpullable
+                    // images mean fatal, not slow start — short-circuit
+                    // instead of exhausting the timeout.
+                    const failure = await probeFailure();
+                    if (failure.kind) {
+                        return { done: true, value: failure };
+                    }
                     s.message(`Waiting for ECS tasks... [${Math.floor(elapsedMs / 1000)}s]`);
                     return { done: false };
                 },
             });
-            if (outcome.timedOut) {
-                s.stop(color.yellow('ECS tasks still starting.'));
+            const shortCircuited = outcome.value && typeof outcome.value === 'object' ? outcome.value : null;
+            if (shortCircuited?.kind) {
+                const isPullFailure = shortCircuited.kind === 'pull-failure';
+                s.stop(color.yellow(isPullFailure ? 'ECS tasks cannot start.' : 'ECS tasks are crashing.'));
                 return failCommand({
                     print: () => {
-                        console.log(color.yellow('\n⚠ ECS tasks did not reach the desired count in time.'));
+                        console.log(color.yellow(isPullFailure
+                            ? '\n⚠ ECS tasks cannot start: the image cannot be pulled.'
+                            : '\n⚠ ECS tasks are crashing instead of starting.'));
+                        console.log(`  Most recent failure: ${shortCircuited.detail}`);
                         console.log(`  The restore was applied — check progress with ${color.green('npx grada-run status')}.\n`);
                     },
                     event: 'wake_run',
-                    telemetry: { projectName, env_kind: target.envKind },
+                    telemetry: { projectName, env_kind: target.envKind, crash_detected: true, stopped_tasks: shortCircuited.stoppedTasks },
+                    errorCode: isPullFailure ? 'ECS_WAKE_PULL_FAILURE' : 'ECS_WAKE_CRASH_LOOP',
+                    reason: isPullFailure ? 'ecs-wake-pull-failure' : 'ecs-wake-crash-loop',
+                    resultExtra: { cluster: target.cluster, region },
+                });
+            }
+            if (outcome.timedOut) {
+                s.stop(color.yellow('ECS tasks still starting.'));
+                // Best-effort root cause for the timeout message: a single
+                // crash sits below the short-circuit threshold but still
+                // explains the wait.
+                const failure = await probeFailure();
+                return failCommand({
+                    print: () => {
+                        console.log(color.yellow('\n⚠ ECS tasks did not reach the desired count in time.'));
+                        if (failure.detail) console.log(`  Most recent failure: ${failure.detail}`);
+                        console.log(`  The restore was applied — check progress with ${color.green('npx grada-run status')}.\n`);
+                    },
+                    event: 'wake_run',
+                    telemetry: { projectName, env_kind: target.envKind, crash_detected: failure.detail !== null, stopped_tasks: failure.stoppedTasks },
                     errorCode: 'ECS_WAKE_TIMEOUT',
                     reason: 'ecs-wake-timeout',
                     resultExtra: { cluster: target.cluster, region },
@@ -383,7 +452,42 @@ export async function runWake(input = {}) {
             }
         }
 
-        removeSleepStateEntry(cwd, target.envKey);
+        await guardSleepingEnv({
+            cwd, envKey: target.envKey, options, command: 'wake',
+            mode: 'clear-on-success', projectName, clearedBy: 'wake',
+        });
+
+        // Terraform-visible restore: when this wake cleared the last asleep
+        // entry, delete the auto-vars marker BEFORE reconciling so the
+        // apply restores desired counts instead of re-pinning 0. Other
+        // envs still asleep keep the marker (and skip the apply).
+        let restoreApplied = false;
+        if (Object.keys(readSleepState(cwd)).length === 0 && clearSleepAutoTfvars(cwd)) {
+            const runTerraform = options.runTerraformImpl || runTerraformCommand;
+            const tfDir = path.join(cwd, 'terraform');
+            try {
+                s.message('Restoring Terraform state...');
+                await runTerraform(['apply', '-auto-approve'], tfDir, s, 'Restoring', {
+                    markerDir: cwd,
+                    timeoutMs: DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS,
+                });
+                restoreApplied = true;
+            } catch (error) {
+                s.stop(color.red('Restore apply failed.'));
+                return failCommand({
+                    print: () => {
+                        console.log(color.red('\n✖ Services were restored, but the Terraform reconcile failed.'));
+                        console.log(`  Live state and Terraform state disagree — run ${color.green('npx grada-run apply')} to reconcile them.`);
+                        console.log(color.dim(`  Terraform said: ${error?.message || error}\n`));
+                    },
+                    event: 'wake_run',
+                    telemetry: { projectName, env_kind: target.envKind },
+                    errorCode: 'WAKE_RESTORE_FAILED',
+                    reason: 'restore-apply-failed',
+                    resultExtra: { cluster: target.cluster, region },
+                });
+            }
+        }
 
         s.stop(color.green('Environment awake. ☀️'));
         console.log('');
@@ -419,6 +523,7 @@ export async function runWake(input = {}) {
             waited: !noWait,
             cron_resumed: cronResumed,
             scaling_resumed: scalingResumed,
+            restore_applied: restoreApplied,
         });
         outro(color.green('Done.'));
         return {
@@ -431,6 +536,7 @@ export async function runWake(input = {}) {
             waited: !noWait,
             cronResumed,
             scalingResumed,
+            restoreApplied,
         };
     } catch (error) {
         await trackFailure('wake_run', {

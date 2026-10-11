@@ -5,7 +5,7 @@ import color from 'picocolors';
 import { getAiAssistants } from '../utils/prompts.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
 import { readTerraformComputeTarget } from '../utils/resolvers.js';
-import { trackEvent, flushTelemetry } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 
 function getProjectContext(cwd) {
@@ -27,7 +27,18 @@ function getProjectContext(cwd) {
     return context;
 }
 
+// Programmatic entry wrapper: stamps cli_command for telemetry on every
+// invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function syncAi() {
+    setActiveCommandName('sync_ai');
+    try {
+        return await syncAiMain();
+    } finally {
+        resetActiveCommandName();
+    }
+}
+
+async function syncAiMain() {
     intro(color.bgCyan(color.black(' grada sync-ai 🤖 ')));
 
     const assistants = await getAiAssistants();
