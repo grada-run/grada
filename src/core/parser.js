@@ -46,6 +46,29 @@ export function parseCliArgs(processArgs) {
         return null;
     };
 
+    // Boolean-or-value flags: bare `--flag` reads true, `--flag=value`
+    // and `--flag value` read the value, absent reads false. Empty values
+    // degrade to bare (a blank command is meaningless).
+    const getBoolOrValueFlag = (flagName) => {
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            if (typeof arg !== 'string') continue;
+            if (arg.startsWith(`--${flagName}=`)) {
+                const value = arg.slice(flagName.length + 3);
+                return value === '' ? true : value;
+            }
+            if (arg === `--${flagName}`) {
+                const next = args[i + 1];
+                if (typeof next === 'string' && next !== '' && !next.startsWith('--')) {
+                    consumed.add(i + 1);
+                    return next;
+                }
+                return true;
+            }
+        }
+        return false;
+    };
+
     // 4. Parse execution flags
     const isHeadless = args.includes('--headless');
     const isDryRun = args.includes('--dry-run');
@@ -106,7 +129,7 @@ export function parseCliArgs(processArgs) {
         fromEmail: getValueFlag('from-email'),
         dbEngine: getValueFlag('db-engine'),
         target: getValueFlag('target'),
-        setupCiMigrate: args.includes('--setup-ci-migrate'),
+        setupCiMigrate: getBoolOrValueFlag('setup-ci-migrate'),
         setupCiDrift: args.includes('--setup-ci-drift'),
     };
 

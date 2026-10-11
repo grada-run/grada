@@ -91,6 +91,16 @@ describe('CLI Argument Parser', () => {
         expect(parseCliArgs(['--setup-ci-drift']).initOptions.setupCiDrift).toBe(true);
     });
 
+    it('parses --setup-ci-migrate with an optional explicit command', () => {
+        expect(parseCliArgs(['--setup-ci-migrate=node ./dist/migrate.cjs']).initOptions.setupCiMigrate)
+            .toBe('node ./dist/migrate.cjs');
+        const spaced = parseCliArgs(['--headless', '--setup-ci-migrate', 'node ./dist/migrate.cjs']);
+        expect(spaced.initOptions.setupCiMigrate).toBe('node ./dist/migrate.cjs');
+        expect(spaced.baseCommand).toBe('init');
+        expect(parseCliArgs(['--setup-ci-migrate']).initOptions.setupCiMigrate).toBe(true);
+        expect(parseCliArgs([]).initOptions.setupCiMigrate).toBe(false);
+    });
+
     it('treats valueless addon flags as absent', () => {
         const result = parseCliArgs(['--headless', '--model', '--domain=', '--with']);
         expect(result.initOptions.model).toBeNull();

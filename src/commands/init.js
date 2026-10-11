@@ -309,9 +309,16 @@ async function mainStackMain(input = {}) {
     }
     const willHaveWorker = target !== 'lambda' && target !== 'static' && (Boolean(procfile?.worker) || workerCommandHcl !== '');
 
-    // Pre-deploy migration gate: explicit flag wins, else prompt.
-    const migrationCmd = capabilities.migration.command;
-    const setupCiMigrateFlag = initOptions.setupCiMigrate === true;
+    // Pre-deploy migration gate: explicit flag wins, else prompt. An
+    // explicit --setup-ci-migrate=<cmd> overrides detection, which is the
+    // escape hatch when detection yields an npm shim on a stripped runner.
+    const setupCiMigrateOpt = initOptions.setupCiMigrate;
+    const explicitMigrationCmd = typeof setupCiMigrateOpt === 'string' && setupCiMigrateOpt.trim() !== ''
+        ? setupCiMigrateOpt.trim()
+        : null;
+    const setupCiMigrateFlag = setupCiMigrateOpt === true || typeof setupCiMigrateOpt === 'string';
+    const migrationCmd = explicitMigrationCmd || capabilities.migration.command;
+    const migrationCmdSource = explicitMigrationCmd ? 'explicit' : 'detected';
     let migrationGateEnabled = false;
     if ((target === 'lambda' || target === 'static') && (setupCiMigrateFlag || (config.needsDatabase && migrationCmd))) {
         log.warn(color.yellow(`⚠️  Skipping the pre-deploy migration gate: it runs migrations as an ephemeral ECS task, which ${target === 'static' ? 'static' : 'Lambda'} targets don't provision. Run migrations from CI against your database endpoint instead.`));
@@ -320,34 +327,33 @@ async function mainStackMain(input = {}) {
             migrationGateEnabled = true;
         } else if (isInteractive) {
             const gateAnswer = await confirm({
-                message: `Enable pre-deploy database migration gate in GitHub Actions? (detected: ${migrationCmd})`,
+                message: `Enable pre-deploy database migration gate in GitHub Actions? (${migrationCmdSource}: ${migrationCmd})`,
                 initialValue: true,
             });
             if (typeof gateAnswer === 'symbol') process.exit(0);
             migrationGateEnabled = gateAnswer === true;
         }
     } else if (setupCiMigrateFlag) {
-        log.warn(color.yellow('⚠️  --setup-ci-migrate was passed but no database is configured or no migration command was detected; skipping the migration gate.'));
+        log.warn(color.yellow('⚠️  --setup-ci-migrate was passed but no database is configured or no migration command was given; skipping the migration gate.'));
     }
 
     // Stripped-runner guard: init is about to generate a node
-    // Dockerfile without npm/npx, so wiring a detected npm-shim command
-    // into the gate would fail 100% of deploys. Fail fast headless (the
-    // gate can be wired later with an explicit node command); warn loudly
-    // interactively and continue.
+    // Dockerfile without npm/npx, so wiring an npm-shim command into the
+    // gate would fail 100% of deploys. Fail fast headless (re-run with an
+    // explicit node command); warn loudly interactively and continue.
     if (migrationGateEnabled && isNpmShimCommand(migrationCmd) && target === 'ecs' && frameworkUsesStrippedRunner(config.framework)) {
         if (!isInteractive) {
             return failCommand({
                 message: `\n✖ Refusing to wire the pre-deploy migration gate with "${migrationCmd}": the generated ${config.framework} Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" on every deploy.\n`,
-                hint: '  Re-run without --setup-ci-migrate, then wire the gate with an explicit node-based command, e.g. `grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci`.\n',
+                hint: '  Re-run with an explicit node-based command, e.g. `--setup-ci-migrate="node ./dist/migrate.cjs"`, or wire the gate later with `grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci`.\n',
                 event: 'cli-error',
-                telemetry: { step: 'init_setup', error_code: 'NPM_CMD_STRIPPED_RUNNER' },
+                telemetry: { step: 'init_setup', cmd_source: migrationCmdSource, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
                 errorCode: 'NPM_CMD_STRIPPED_RUNNER',
                 reason: 'npm-cmd-stripped-runner',
             });
         }
-        console.log(color.yellow(`⚠️  The detected migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs").`));
-        trackEvent('npm_cmd_stripped_runner', { projectName: dirConfig.actualProjectName, cmd_source: 'detected', ci_setup: true });
+        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs").`));
+        trackEvent('npm_cmd_stripped_runner', { projectName: dirConfig.actualProjectName, cmd_source: migrationCmdSource, ci_setup: true });
     }
 
     // Scheduled IaC drift detection: explicit flag wins, else offer.

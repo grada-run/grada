@@ -40,7 +40,7 @@ You can append any of these flags to customize the generated architecture. These
 | `--domain=<domain>` | Domain for the SES identity when `email:ses` is included (required in headless mode). | none |
 | `--zone-id=<id>` | Route 53 hosted zone ID for automatic SES DNS records. | none |
 | `--from-email=<email>` | Default SES sender address. | `noreply@<domain>` |
-| `--setup-ci-migrate` | Wire the pre-deploy database migration gate into the generated workflow when a database and migration command are detected. | `false` |
+| `--setup-ci-migrate[=<cmd>]` | Wire the pre-deploy database migration gate into the generated workflow when a database and migration command are detected. An explicit `=<cmd>` overrides detection. | `false` |
 | `--setup-ci-drift` | Scaffold `.github/workflows/drift.yml`: a daily 06:00 UTC `terraform plan` check that opens (or updates) a GitHub Issue labeled `iac-drift` on drift and closes it when resolved. | `false` |
 | `--force` | Re-run over modified files: back them up and regenerate. Without it, headless re-runs over hand edits fail with `MODIFIED_TREE`, and re-runs over ejected projects fail with `EJECTED_PROJECT`. | `false` |
 | `--adopt-state` | Take over existing remote state when the state bucket already holds a key for this project name. Without it, headless inits fail with `STATE_ALREADY_EXISTS`. | `false` |
@@ -90,7 +90,7 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - `destroy` fails with `DATA_LOSS_UNCONFIRMED` when a live database exists (pass `--allow-data-loss` to destroy without the snapshot checkpoint and lift deletion protection — snapshot by hand first if the data matters).
 - A stuck Terraform state lock fails `apply`/`destroy` until released (`--force-unlock <lock-id>`, only when no other run holds it).
 - `eject` fails with `EJECT_WHILE_ASLEEP` on a slept stack (wake first, or pass `--force` to migrate the ledger to `SLEEPING.md`).
-- `db migrate`, `add cron`, and `init --setup-ci-migrate` fail with `NPM_CMD_STRIPPED_RUNNER` when the command needs `npm`/`npx` but the `Dockerfile` strips those binaries — pass an explicit `node ...` command instead.
+- `db migrate`, `add cron`, and `init --setup-ci-migrate` fail with `NPM_CMD_STRIPPED_RUNNER` when the command needs `npm`/`npx` but the `Dockerfile` strips those binaries — pass an explicit `node ...` command instead (`--setup-ci-migrate="node ..."`, `--cmd "node ..."` elsewhere).
 - Re-running setup over modified files fails with `MODIFIED_TREE` (pass `--force` to back up and regenerate).
 - Fresh `init` over a state bucket that already holds this project's key fails with `STATE_ALREADY_EXISTS` (pass `--adopt-state` to take over that state, or rename the project).
 - `wake` fails with `ECS_WAKE_CRASH_LOOP` when restored tasks keep crashing, or `ECS_WAKE_PULL_FAILURE` when a task is stuck `PENDING` on an unpullable image (the message names the most recent failure in both cases), or `ECS_WAKE_TIMEOUT` when tasks never reach the desired count — every path applies the restore first, so inspect with `status` and fix the task before retrying.

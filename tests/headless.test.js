@@ -608,6 +608,62 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('headless --setup-ci-migrate=<cmd> wires the explicit node command past the stripped-runner guard', async () => {
+        process.chdir(tmpDir);
+        // npm-detecting fixture on a stripped runner (the CI validate-addons
+        // shape): detection alone would refuse, but the explicit node
+        // command wins and wires the gate.
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ scripts: { 'db:migrate': 'prisma migrate deploy' } }));
+        const parsed = parseCliArgs(['--headless', '--framework=nestjs', '--needsDatabase', '--setup-ci-migrate=node ./dist/migrate.cjs']);
+        const spies = mockConsoleTrio();
+        const { exitSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expectNoInteractivePrompts();
+            expect(exitSpy).not.toHaveBeenCalled();
+            const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+            expect(deployYml).toContain('# grada:db-migrate-start');
+            expect(deployYml).toContain('node ./dist/migrate.cjs');
+            expect(deployYml).not.toContain('npm run db:migrate');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'project_provisioned',
+                expect.objectContaining({ migration_gate_enabled: true })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('headless --setup-ci-migrate=<npm cmd> still refuses on stripped runners', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ scripts: { 'db:migrate': 'prisma migrate deploy' } }));
+        const parsed = parseCliArgs(['--headless', '--framework=nestjs', '--needsDatabase', '--setup-ci-migrate=npm run db:migrate']);
+        const spies = mockConsoleTrio();
+        const { exitSpy } = spies;
+
+        try {
+            const result = await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(result).toMatchObject({ ok: false, reason: 'npm-cmd-stripped-runner' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(provisionStateBucket).not.toHaveBeenCalled();
+        } finally {
+            spies.restore();
+        }
+    });
+
     it('--offline scaffolds without AWS calls and prints the reconciliation checklist', async () => {
         process.chdir(tmpDir);
         const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--offline']);

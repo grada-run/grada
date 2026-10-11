@@ -1005,6 +1005,10 @@ describe('R18: sleep auto-vars guards (plan-identity fixtures)', () => {
             const variables = await fs.readFile(path.join(dir, 'terraform', 'variables.tf'), 'utf-8');
             expect(variables).toContain('variable "asleep"');
             expect(variables).toMatch(/default\s*=\s*false/);
+            // Lambda/static trees without the cron addon never reference
+            // var.asleep, but sleep still writes `asleep = true` there — so
+            // the declaration stays and tflint is told to stand down.
+            expect(variables).toContain('# tflint-ignore: terraform_unused_declarations\nvariable "asleep"');
         }
     });
 

@@ -159,7 +159,7 @@ jobs:
           printf 'web: node index.js\nworker: node worker.js\n' > Procfile
           node "$GITHUB_WORKSPACE/bin/cli.js" --headless --preconfigured --framework=nestjs --needsDatabase \
             --with storage:s3,db:dynamodb,db:redis,queue:sqs,ai:bedrock,email:ses,cron \
-            --domain example.com --zone-id Z1234567890ABC --setup-ci-migrate
+            --domain example.com --zone-id Z1234567890ABC --setup-ci-migrate="node ./dist/migrate.cjs"
           node "$GITHUB_WORKSPACE/bin/cli.js" domain add example.com --zone-id Z1234567890ABC
           test -f terraform/ses.tf
           test -f terraform/bedrock.tf
