@@ -7,16 +7,10 @@ Inspect recent ECS task failures and CloudWatch logs for the current project.
 
 ## What it does
 
-- Saves you from digging through the AWS console by finding the most recently stopped ECS task for this project and showing why it stopped plus the failing container's recent log events (up to 50 lines).
-- Resolves its inputs automatically: the AWS region from `AWS_REGION`, falling back to `region` in `terraform/main.tf` (default `us-east-2`); the cluster (`<project-name>-cluster`, overridable via `ECS_CLUSTER`); and the log group (`/ecs/<project-name>`, overridable via `ECS_LOG_GROUP`). The project name itself comes from `app_name` in `terraform/main.tf`, falling back to the current directory name.
-- Lists up to 100 recent stopped tasks, describes them in a single batch, and diagnoses the most recently stopped one (by container exit time, falling back to stop/start/creation time): stopped reason, failing container name, exit code, container reason, and how long ago it stopped.
-- Reports recovery instead of a stale crash: when the crash belongs to a superseded task-definition revision, or a running task started after the stop, prints the previous crash as one-line context (no log dump) and exits healthy.
-- Fetches logs from the crashed task's own CloudWatch stream first, falling back to the last hour of group-wide events; reports a missing log group distinctly instead of showing an empty result.
-- Makes no changes to your infrastructure; it is read-only. Prints a healthy message and exits when no stopped tasks exist.
-- On `--target lambda` projects, checks function state and configuration via the AWS CLI and tails the function's recent log events instead of inspecting ECS tasks.
-- On `--target static` projects there is nothing to inspect, so the command fails fast with an unsupported-target error before any AWS lookup — use `status` (distribution state and site URL) instead.
-- On expired AWS credentials, points you to `aws sso login` / `aws configure` and the [AWS credentials guide](/grada/guides/aws-credentials/), then exits with code 1 instead of throwing.
-- Emits a `diagnose_run` telemetry event recording success and whether the service was healthy.
+- Finds the most recently stopped task for this project and shows why it stopped, plus the failing container's recent log events — no console digging.
+- Reports recovery instead of a stale crash: if a newer revision or a running task already superseded it, you get one line of context and a healthy exit.
+- Read-only, and prints a healthy message when nothing stopped. On Lambda projects it checks function state and tails recent log events instead.
+- On static projects there is nothing to inspect — use `status` (distribution state and site URL) instead.
 
 ## Usage
 
@@ -29,7 +23,13 @@ npx grada-run wtf
 
 ## Flags
 
-This command accepts no CLI flags. Region, cluster, and log group are resolved as described above, not from flags.
+This command accepts no CLI flags. Region, cluster, and log group resolve automatically, not from flags.
+
+## Automation & edge cases
+
+- Inputs resolve automatically: region from `AWS_REGION`, falling back to `region` in `terraform/main.tf` (default `us-east-2`); cluster and log group from the project name (overridable via `ECS_CLUSTER` / `ECS_LOG_GROUP`); the project name from `app_name` in `terraform/main.tf`, falling back to the directory name.
+- Diagnoses the most recently stopped of up to 100 recent tasks (by container exit time, with fallbacks): stopped reason, failing container, exit code, and how long ago — with up to 50 log lines from the crashed task's own stream first, then the last hour of group-wide events.
+- On expired credentials, points to `aws sso login` / `aws configure` and the [AWS credentials guide](/grada/guides/aws-credentials/), then exits 1 instead of throwing.
 
 ## See also
 

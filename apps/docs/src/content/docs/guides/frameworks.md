@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-`grada` is designed to be as "zero-config" as possible. During setup, it inspects your repo (`src/utils/detector.js`) and preselects a framework preset. However, because different frameworks have unique internal architectures (especially around network binding and build outputs), a few frameworks require minor application-level tweaks to run securely in a Dockerized AWS Fargate environment.
+`grada` is designed to be as "zero-config" as possible. During setup, it inspects your repo and preselects a framework preset. However, because different frameworks have unique internal architectures (especially around network binding and build outputs), a few frameworks require minor application-level tweaks to run securely in a Dockerized AWS Fargate environment.
 
 ## The 3-tier support philosophy
 

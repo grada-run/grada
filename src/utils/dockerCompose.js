@@ -13,6 +13,8 @@ export const DATASTORE_IMAGE_PATTERNS = [
     'valkey', 'keydb', 'mongo', 'memcached', 'elasticsearch',
     'opensearch', 'cassandra', 'scylla', 'rabbitmq', 'kafka',
     'zookeeper', 'clickhouse', 'cockroach', 'neo4j', 'influxdb',
+    'timescale', 'timescaledb', 'surrealdb', 'meilisearch', 'typesense',
+    'nats', 'qdrant', 'dragonfly', 'couchdb', 'hazelcast',
 ];
 
 // True when an image reference names a datastore: the last path segment
@@ -124,10 +126,19 @@ export function parseDockerCompose(targetDir) {
             // Extract the container port (e.g., "8080:80" -> 80)
             let exposedPort = null;
             if (config.ports && config.ports.length > 0) {
-                // Handle different port formats like "3000" or "8000:8000" or "127.0.0.1:8001:8001"
-                const portMapping = config.ports[0].toString();
-                const parts = portMapping.split(':');
-                exposedPort = parseInt(parts[parts.length - 1].replace(/[^0-9]/g, ''), 10);
+                const firstPort = config.ports[0];
+                if (firstPort !== null && typeof firstPort === 'object') {
+                    // Long syntax: { target, published } — target is the
+                    // container side, matching short-syntax last-segment.
+                    const target = Number(firstPort.target ?? firstPort.published);
+                    exposedPort = Number.isFinite(target) ? target : null;
+                } else {
+                    // Handle different port formats like "3000" or "8000:8000" or "127.0.0.1:8001:8001"
+                    const portMapping = String(firstPort);
+                    const parts = portMapping.split(':');
+                    const parsed = parseInt(parts[parts.length - 1].replace(/[^0-9]/g, ''), 10);
+                    exposedPort = Number.isFinite(parsed) ? parsed : null;
+                }
             }
 
             // Normalize environment variables from Array or Object

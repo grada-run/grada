@@ -26,10 +26,11 @@ function resolveActualProjectName(rawName) {
     return actualProjectName;
 }
 
-export async function getTargetDirectory(isHeadless, headlessOptions) {
+export async function getTargetDirectory(isHeadless, headlessOptions, overrides = {}) {
+    const explicitName = typeof overrides.projectName === 'string' ? overrides.projectName.trim() : '';
     if (isHeadless) {
         const projectName = headlessOptions.dir || '.';
-        const rawName = projectName === '.' ? path.basename(process.cwd()) : projectName;
+        const rawName = explicitName !== '' ? explicitName : (projectName === '.' ? path.basename(process.cwd()) : projectName);
         return {
             projectName,
             actualProjectName: resolveActualProjectName(rawName),
@@ -52,7 +53,7 @@ export async function getTargetDirectory(isHeadless, headlessOptions) {
         process.exit(0);
     }
 
-    const rawName = projectName === '.' ? path.basename(process.cwd()) : projectName;
+    const rawName = explicitName !== '' ? explicitName : (projectName === '.' ? path.basename(process.cwd()) : projectName);
     return {
         projectName,
         actualProjectName: resolveActualProjectName(rawName),

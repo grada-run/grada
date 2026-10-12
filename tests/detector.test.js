@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { analyzeNextConfig, detectFramework, detectMigrationCommand, frameworkDefaultPort, frameworkUsesStrippedRunner, isNpmShimCommand, dockerfileStripsNpmShims } from '../src/utils/detector.js';
+import { analyzeNextConfig, detectFramework, detectMigrationCommand, frameworkDefaultPort, frameworkUsesStrippedRunner, isNpmShimCommand, dockerfileStripsNpmShims, toHclStringArray } from '../src/utils/detector.js';
 
 function makeProject(files = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-migrate-'));
@@ -211,5 +211,27 @@ describe('stripped-runner detection', () => {
         expect(dockerfileStripsNpmShims('FROM node:22-alpine\nRUN npm ci\n')).toBe(false);
         expect(dockerfileStripsNpmShims('')).toBe(false);
         expect(dockerfileStripsNpmShims(null)).toBe(false);
+    });
+
+    it('ignores marker mentions in comments but not quoted hashes before a real strip', () => {
+        // Comment-only mention: no strip, no guard trip.
+        expect(dockerfileStripsNpmShims('FROM node:22-alpine\n# we used to rm /usr/local/bin/npx here\nRUN npm ci\n')).toBe(false);
+        // Trailing comment after a real strip still counts.
+        expect(dockerfileStripsNpmShims('FROM node:22-alpine\nRUN rm -rf /usr/local/bin/npx # slim the image\n')).toBe(true);
+        // A quoted hash earlier on the line must not hide a real strip.
+        expect(dockerfileStripsNpmShims('FROM node:22-alpine\nRUN echo "#" && rm -rf /usr/local/bin/npx\n')).toBe(true);
+    });
+});
+
+describe('toHclStringArray', () => {
+    it('renders multi-element arrays with fmt-canonical spacing', () => {
+        expect(toHclStringArray(['node', './dist/worker.cjs'])).toBe('["node", "./dist/worker.cjs"]');
+        expect(toHclStringArray(['sh', '-c', 'node server.js'])).toBe('["sh", "-c", "node server.js"]');
+    });
+
+    it('handles single elements and JSON escaping', () => {
+        expect(toHclStringArray(['node worker.js'])).toBe('["node worker.js"]');
+        expect(toHclStringArray(['echo', 'say "hi"'])).toBe('["echo", "say \\"hi\\""]');
+        expect(toHclStringArray([])).toBe('[]');
     });
 });

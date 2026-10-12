@@ -1,6 +1,6 @@
 # Resource Naming Hardening: Entropy Suffix (Item 3) + Bucket Adoption Warnings (Item 4)
 
-Status: **draft for review** — no implementation. Follow-up to the items 1/2/5
+Status: Shipped. Follow-up to the items 1/2/5
 fixes (broadened collision classifier, `--framework` fail-fast, unified
 bucket-name sanitization).
 

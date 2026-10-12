@@ -7,14 +7,10 @@ Verify your machine is ready to provision and deploy, telling you exactly which 
 
 ## What it does
 
-- Checks for the four required binaries — `terraform`, `aws` (AWS CLI), `docker`, and `git` — and prints a pass/fail line for each with an install hint for anything missing (Homebrew on macOS, distro-appropriate guidance on Linux, `winget` on native Windows). When `CI` is set, failed Terraform and AWS CLI checks append a CI-specific hint (e.g., `hashicorp/setup-terraform`).
-- Verifies your AWS credentials are active and valid (the SDK equivalent of `aws sts get-caller-identity`). Expired SSO tokens or missing profiles fail the `AWS Credentials` line with recovery guidance (`aws sso login` or `aws configure`) instead of a false-positive green light. The probe has a 15-second ceiling: hung enterprise SSO wrappers resolve to a clean failure rather than wedging the run, and no check can crash `doctor` before results print.
-- Downgrades a missing AWS CLI to a warning when live SDK credentials resolve (common with enterprise SSO wrappers that don't put `aws` on `PATH`): the run stays green, but SSM tunnels (`grada db connect`, `grada exec`) stay unavailable until the CLI is installed.
-- Inside a grada project (a `terraform/` directory is present), additionally runs project checks: a held Terraform state lock (a `.tflock` object in the state bucket, which would fail the next apply/destroy) reports red, and an interrupted previous run (Ctrl+C or crash mid-apply) reports a yellow warning. Outside a project these checks report as skipped.
-- Groups results into two labeled sections — `System Environment` (the five toolchain lines above) and `Project State` (the project lines, or the skipped notice when run outside a project) — so host-machine health never reads as project health.
-- Makes no changes to your project or cloud resources; it is a read-only check.
-- Prints a success message when everything is present, a credentials reminder when only auth fails, or a reminder to install the missing dependencies first.
-- Emits a `doctor_run` telemetry event recording whether all checks passed, per-check booleans (`check_terraform`, `check_aws_cli`, `check_aws_auth`, `check_docker`, `check_git`, plus `check_state_lock` and `check_interrupted_run` inside projects), the stable-ID outcomes (`passed_checks`, `failed_checks`, `total_failed` — never paths or error text), and on failure a specific `error_code` (`MISSING_TERRAFORM`, `AWS_CLI_UNCONFIGURED`, …) with its kebab-case `reason`.
+- Checks for `terraform`, `aws`, `docker`, and `git`, printing a pass/fail line for each with an install hint for anything missing.
+- Verifies your AWS credentials are actually valid — expired SSO tokens fail the line with recovery guidance instead of a false green.
+- Inside a grada project, additionally checks for a held Terraform state lock and an interrupted previous run; outside a project these report as skipped.
+- Results group into `System Environment` (your machine) and `Project State` (your project), so host health never reads as project health. Read-only — it changes nothing.
 
 ## Usage
 
@@ -28,6 +24,12 @@ npx grada-run doctor --deep
 | Flag | Description |
 | ---- | ----------- |
 | `--deep` | Show the state-lock holder details (who/what holds the lock) when the state-lock check fails. Costs one extra S3 read. |
+
+## Automation & edge cases
+
+- In CI, failed Terraform/AWS CLI checks append CI-specific hints (e.g. `hashicorp/setup-terraform`).
+- A missing AWS CLI downgrades to a warning when live SDK credentials resolve (common with enterprise SSO wrappers) — the run stays green, but SSM tunnels stay unavailable until the CLI is installed.
+- The credential probe has a 15-second ceiling, and no check can crash `doctor` before results print.
 
 ## See also
 

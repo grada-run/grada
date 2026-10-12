@@ -7,14 +7,11 @@ Take permanent, sole ownership of your infrastructure files when you no longer w
 
 ## What it does
 
-- Asks for explicit confirmation (defaulting to "No"); declining cancels with no changes. With `--yes` (or the global `--headless` flag), ejection proceeds without prompting.
-- Refuses to eject an asleep stack blindly: ejecting while ECS is at 0 and RDS is stopped would hand over Terraform that disagrees with live state, so a raw `terraform apply` would half-wake it (tasks up, database still down). Interactively you are offered to wake first; headless runs refuse with an `EJECT_WHILE_ASLEEP` error unless `--force` is passed, in which case the sleep ledger migrates into a committed `SLEEPING.md` handoff doc (recorded desired counts, database state, and wake-without-grada commands).
-- Strips grada metadata from your local files: removes the `# grada generated infrastructure` header and the `default_tags { tags = { ManagedBy = "grada", GradaProject = "<project>" } }` block from `terraform/main.tf`, and removes the `# grada backups` block from `.gitignore`. Tag blocks you extended with your own tags are left untouched.
-- Recursively deletes every `*.bak.*` backup file in the project (skipping `node_modules` and `.git`).
-- Writes a committed `STATE_BUCKET_CLEANUP.md` runbook with the exact manual commands to empty and delete the state bucket (eject never deletes the bucket itself — the state is your only map of live infra), plus secrets-rotation notes and start commands for any stopped databases.
-- Leaves your infrastructure fully operational as raw, standalone Terraform. As a final step, run `terraform apply` inside `terraform/` so AWS syncs state and removes the live `ManagedBy` tags.
-- Records the ejection in gitignored local state (`.grada/ejected.json`) plus a committed `.grada-ejected` sentinel, so later `add` runs warn and render new files without managed headers to match the vanilla tree, re-running `init` asks for explicit confirmation (or `--force`) before re-applying managed metadata — and fresh clones refuse to silently re-manage the tree.
-- Emits a `project_ejected` telemetry event. This cannot be undone.
+- Asks for explicit confirmation (defaulting to "No"); declining cancels with no changes. **This cannot be undone.**
+- Strips grada metadata from your files and deletes local backup files, leaving your infrastructure fully operational as raw, standalone Terraform — finish with `terraform apply` inside `terraform/`.
+- Refuses to eject an asleep stack blindly (the handed-over Terraform would disagree with live state) — wake first when offered.
+- Writes a committed `STATE_BUCKET_CLEANUP.md` runbook with the manual state-bucket teardown commands (eject never deletes the bucket itself).
+- Later `add` runs warn and match the vanilla tree, and re-running `init` asks before re-applying managed metadata.
 
 ## Usage
 
@@ -30,6 +27,12 @@ npx grada-run eject --yes
 | `--yes` | Skip the confirmation prompt for non-interactive runs. |
 | `--force` | Eject even while the stack is asleep (the sleep ledger migrates to `SLEEPING.md`); also re-manages ejected trees. |
 | `--headless` | Global automation flag; implies `--yes` for this command. |
+
+## Automation & edge cases
+
+- Headless runs refuse asleep stacks with `EJECT_WHILE_ASLEEP` unless `--force` is passed, migrating the ledger to a committed `SLEEPING.md` handoff (recorded desired counts, database state, wake-without-grada commands). Full catalog: [Headless Mode](/grada/guides/headless/).
+- Removed metadata: the `# grada generated infrastructure` header and `ManagedBy`/`GradaProject` tag block from `terraform/main.tf`, the `# grada backups` block from `.gitignore`, and every `*.bak.*` file (skipping `node_modules` and `.git`). Tag blocks you extended stay untouched.
+- Ejection is recorded in gitignored `.grada/ejected.json` plus a committed `.grada-ejected` sentinel, so fresh clones refuse to silently re-manage the tree.
 
 ## See also
 

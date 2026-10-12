@@ -12,7 +12,6 @@ Catch console click-ops before they surprise you: compare live AWS state against
 - `--setup-ci-drift` scaffolds the same workflow during `grada` scaffolding.
 - The scheduled workflow runs daily at 06:00 UTC (plus a manual `workflow_dispatch` trigger): on drift it opens (or updates, without spamming) a GitHub Issue labeled `iac-drift` with the plan diff; when drift resolves it comments `✅ Drift resolved` and closes the issue.
 - Set a `SLACK_WEBHOOK_URL` repository secret to also post drift alerts to Slack.
-- Emits a `drift_run` telemetry event recording the action and outcome.
 
 ## Usage
 

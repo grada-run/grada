@@ -7,7 +7,7 @@ import { COST_ESTIMATE_MARKER, LEGACY_COST_ESTIMATE_MARKER } from './visualizer.
 import { findResourceBlock, replaceBlock, normalizeBlankLines, realignAssignmentRuns } from './hcl.js';
 import { atomicWriteFile } from './atomic-write.js';
 import { selectComposeWebService, partitionComposeEnv } from './dockerCompose.js';
-import { frameworkDefaultPort } from './detector.js';
+import { frameworkDefaultPort, toHclStringArray } from './detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -309,7 +309,7 @@ export async function generateTemplates(targetDir, config) {
     // If a Procfile exists and has a 'web' process, override the Docker CMD
     if (config.PROCFILE && config.PROCFILE.web) {
         // e.g., ["gunicorn", "myproject.wsgi"] -> JSON string for Terraform
-        config.TASK_COMMAND = `command = ${JSON.stringify(config.PROCFILE.web)}`;
+        config.TASK_COMMAND = `command = ${toHclStringArray(config.PROCFILE.web)}`;
     } else {
         // Fallback to the default Dockerfile CMD
         config.TASK_COMMAND = '';
@@ -319,7 +319,7 @@ export async function generateTemplates(targetDir, config) {
     // via `image_config`. Omitted when empty (Dockerfile CMD wins).
     if (isLambda && Array.isArray(config.PROCFILE?.web) && config.PROCFILE.web.length > 0) {
         const webCommand = config.PROCFILE.web.map((part) => String(part)).join(' ');
-        config.LAMBDA_IMAGE_CONFIG = `  image_config {\n    command = ${JSON.stringify(['sh', '-c', webCommand])}\n  }\n`;
+        config.LAMBDA_IMAGE_CONFIG = `  image_config {\n    command = ${toHclStringArray(['sh', '-c', webCommand])}\n  }\n`;
     } else {
         config.LAMBDA_IMAGE_CONFIG = '';
     }
@@ -332,7 +332,7 @@ export async function generateTemplates(targetDir, config) {
     if (hasComputeWorkers && typeof config.WORKER_COMMAND === 'string' && config.WORKER_COMMAND.trim() !== '') {
         filesToProcess.push({ src: 'terraform/worker.tf', dest: 'terraform/worker.tf' });
     } else if (hasComputeWorkers && config.PROCFILE && config.PROCFILE.worker) {
-        config.WORKER_COMMAND = `command = ${JSON.stringify(config.PROCFILE.worker)}`;
+        config.WORKER_COMMAND = `command = ${toHclStringArray(config.PROCFILE.worker)}`;
         // Dynamically add worker.tf to the generation list
         filesToProcess.push({ src: 'terraform/worker.tf', dest: 'terraform/worker.tf' });
     } else {
@@ -417,11 +417,11 @@ export async function generateTemplates(targetDir, config) {
 
             // Extract Web Command Override (only if Procfile hasn't already set it)
             if (webService.command && !config.TASK_COMMAND && !isLambda) {
-                config.TASK_COMMAND = `command = ${JSON.stringify(typeof webService.command === 'string' ? webService.command.split(' ') : webService.command)}`;
+                config.TASK_COMMAND = `command = ${toHclStringArray(typeof webService.command === 'string' ? webService.command.split(' ') : webService.command)}`;
             }
             if (isLambda && webService.command && config.LAMBDA_IMAGE_CONFIG === '') {
                 const composeCommand = typeof webService.command === 'string' ? webService.command : webService.command.join(' ');
-                config.LAMBDA_IMAGE_CONFIG = `  image_config {\n    command = ${JSON.stringify(['sh', '-c', composeCommand])}\n  }\n`;
+                config.LAMBDA_IMAGE_CONFIG = `  image_config {\n    command = ${toHclStringArray(['sh', '-c', composeCommand])}\n  }\n`;
             }
 
             // Process Sidecar Containers (e.g., Redis, Memcached)
@@ -440,7 +440,7 @@ export async function generateTemplates(targetDir, config) {
                         .map(([k, v]) => `{ "name" : "${k}", "value" : "${String(v).replace(/"/g, '\\"')}" }`)
                         .join(',\n        ');
 
-                    const sidecarCmd = service.command ? `\n      command = ${JSON.stringify(typeof service.command === 'string' ? service.command.split(' ') : service.command)}` : '';
+                    const sidecarCmd = service.command ? `\n      command = ${toHclStringArray(typeof service.command === 'string' ? service.command.split(' ') : service.command)}` : '';
 
                     return `,
     {

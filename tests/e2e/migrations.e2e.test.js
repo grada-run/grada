@@ -147,7 +147,7 @@ describe('Migrations: Heroku Procfile + Postgres', () => {
             const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env });
             expect(init.status).toBe(0);
             const workerTf = readTf(dir, 'worker.tf');
-            expect(workerTf).toContain('command = ["node","worker.js"]');
+            expect(workerTf).toContain('command = ["node", "worker.js"]');
             validateTerraform(dir);
         });
     });
@@ -215,7 +215,7 @@ describe('Migrations: Docker Compose sidecars', () => {
             expect(mainTf).toContain('"postgres"');
             expect(mainTf).toContain('4567');
             expect(mainTf).toContain('API_URL');
-            expect(mainTf).toContain('command = ["node","server.js"]');
+            expect(mainTf).toContain('command = ["node", "server.js"]');
             validateTerraform(dir);
         });
     });

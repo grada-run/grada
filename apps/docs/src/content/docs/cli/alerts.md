@@ -7,15 +7,11 @@ Scaffolds notification infrastructure for your deployment: an SNS topic plus a t
 
 ## What it does
 
-- Detects the compute target from `terraform/main.tf` and scaffolds the matching alarm into `terraform/alerts.tf`:
-  - **ECS:** `HTTPCode_Target_5XX_Count` on the ALB (default: more than 10 5xx in 2 minutes, mirroring the dashboard alarm).
-  - **Lambda:** `Errors` on the app function (default: more than 5 errors in 5 minutes).
-  - **Static:** `5xxErrorRate` on the CloudFront distribution (default: more than 5% over 5 minutes). CloudWatch only serves CloudFront metrics from `us-east-1`, so the topic, alarm, and forwarder are pinned to the `aws.us_east_1` provider alias — `alerts` adds the alias to `terraform/main.tf` when it is missing.
+- Detects the compute target and scaffolds the matching alarm into `terraform/alerts.tf`: ALB 5xx rate on ECS, function errors on Lambda, CloudFront 5xx rate on static.
 - `--email` bakes an SNS email subscription into the file (the recipient still clicks a confirmation link — no surprise subscriptions).
-- `--webhook` adds a scale-to-zero Node.js forwarding Lambda that adapts alarm notifications to Slack, Discord, or generic JSON payloads. The webhook URL is a bearer secret: it stays out of git in the sensitive `alerts_webhook_url` variable (`export TF_VAR_alerts_webhook_url=...` before `apply`), and the `archive` provider it needs is pinned in `terraform/backend.tf`.
-- Run with no flags in a terminal, `alerts` prompts for a destination (Email, Webhook, or Both) and validates it before writing. In CI / non-TTY shells it scaffolds the topic + alarm and prints the manual subscribe steps instead of prompting.
+- `--webhook` adds a scale-to-zero forwarding Lambda posting to Slack, Discord, or generic JSON endpoints. The webhook URL is a bearer secret: it stays out of git in the sensitive `alerts_webhook_url` variable (`export TF_VAR_alerts_webhook_url=...` before `apply`).
+- Run with no flags, `alerts` prompts for a destination (Email, Webhook, or Both) and validates it before writing.
 - Refuses to overwrite an existing `alerts.tf` without `--force`.
-- Emits an `alerts_run` telemetry event recording the target and destination kinds only — never the address or URL.
 
 ## Usage
 
@@ -43,6 +39,12 @@ npx grada-run apply
 | `--threshold <number>` | Alarm threshold override. Counts for ECS/Lambda, percent (0–100) for static. |
 | `--force` | Overwrite an existing `terraform/alerts.tf`. |
 | `--region <region>` | Explicit AWS region override. |
+
+## Automation & edge cases
+
+- Alarm defaults: more than 10 ALB 5xx in 2 minutes (ECS), more than 5 function errors in 5 minutes (Lambda), more than 5% 5xx over 5 minutes (static).
+- CloudWatch only serves CloudFront metrics from `us-east-1`, so static projects pin the topic, alarm, and forwarder to the `aws.us_east_1` provider alias — added to `terraform/main.tf` automatically when missing.
+- In CI / non-TTY shells, `alerts` scaffolds the topic + alarm and prints manual subscribe steps instead of prompting.
 
 ## See also
 

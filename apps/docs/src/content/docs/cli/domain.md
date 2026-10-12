@@ -12,9 +12,7 @@ Serve your application from your own domain with automated edge TLS — no manua
 - Without `--zone-id`, you get a guided 2-step flow for external DNS providers (Cloudflare, Namecheap): `domain add` stages the certificate, `domain status` shows the exact CNAME records to paste, and `domain verify` activates the domain once DNS is in place.
 - `domain status` shows the configured domain, its mode, whether CloudFront is wired, and a copy-paste DNS record table.
 - `domain remove` deletes the domain configuration and restores the free `*.cloudfront.net` default certificate.
-- PR preview workspaces are unaffected: domain resources are scoped to the production workspace, so previews keep serving over their own `*.cloudfront.net` URL and teardowns never touch your certificate, aliases, or DNS.
 - Domain configuration lives in `terraform/domain.tf`, so `destroy` tears it down and `eject` keeps it automatically.
-- Emits a `domain_run` telemetry event recording the subcommand and outcome.
 
 ## Usage
 
@@ -49,6 +47,11 @@ To replace a configured domain, run `domain add <new-domain>` again with `--forc
 Requires a project initialized with `grada` (`terraform/cloudfront.tf` must exist).
 
 > **One domain per project:** each project manages a single custom domain. Need apex plus `www`? Configure the apex here and add a redirect rule for `www` at your DNS provider.
+
+## Automation & edge cases
+
+- Domain resources are scoped to the production workspace: previews keep serving over their own `*.cloudfront.net` URL, and preview teardowns never touch your certificate, aliases, or DNS.
+- `domain remove` needs `--yes` in headless/CI mode.
 
 ## See also
 

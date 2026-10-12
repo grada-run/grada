@@ -7,15 +7,9 @@ Instant health dashboard for your deployment. Exits cleanly when healthy; hands 
 
 ## What it does
 
-- Queries ECS (`desiredCount` vs `runningCount`/`pendingCount`) and project-prefixed CloudWatch alarms.
-- Prints a color-coded dashboard: service status, replicas (green/yellow/red), alarm states, and live Golden Signals (ALB requests/5xx/p95, ECS CPU/memory, DB ACU or CPU plus connections over the last 15 minutes).
-- Signals read standard AWS metrics only — no custom metrics are created, and any telemetry failure degrades to `null` sections without failing the health check.
-- If degraded (`runningCount < desiredCount` or any alarm firing), prints the degraded notice, invokes `diagnose`, and exits 1.
-- Resolves region like `logs` (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`); cluster, service, and log group default to `<project-name>-cluster`, `<project-name>-service`, `/ecs/<project-name>` (overridable via `ECS_CLUSTER` / `ECS_SERVICE` / `ECS_LOG_GROUP`).
-- On `--target lambda` projects, reads function state via the AWS CLI (which must be installed) instead of ECS, printing function state, last update status, memory/timeout, and deployed image. Signals are `null` on Lambda for now.
-- On `--target static` projects, reports CloudFront distribution status (`Deployed` vs propagating) and the site URL instead of ECS.
-- On [ejected](/grada/cli/eject/) projects, warns that the tree is user-owned but still reports (read-only commands never refuse).
-- Emits a `status_run` telemetry event recording health and outcome.
+- Prints a color-coded dashboard: service status, replica counts, alarm states, and live Golden Signals (traffic, errors, latency, CPU/memory, database load).
+- When degraded, hands off to `diagnose` automatically and exits 1; exits cleanly when healthy.
+- On Lambda projects reports function state and deployed image instead; on static projects, CloudFront distribution status and the site URL.
 
 ## Usage
 
@@ -32,6 +26,12 @@ npx grada-run status --watch
 | `--json` | Output the raw status payload as JSON; disables auto-diagnose. |
 | `--watch` | Repaint the dashboard every 10 seconds until interrupted; skips auto-diagnose (diagnosis stays manual). Ignored when combined with `--json`. |
 | `--region <region>` | Explicit AWS region override. |
+
+## Automation & edge cases
+
+- Degraded means `runningCount < desiredCount` or any alarm firing. Signals read standard AWS metrics only (no custom metrics); a metrics failure degrades to `null` sections without failing the check, and signals are `null` on Lambda.
+- Inputs resolve automatically: region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`), cluster/service/log group from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE` / `ECS_LOG_GROUP`).
+- On [ejected](/grada/cli/eject/) projects, warns that the tree is user-owned but still reports — read-only commands never refuse.
 
 ## See also
 

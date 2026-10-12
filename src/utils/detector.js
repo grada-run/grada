@@ -50,9 +50,27 @@ export function isNpmShimCommand(cmd) {
 // True when a Dockerfile removes the npx binary from its runtime image
 // (the Grada node-family templates all carry this line). Any Dockerfile
 // that strips npx breaks npm-shim task commands, Grada-authored or not.
+// Comment-aware: a `#`-comment mentioning the path must not trip the
+// guard, but a quoted hash earlier on the line must not hide a real
+// strip either — cut each line at the first unquoted `#`.
 export function dockerfileStripsNpmShims(content) {
     if (typeof content !== 'string' || content === '') return false;
-    return content.includes('/usr/local/bin/npx');
+    return content.split('\n').some((line) => stripDockerComment(line).includes('/usr/local/bin/npx'));
+}
+
+function stripDockerComment(line) {
+    let quote = null;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (quote) {
+            if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") {
+            quote = ch;
+        } else if (ch === '#') {
+            return line.slice(0, i);
+        }
+    }
+    return line;
 }
 
 // Detects the framework based on the presence of framework-specific files.
@@ -144,6 +162,13 @@ export function splitProcfileCommand(rawCommand) {
     const match = String(rawCommand || '').match(/[^\s"']+|"([^"]*)"|'([^']*)'/g);
     if (!match) return [];
     return match.map(str => str.replace(/^["']|["']$/g, '')); // Strip the quotes
+}
+
+// Renders a string array the way `terraform fmt` canonicalizes it:
+// JSON with ", " separators. Bare JSON.stringify joins with "," and
+// fails `fmt -check` on any multi-element command.
+export function toHclStringArray(values) {
+    return `[${(Array.isArray(values) ? values : []).map((v) => JSON.stringify(String(v))).join(', ')}]`;
 }
 
 // Parses a Heroku/Render Procfile and formats the commands for Terraform ECS.

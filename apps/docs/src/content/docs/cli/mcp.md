@@ -7,11 +7,9 @@ Let AI coding assistants inspect and operate your infrastructure directly — st
 
 ## What it does
 
-- Serves 5 tools over STDIO (the default): `analyze_stack` (framework/compute detection), `add_primitive` (headless `grada add`), `stack_status` (live ECS/Lambda health), `fetch_logs` (CloudWatch logs), and `audit_secrets` (local vs AWS secrets drift, key names only).
-- Keeps the JSON-RPC stream pure: command output is captured during tool calls and internal `process.exit` failures are converted into structured error results, so the server survives errors instead of crashing.
-- Serves the same tools over stateless Streamable HTTP (`--transport http`) on `/mcp` for your own tunnels and container hosts. The HTTP transport is user-hosted only (Grada runs no central instance) and has no authentication: bind it to localhost or expose it only behind a trusted tunnel you control.
-- Installs the server entry into your editor's MCP config with `--install <editor>` (`windsurf`, `zed`, `cursor`, `vscode`, `claude-desktop`, `gemini-cli`), preserving existing keys and servers.
-- Emits an `mcp_install` telemetry event on installs; tool calls emit the wrapped command's own telemetry with the real command name.
+- Serves 5 tools over STDIO (the default): `analyze_stack` (stack analysis), `add_primitive` (headless addon provisioning), `stack_status` (live health), `fetch_logs` (CloudWatch logs), and `audit_secrets` (secrets drift, key names only).
+- Serves the same tools over stateless Streamable HTTP (`--transport http`) on `/mcp` for your own tunnels and container hosts. User-hosted only with no authentication: bind it to localhost or expose it only behind a trusted tunnel you control.
+- Installs the server entry into your editor's MCP config with `--install <editor>`, preserving existing keys and servers.
 
 ## Usage
 
@@ -37,6 +35,10 @@ Manual config for any other MCP client (Claude Code plugins, Cline, Continue):
 - `--transport <stdio|http>`: transport to serve (default: `stdio`).
 - `--port <n>`: HTTP port, 1–65535 (default: `3000`). HTTP only.
 - `--host <addr>`: HTTP bind address (default: `127.0.0.1`). HTTP only; binding a non-loopback address prints a no-auth warning.
+
+## Automation & edge cases
+
+- Tool calls capture command output and convert internal failures into structured error results, so the server survives errors instead of crashing the JSON-RPC stream.
 
 ## See also
 

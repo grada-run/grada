@@ -56,6 +56,7 @@ describe('CLI Argument Parser', () => {
             fromEmail: null,
             dbEngine: null,
             target: null,
+            projectName: null,
             setupCiMigrate: false,
             setupCiDrift: false,
         });
@@ -89,6 +90,14 @@ describe('CLI Argument Parser', () => {
         expect(joined.initOptions.fromEmail).toBe('hi@example.com');
         expect(joined.initOptions.setupCiMigrate).toBe(true);
         expect(parseCliArgs(['--setup-ci-drift']).initOptions.setupCiDrift).toBe(true);
+    });
+
+    it('parses --project-name in space and equals forms', () => {
+        expect(parseCliArgs(['--project-name=newname']).initOptions.projectName).toBe('newname');
+        const spaced = parseCliArgs(['--headless', '--project-name', 'newname']);
+        expect(spaced.initOptions.projectName).toBe('newname');
+        expect(spaced.baseCommand).toBe('init');
+        expect(parseCliArgs(['--headless']).initOptions.projectName).toBeNull();
     });
 
     it('parses --setup-ci-migrate with an optional explicit command', () => {

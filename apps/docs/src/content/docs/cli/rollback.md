@@ -7,15 +7,11 @@ Two layers of deployment safety: your infrastructure rolls back bad deployments 
 
 ## What it does
 
-- Your ECS service ships with a deployment circuit breaker — if a new deployment fails its health checks, AWS automatically rolls it back without you lifting a finger.
-- `rollback` takes you back to a previous task definition revision on demand: pass a revision number, or pick from an interactive list showing each revision's container image and registration date.
-- In automation and CI (or with `--headless`), it defaults to the most recent older revision with no prompt.
-- On a fresh stack it says so precisely instead of failing opaquely: a service on its only revision reports the revision number and suggests deploying again to create rollback history; a never-deployed service points you to `grada apply`.
-- Resolves its inputs automatically: cluster (`<project-name>-cluster`, overridable via `ECS_CLUSTER`), service (`<project-name>-service`, overridable via `ECS_SERVICE`), and region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`). `--workspace` targets a PR-preview environment's namespaced service.
-- Watches the rollback deployment until it stabilizes (up to 5 minutes), and points you to `status` and `logs` if it fails or times out.
-- ECS only: on `--target lambda` projects the command exits with the Lambda-native alternative — redeploy a previous image with `aws lambda update-function-code` (list SHA tags via `aws ecr describe-images`). On `--target static` projects it exits with the same guard — static sites have no revisions, so push to redeploy. Wrong-target refusals exit 3 (distinct from failure's 1 and strict-skip's 2) so automation can tell them apart.
-- On an asleep environment, proceeds with a warning (the restore targets stopped services) — `apply` stays gated until you [`wake`](/grada/cli/sleep/).
-- Emits a `rollback_run` telemetry event recording success and outcome.
+- Your ECS service ships with a deployment circuit breaker — failed deploys roll back automatically, with no action from you.
+- `rollback` returns to a previous task definition revision on demand: pass a revision number, or pick from an interactive list of images and dates.
+- Watches the rollback until it stabilizes (up to 5 minutes), pointing you to `status` and `logs` if it fails or times out.
+- On a fresh stack it says so precisely instead of failing opaquely — deploy again to create rollback history.
+- ECS only: on Lambda projects it prints the Lambda-native alternative (redeploy a previous image); static sites have no revisions, so push to redeploy.
 
 ## Usage
 
@@ -45,6 +41,12 @@ Without a revision number, you'll see an interactive revision selector:
 | `--region <region>` | Explicit AWS region override. |
 | `--workspace <name>` | Roll back the PR-preview environment's service instead of production. |
 | `--skip-wait` | Trigger the rollback and exit immediately without waiting for stabilization. |
+
+## Automation & edge cases
+
+- Headless runs default to the most recent older revision with no prompt. Wrong-target refusals exit 3 (distinct from failure's 1 and strict-skip's 2) so automation can tell them apart. Full catalog: [Headless Mode](/grada/guides/headless/).
+- Inputs resolve automatically: cluster/service from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE`), region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`); `--workspace` targets a PR-preview environment's namespaced service.
+- On an asleep environment, proceeds with a warning (the restore targets stopped services) — `apply` stays gated until you [`wake`](/grada/cli/sleep/).
 
 ## See also
 

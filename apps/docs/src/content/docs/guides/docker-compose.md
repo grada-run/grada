@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-If your repo contains a Compose file (`docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, or `compose.yaml`), setup parses it (`src/utils/dockerCompose.js`) and translates its services into the ECS task definition. Your Compose file keeps working locally, and these are the exact mapping rules that decide what runs in AWS.
+If your repo contains a Compose file (`docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, or `compose.yaml`), setup parses it and translates its services into the ECS task definition. Your Compose file keeps working locally, and these are the exact mapping rules that decide what runs in AWS.
 
 ## File discovery
 
@@ -23,7 +23,7 @@ Datastore images (`postgres`, `mysql`, `redis`, `valkey`, `mongo`, and similar) 
 
 ## Port mapping
 
-The container port is taken from the **last segment of the first port entry** — `"8080:80"` and `"127.0.0.1:8001:8001"` both resolve to the right-hand value (`80` and `8001`). Only the first entry is read, and any non-numeric characters are stripped. This port overrides the configured container port during setup, and the ALB health check targets it.
+The container port is taken from the **last segment of the first port entry** — `"8080:80"` and `"127.0.0.1:8001:8001"` both resolve to the right-hand value (`80` and `8001`). Long-syntax mappings (`{ target, published }`) resolve to `target`, the container side; entries with no parseable port read as no port. Only the first entry is read, and any non-numeric characters are stripped. This port overrides the configured container port during setup, and the ALB health check targets it.
 
 ## Environment and command injection
 

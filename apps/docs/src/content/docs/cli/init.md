@@ -7,18 +7,13 @@ Generate Terraform, Docker, and GitHub Actions files for your project.
 
 ## What it does
 
-- Turns your codebase into a deployable AWS project: auto-detects your framework, `Procfile`, `vercel.json`, and Compose files, warns about framework-specific migration issues (NestJS bind address, Next.js standalone output, SvelteKit/Astro adapters), then provisions the remote-state S3 bucket and synthesizes Terraform, Docker, and CI/CD files.
-- Validates composition flags fail-fast before any prompt, AWS call, backup, or write: an unknown `--framework`, `--db-engine`, `--target`, or `--with` capability returns a validation error naming the supported values instead of scaffolding halfway and crashing.
-- Scans your manifests for infrastructure signals before prompting: database drivers and migration markers pre-select the managed PostgreSQL prompt, worker dependencies pre-fill the background-worker command, and detected capabilities (Redis, SQS, S3, DynamoDB, Bedrock, SES) come pre-checked in the addon picker — every suggestion shows the exact evidence that triggered it (`detected: ioredis, REDIS_URL`). Detection is read-only and skips secret values entirely.
-- Scaffolds selected addons in the same run (same pipeline as [`add`](/grada/cli/add/), including container env injection and README cost refresh), offers to wire the pre-deploy database migration gate into the generated workflow, offers scheduled IaC drift detection (a daily `terraform plan` workflow that opens GitHub Issues), and prints a full stack topology preview when addons are included.
-- Backs up any existing generated files before overwriting them, and writes AI assistant rule files for the assistants you choose (advanced mode) or the ones already present in your repo (quickstart mode). Your own `README.md` is never overwritten: deployment docs go to `README.md` only when it is absent or was previously generated, otherwise to `DEPLOYMENT.md` (or `GRADA.md` when both are yours), with an existing `secret_keys.json` left untouched.
-- Mints a short random resource suffix (6 lowercase hex, e.g. `-a1b2c3`) for every new project and bakes it into account/region-global singleton names — RDS identifiers, the state bucket, ECR repos, secrets, IAM roles, log groups — so two same-named projects in one AWS account stop colliding. The suffix lives in a committed `grada_resource_suffix` Terraform local, so clones and re-runs reuse it (never re-mint); trees scaffolded before suffixes render byte-identical names and see zero drift. (AWS-truncated names — the ALB and target group at 32 chars — carry the full suffix for project names up to 25 characters; longer shared prefixes fail loud on duplicate names.)
-- Refuses to silently adopt existing remote state: when the state bucket already holds a key for a fresh project, interactive runs choose adopt / rename / wipe, while headless runs fail with `STATE_ALREADY_EXISTS` unless `--adopt-state` is passed.
-- Finishes with the exact next steps: the `apply` command to provision, and the `git` commands to commit and push.
-- With `--offline`, skips the state-bucket provisioning and emits `YOUR_AWS_ACCOUNT_ID` placeholders plus a reconciliation checklist instead — for template development and CI fixtures that must not touch AWS.
-- Compose files merge by fixed rules ([Docker Compose Support](/grada/guides/docker-compose/)): the `build:` service (else framework-port match, else first non-datastore service) becomes the web service, secret-like env vars are withheld with a warning, and datastore-only files skip the merge without overriding your port.
-- Writes a fixed-baseline monthly cost estimate into the generated deployment doc, refreshed automatically whenever you later run [`add`](/grada/cli/add/).
-- Emits `project_provisioned` (recording the database engine, detected/selected addons, migration-gate status, drift-detection status, and resource-suffix presence) plus `state_adoption_prompted` / `state_adoption_accepted` / `state_adoption_wiped` and `cli-error` telemetry events (disable with `--no-telemetry`).
+- Turns your codebase into a deployable AWS project: detects your framework, `Procfile`, `vercel.json`, and Compose files, warns about framework-specific gotchas, provisions the remote-state S3 bucket, and writes Terraform, Docker, and CI/CD files.
+- Validates flags fail-fast: an unknown `--framework`, `--db-engine`, `--target`, or `--with` value errors with the supported list before anything is written.
+- Pre-selects prompts from your manifests — database drivers pre-check the database prompt, detected capabilities (Redis, SQS, S3, …) come pre-checked in the addon picker — each showing the evidence that triggered it.
+- Scaffolds addons in the same run, offers the pre-deploy migration gate and scheduled drift detection, and prints a stack topology preview when addons are included.
+- Mints a short random suffix (e.g. `-a1b2c3`) baked into AWS-wide singleton names, so same-named projects never collide; clones and re-runs reuse it, older trees are unaffected.
+- Never silently adopts existing remote state: a fresh project over occupied state asks adopt / rename / wipe (headless fails unless `--adopt-state`).
+- Backs up existing generated files before overwriting, writes AI assistant rules, never overwrites your own `README.md`, and finishes with exact next steps (`apply`, then `git push`).
 
 ## Usage
 
@@ -64,6 +59,7 @@ Not sure which to pick? Choose `ecs` for steady or latency-sensitive traffic, lo
 | `--target <target>` | Compute target: `ecs` (default, `fargate` synonym), `lambda` (scale-to-zero serverless), or `static` (S3 + CloudFront; static-site frameworks and detected static exports only). Skips the interactive target prompt. |
 | `--enablePrPreviews` | Enable ephemeral PR preview environments. |
 | `--dir=<path>` | Target directory for generated files. |
+| `--project-name <name>` | Override the project name (default: directory basename; re-runs reuse the existing tree's name). Renaming a deployed tree provisions a new stack on next apply — the old one is left untouched. |
 | `--preconfigured` | Skip framework-specific warnings (for preconfigured setups). |
 | `--with <capabilities>` | Comma-separated (or repeatable) addon capabilities to scaffold during init (`storage:s3`, `db:dynamodb`, `db:redis`, `queue:sqs`, `ai:bedrock`, `email:ses`, `cron`). Pre-checks the interactive picker, or scaffolds directly in headless mode. |
 | `--model <id>` | Bedrock model override when `ai:bedrock` is included (defaults to the catalog's recommended model). |
@@ -75,6 +71,15 @@ Not sure which to pick? Choose `ecs` for steady or latency-sensitive traffic, lo
 | `--offline` | Scaffold without any AWS calls (for template development and CI fixtures): no state bucket is created, `terraform/backend.tf` and workflow role ARNs get greppable `YOUR_AWS_ACCOUNT_ID` placeholders, and a reconciliation checklist is printed. Reconcile before applying. |
 | `--adopt-state` | Take over existing remote state when the state bucket already holds a key for this project name. Without it, headless inits fail with `STATE_ALREADY_EXISTS`; interactive inits prompt adopt / rename / wipe. |
 | `--no-telemetry` | Disable telemetry for this run (or set `DO_NOT_TRACK=1` for all runs). |
+
+## Automation & edge cases
+
+- Headless runs never prompt — the full automation contract (flags, gates, error codes) lives in [Headless Mode](/grada/guides/headless/).
+- `--offline` scaffolds without AWS calls for template development and CI fixtures: placeholder account IDs plus a printed reconciliation checklist. Reconcile before applying.
+- Detection is read-only and skips secret values entirely; worker dependencies pre-fill the background-worker command.
+- Compose files merge by fixed rules — `build:` service first, then framework-port match, then first non-datastore service; secret-like env vars are withheld with a warning, datastore-only files skip the merge. Full rules: [Docker Compose Support](/grada/guides/docker-compose/).
+- Re-runs keep the tree's project name even if the directory was renamed (warns loudly; `--project-name` renames explicitly), and deployment docs land in `README.md` only when it is absent or was previously generated, otherwise `DEPLOYMENT.md` (or `GRADA.md`), with `secret_keys.json` untouched. Details: [Re-running Init Safely](/grada/guides/rerun-init/).
+- A fixed-baseline cost estimate is written into the deployment doc and refreshed on every later [`add`](/grada/cli/add/).
 
 New here? Start with the [Quickstart](/grada/guides/quickstart/).
 

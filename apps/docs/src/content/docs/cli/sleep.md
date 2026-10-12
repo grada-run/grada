@@ -7,19 +7,12 @@ Pause a non-production or idle environment with a single command, and wake it ba
 
 ## What it does
 
-- `sleep [env]` scales your ECS services (`app` and `worker`, when present) to `0` and stops the RDS instance or Aurora cluster, printing the estimated hourly/monthly compute savings.
-- `sleep` also writes `terraform/sleep.auto.tfvars` (`asleep = true`), so Terraform itself knows the stack is paused: guarded resources (cron schedules, autoscaling) plan to their slept shape instead of fighting the sleep, and adding an un-slept marker changes nothing in the plan. Never edit or commit this file — `wake` deletes it before restoring anything, so wake never fights its own auto-vars.
-- `sleep` refuses when an `add` scaffold is still in progress (a racing or crashed `add` would record a ledger for half-built infrastructure) — re-run in a few seconds, or pass `--force` when your automation sequences commands itself.
-- `wake [env]` starts the database first (waiting until it is `available`), then restores the exact ECS desired counts recorded at sleep time. Waking an already-awake environment is a no-op that issues no AWS writes (`already-awake`). While waiting for tasks, `wake` watches for failure: two distinct fresh stops short-circuit the wait with `ECS_WAKE_CRASH_LOOP`, and a single `PENDING` task with a fatal pull reason (`CannotPullContainerError`, `InspectFailed`, pull backoff) short-circuits immediately with `ECS_WAKE_PULL_FAILURE` — either way the message names the most recent failure (`stoppedReason` + container exit code), and a plain timeout names it too when one exists.
-- `sleep` also pauses the `add cron` schedule (when configured) and suspends SQS worker auto-scaling, so no scheduled task or queued message wakes the environment back up; `wake` resumes both. Schedules that were never deployed and unregistered scaling targets are skipped gracefully.
-- Sleeping the default (production) environment requires confirmation (`--yes` in automation); named environments sleep without prompting.
-- AWS automatically restarts stopped RDS databases after 7 consecutive days — `sleep` prints the exact restart timestamp, and `wake` warns if the window already elapsed.
-- Sleep state lives in `.grada/sleep-state.json` (one entry per environment, gitignored), so `wake` restores your original replica counts even for scaled-out services.
-- On `--target lambda` projects, compute is already scale-to-zero, so `sleep`/`wake` manage only the database (and pause/resume the cron schedule) — no services are scaled or restored. With no database provisioned (or with `--skip-db`), both exit successfully with nothing to do instead of failing.
-- On `--target static` projects there is nothing to pause — no compute or database exists — so `sleep`/`wake` exit successfully before any AWS call or confirmation prompt.
-- Every no-op reports a machine-readable `skipped` reason (`static-target`, `lambda-skip-db`, `lambda-no-database`, `already-awake`) in the result and telemetry, and exits 0. With `--strict`, skips exit 2 instead (distinct from failure's 1) so shell scripts can tell "nothing to do" apart from both success and error; telemetry still records the run as successful.
-- While an environment is asleep, `apply` refuses (offering wake-first interactively, `--force` to override), while `add` and `rollback` proceed with a loud warning that apply will block until you wake.
-- Emits `sleep_run` / `wake_run` telemetry events recording the outcome.
+- `sleep [env]` scales your ECS services to `0` and stops the database, printing the estimated compute savings; `wake [env]` starts the database first, then restores your exact replica counts.
+- Sleeping also pauses the cron schedule and SQS auto-scaling, so nothing wakes the environment back up; `wake` resumes both.
+- Sleeping production needs confirmation (`--yes` in automation); named environments sleep without prompting.
+- AWS restarts stopped databases after 7 days — `sleep` prints the exact restart timestamp.
+- `wake` gives up fast on crashing tasks and tells you why, instead of waiting the full timeout.
+- On Lambda projects only the database sleeps (compute is already scale-to-zero); on static projects there is nothing to pause, so both commands exit successfully with nothing to do.
 
 ## Usage
 
@@ -49,6 +42,14 @@ npx grada-run sleep staging --skip-db
 | `--strict` | Exit 2 (instead of 0) when the command has nothing to do, with the `skipped` reason preserved. |
 
 Both commands are idempotent: re-sleeping an asleep environment (or waking an awake one) reports the current state instead of failing.
+
+## Automation & edge cases
+
+- `wake` short-circuits doomed waits: two fresh task stops fail with `ECS_WAKE_CRASH_LOOP`, a `PENDING` task with a fatal pull reason (`CannotPullContainerError`, …) with `ECS_WAKE_PULL_FAILURE` — both name the failure, and timeouts do too when one exists. Full catalog: [Headless Mode](/grada/guides/headless/).
+- Every no-op reports a machine-readable `skipped` reason (`static-target`, `lambda-skip-db`, `lambda-no-database`, `already-awake`) and exits 0; with `--strict`, skips exit 2 instead (distinct from failure's 1) so scripts can tell "nothing to do" apart from success and error.
+- Terraform stays consistent via a managed `terraform/sleep.auto.tfvars` marker (`asleep = true`) that `wake` deletes before restoring — never edit it by hand. Replica counts live in gitignored `.grada/sleep-state.json`.
+- `sleep` refuses while an `add` scaffold is in progress (`--force` bypasses when your automation sequences commands itself).
+- While asleep, `apply` refuses (wake-first offer / `--force`), while `add` and `rollback` proceed with a loud warning.
 
 ## Cost & billing drivers
 

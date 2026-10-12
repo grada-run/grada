@@ -109,11 +109,24 @@ describe('terraform fmt cleanliness', () => {
     it('ecs + postgres + worker + previews + compose sidecars is fmt-clean', async () => {
         const dir = await freshDir('fmt-ecs-');
         await generateTemplates(dir, baseConfig({
-            PROCFILE: { web: ['node server.js'], worker: ['node worker.js'] },
+            // Multi-element commands: single-element arrays have no comma
+            // and can't catch non-canonical join spacing.
+            PROCFILE: { web: ['node', 'server.js'], worker: ['node', './dist/worker.cjs'] },
             ENABLE_PR_PREVIEWS: true,
             DOCKER_COMPOSE: [
                 { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, environment: { APP_KEY: 'yes' } },
                 { name: 'cache', image: 'myapp-cache:latest', port: null, build: null, environment: { CACHE_SIZE: '128' } },
+            ],
+        }));
+        await expectFmtClean(dir);
+    }, 60000);
+
+    it('ecs + compose web/sidecar commands (no Procfile) is fmt-clean', async () => {
+        const dir = await freshDir('fmt-compose-cmd-');
+        await generateTemplates(dir, baseConfig({
+            DOCKER_COMPOSE: [
+                { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, command: 'node --inspect server.js', environment: { APP_KEY: 'yes' } },
+                { name: 'cache', image: 'redis:7', port: null, build: null, command: ['redis-server', '--appendonly', 'yes'], environment: {} },
             ],
         }));
         await expectFmtClean(dir);
@@ -140,6 +153,7 @@ describe('terraform fmt cleanliness', () => {
         const dir = await freshDir('fmt-lambda-');
         await generateTemplates(dir, baseConfig({
             TARGET: 'lambda', NEEDS_DATABASE: true, DB_ENGINE: 'mysql',
+            PROCFILE: { web: ['python', '-m', 'app'] },
             DOCKER_COMPOSE: [
                 { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, environment: { APP_KEY: 'yes' } },
             ],
@@ -153,6 +167,17 @@ describe('terraform fmt cleanliness', () => {
         expect(cron.ok).toBe(true);
         await expectFmtClean(dir);
     }, 120000);
+
+    it('lambda + compose command (no Procfile) is fmt-clean', async () => {
+        const dir = await freshDir('fmt-lambda-cmd-');
+        await generateTemplates(dir, baseConfig({
+            TARGET: 'lambda',
+            DOCKER_COMPOSE: [
+                { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, command: 'node server.js', environment: {} },
+            ],
+        }));
+        await expectFmtClean(dir);
+    }, 60000);
 
     it('static target is fmt-clean', async () => {
         const dir = await freshDir('fmt-static-');

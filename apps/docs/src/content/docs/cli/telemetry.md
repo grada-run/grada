@@ -3,7 +3,7 @@ title: telemetry
 description: Persistently disable, enable, or inspect anonymous usage telemetry on this machine.
 ---
 
-Control whether `grada` collects anonymous, hashed usage data (framework presets used, deployment success rates). No codebase files, AWS credentials, or personal data are ever collected.
+Control whether `grada` collects anonymous, hashed usage data (framework presets used, deployment success rates). We use it to find breakage and prioritize fixes — never codebase files, AWS credentials, or personal data.
 
 ## What it does
 

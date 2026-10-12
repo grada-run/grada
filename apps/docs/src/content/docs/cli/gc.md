@@ -7,12 +7,9 @@ Dry-run discovery and interactive deletion of orphaned AWS resources left behind
 
 ## What it does
 
-- Scans ECR repositories matching `<project-name>-*` for untagged images and batch-deletes them.
-- Scans CloudWatch log groups under `/ecs/<project-name>-*` (preview leftovers; the live `/ecs/<project-name>` group is never matched) and deletes them. On `--target lambda` projects it scans `/aws/lambda/<project-name>-*` instead, always excluding the live `/aws/lambda/<project-name>-fn` group.
-- Scans Elastic IPs and releases any without an association (stops the hourly unused-EIP charge).
-- Paginates all discovery APIs, so large accounts are fully scanned.
-- Prints a categorized dry-run summary with per-target counts before asking anything.
-- Deep mode (`--deep`) additionally audits VPCs, Secrets Manager secrets, and the Terraform state bucket for leftovers.
+- Finds orphaned ECR images, preview-leftover log groups, and unassociated Elastic IPs — then prints a categorized dry-run summary before asking anything.
+- Never touches live resources: the live log group is always excluded (Lambda scans `/aws/lambda/<project-name>-*` minus the live function group).
+- Deep mode (`--deep`) additionally audits VPCs, secrets, and the state bucket — strictly report-only, never deleted.
 
 ## Usage
 
@@ -31,6 +28,11 @@ npx grada-run gc --yes
 | `--project-name <name>` | Explicit project name override (defaults to `app_name` in `terraform/main.tf`, then the current directory name). |
 | `--deep` | Audit VPCs, secrets, and the state bucket in addition to the standard targets. Deep findings are report-only: nothing in this tier is ever deleted. |
 | `--yes` | Auto-confirm deletion of the standard targets (ECR images, log groups, EIPs) without prompting. Intended for CI; deep findings stay report-only. |
+
+## Automation & edge cases
+
+- `--yes` is the CI hatch for standard-target deletion; deep findings stay report-only with or without it.
+- Discovery paginates fully, so large accounts are completely scanned.
 
 ## Safety
 

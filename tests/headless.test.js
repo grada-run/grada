@@ -506,6 +506,85 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('re-init over a renamed directory keeps the tree project name with a loud warning', async () => {
+        await fs.mkdir(path.join(tmpDir, 'terraform'), { recursive: true });
+        await fs.writeFile(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-b2c3d4"\n  app_name = "origapp${local.env_suffix}${local.grada_resource_suffix}"\n}\n'
+        );
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: { ...parsed.initOptions, force: true },
+            });
+            expect(exitSpy).not.toHaveBeenCalled();
+            // The tmp dir basename differs from the tree name: names must
+            // follow the tree, not the directory, or apply forks the stack.
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf8');
+            expect(mainTf).toContain('app_name = "origapp${local.env_suffix}${local.grada_resource_suffix}"');
+            expect(mainTf).toContain('origapp-b2c3d4-repo');
+            const logged = logSpy.mock.calls.flat().join('\n');
+            expect(logged).toContain('keeping "origapp"');
+            expect(logged).toContain('--project-name');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'init_project_name_reused',
+                expect.objectContaining({ projectName: 'origapp' })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('--project-name explicitly renames on re-init with a fork warning', async () => {
+        await fs.mkdir(path.join(tmpDir, 'terraform'), { recursive: true });
+        await fs.writeFile(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-b2c3d4"\n  app_name = "origapp${local.env_suffix}${local.grada_resource_suffix}"\n}\n'
+        );
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node', '--project-name=newname', '--force']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+            expect(exitSpy).not.toHaveBeenCalled();
+            const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf8');
+            expect(mainTf).toContain('app_name = "newname${local.env_suffix}${local.grada_resource_suffix}"');
+            const logged = logSpy.mock.calls.flat().join('\n');
+            expect(logged).toContain('--project-name "newname" overrides');
+            expect(logged).toContain('"origapp"');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'init_project_name_override',
+                expect.objectContaining({ projectName: 'newname' })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('getTargetDirectory honors an explicit project name override', async () => {
+        process.chdir(tmpDir);
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            const config = await getTargetDirectory(true, { dir: '.' }, { projectName: 'Custom_Name' });
+            expect(config.actualProjectName).toBe('custom-name');
+            expect(config.targetDir).toBe(process.cwd());
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
     it.each([
         ['mysql', 'engine            = "mysql"', '{ "name" : "DB_PORT", "value" : "3306" }'],
         ['aurora-postgresql', 'resource "aws_rds_cluster" "postgres"', '{ "name" : "DB_ENGINE", "value" : "aurora-postgresql" }'],
@@ -757,6 +836,14 @@ describe('Headless contract (automation-safe)', () => {
             expect(provisionStateBucket).not.toHaveBeenCalled();
             const backendTf = await fs.readFile(path.join(tmpDir, 'terraform', 'backend.tf'), 'utf-8');
             expect(backendTf).toContain('YOUR_AWS_ACCOUNT_ID');
+            // The checklist must name the exact backend bucket (suffix and
+            // placeholder included) — recomputing from the bare project
+            // name sends users to create a bucket terraform never uses.
+            const backendBucket = backendTf.match(/bucket\s*=\s*"([^"]+)"/)[1];
+            expect(backendBucket).toContain('-tfstate-YOUR_AWS_ACCOUNT_ID');
+            const loggedEarly = logSpy.mock.calls.flat().join('\n');
+            expect(loggedEarly).toContain(`create-bucket --bucket ${backendBucket} --region`);
+            expect(loggedEarly).not.toContain('<aws-account-id>');
             for (const workflow of ['deploy.yml', 'drift.yml', 'preview.yml', 'teardown.yml']) {
                 const content = await fs.readFile(path.join(tmpDir, '.github', 'workflows', workflow), 'utf-8');
                 expect(content).toContain('YOUR_AWS_ACCOUNT_ID');
@@ -777,9 +864,9 @@ describe('Headless contract (automation-safe)', () => {
         const { printOfflineChecklist } = await import('../src/commands/init.js');
         const spies = mockConsoleTrio();
         try {
-            printOfflineChecklist({ projectName: 'demo', region: 'us-east-1' });
+            printOfflineChecklist({ bucket: 'demo-a1b2c3-tfstate-YOUR_AWS_ACCOUNT_ID', region: 'us-east-1' });
             const logged = spies.logSpy.mock.calls.flat().join('\n');
-            expect(logged).toContain('create-bucket --bucket demo-tfstate-<aws-account-id> --region us-east-1');
+            expect(logged).toContain('create-bucket --bucket demo-a1b2c3-tfstate-YOUR_AWS_ACCOUNT_ID --region us-east-1');
             expect(logged).not.toContain('LocationConstraint');
             expect(logged).toContain('put-bucket-tagging');
             expect(logged).toContain('put-bucket-versioning');

@@ -27,10 +27,9 @@ Connect your local tools (psql, DBeaver, DataGrip) or a local `.env` file direct
 - Finds your RDS database (`<project-name>-db`, `<project-name>-db-cluster` for Aurora, or the `<workspace>` variants for PR-preview environments) and reads its endpoint and managed credentials from Secrets Manager.
 - Prints the local host, port, database name, username, and a copy-pasteable `postgresql://` connection string. The password stays masked as `********` unless you pass `--show-credentials`.
 - Finds a running container for the current project automatically and opens the tunnel via the Session Manager port-forwarding session. Press Ctrl+C to close it.
-- Resolves its inputs automatically: cluster, service, and region (same order as `exec`: explicit flag → environment variable → `terraform/main.tf` → default).
+- Resolves cluster, service, and region automatically (explicit flag → environment variable → Terraform files → default).
 - When no database is provisioned, or no containers are running, explains what to do (`init`/`apply`/`status`) and exits 1 instead of failing cryptically.
 - On expired AWS credentials, points you to `aws sso login` / `aws configure` and exits 1 instead of throwing.
-- Emits a `db_connect_run` telemetry event recording success and outcome. Credentials are never included in telemetry.
 
 ```bash
 npx grada-run db connect
@@ -62,7 +61,7 @@ Run schema migrations or seed scripts (Prisma, Drizzle, Alembic, Django, Rails, 
 
 When you omit `--cmd`, the project is inspected for a known migration setup (`db:migrate` / `migrate` npm scripts, Prisma, Drizzle, Alembic, Django, Rails) and the detected command is used (in CI) or offered for confirmation (interactively).
 
-> **Stripped runners:** Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage for security, so `npm ...` / `npx ...` commands fail with `command not found` inside the task. Bundle a framework-compiled runner and pass it explicitly (e.g. `--cmd "node ./dist/migrate.cjs"`). When your `Dockerfile` strips those binaries, `db migrate` refuses `npm`/`npx` commands headless (`NPM_CMD_STRIPPED_RUNNER`) and warns loudly interactively — the same guard covers `add cron` and `init --setup-ci-migrate`.
+> **Stripped runners:** Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage for security, so `npm ...` / `npx ...` commands fail with `command not found` inside the task. Bundle a framework-compiled runner and pass it explicitly (e.g. `--cmd "node ./dist/migrate.cjs"`). When your `Dockerfile` strips those binaries, `db migrate` refuses `npm`/`npx` commands headless (`NPM_CMD_STRIPPED_RUNNER`) and warns loudly interactively — the same guard covers `add cron` and `init --setup-ci-migrate`. Detection looks for the `/usr/local/bin/npx` removal outside `#` comments, so mentioning the path in a comment won't trip the guard.
 
 When your task definition carries discrete `DB_*` credentials, the command synthesizes the engine-matching `DATABASE_URL` at runtime — with `PGSSLMODE=require` for PostgreSQL, since RDS/Aurora enforces `rds.force_ssl = 1`.
 
@@ -142,7 +141,7 @@ After `apply` completes, leave `snapshot_identifier` in `terraform/database.tf` 
 
 ## db enable-vector
 
-Enable the `pgvector` extension on RDS PostgreSQL or Aurora PostgreSQL for AI/RAG embeddings — no OpenSearch cluster required. Runs a one-off ECS task inside your VPC that executes `CREATE EXTENSION IF NOT EXISTS vector` using whatever client your image already has (`psql`, `pg`/`@prisma/client`, or `psycopg`), negotiating TLS on every branch for `rds.force_ssl` databases, then verifies the installed version. Refuses to run on MySQL projects.
+Enable the `pgvector` extension on RDS PostgreSQL or Aurora PostgreSQL for AI/RAG embeddings — no OpenSearch cluster required. Runs a one-off task inside your VPC that creates the extension with whatever Postgres client your image already has, then verifies the installed version. Refuses to run on MySQL projects.
 
 ```bash
 npx grada-run db enable-vector

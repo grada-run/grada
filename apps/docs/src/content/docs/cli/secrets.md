@@ -26,7 +26,7 @@ The optional positional argument is the path of the env file to push (resolved r
 - **Only values changed** (same key set) — the CLI offers a rolling ECS restart (`forceNewDeployment`) so running tasks pick up the new values immediately, no redeploy required.
 - **Lambda target** — new values apply to fresh invocations automatically; no restart is offered or needed.
 
-Region resolution is shared across all three commands (see Prerequisites), so they work even when no region is configured. Emits a `secrets_pushed` telemetry event. Exits non-zero on failure.
+Region resolution is shared across all three commands (see Prerequisites), so they work even when no region is configured. Exits non-zero on failure.
 
 **Missing env file:** if the file does not exist, `push` does not throw. Interactively it asks `Would you like to create an empty <file> file now to get started?` — confirming creates the file (with parent directories) so you can fill it in and re-run; declining leaves everything untouched. With `--headless` or `CI=true` it prints a pointer to generate the file first and exits 1.
 
@@ -45,7 +45,7 @@ npx grada-run secrets pull .env
 - Local-only variables are kept — pull never deletes them.
 - If a key exists locally and remotely with different values, the CLI asks `Conflicting variables found. Overwrite local values with remote?` In `--headless` mode it overwrites automatically.
 
-Values are written in standard `KEY="value"` format. Emits a `secrets_pull` telemetry event. Exits non-zero on failure (e.g. no remote vault yet — run `secrets push` first).
+Values are written in standard `KEY="value"` format. Exits non-zero on failure (e.g. no remote vault yet — run `secrets push` first).
 
 ## secrets audit
 
@@ -59,7 +59,7 @@ npx grada-run secrets audit
 - `~ KEY (Mismatched value)` in yellow — exists in both with different values.
 - `- KEY (Not tracked in AWS)` in dim — exists locally but was never pushed.
 
-Ends with `Audit complete. N drifted variable(s) found.` Emits a `secrets_audit` telemetry event.
+Ends with `Audit complete. N drifted variable(s) found.`
 
 ## Prerequisites
 

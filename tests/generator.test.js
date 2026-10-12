@@ -221,7 +221,7 @@ describe('worker.tf without a database', () => {
         });
 
         const workerTf = await fs.readFile(path.join(noDbWorkerDir, 'terraform', 'worker.tf'), 'utf-8');
-        expect(workerTf).toContain('command = ["npm","run","worker"]');
+        expect(workerTf).toContain('command = ["npm", "run", "worker"]');
         // Empty {{DB_ENV_VARS}} must not leave a comma before the array close.
         expect(workerTf).not.toMatch(/,\s*\]/);
         // Count-guarded ECR repo: use the shared local like main.tf does.
@@ -692,7 +692,7 @@ describe('Infrastructure Generator: --target lambda', () => {
         }));
         const mainTf = await readTf('main.tf');
         expect(mainTf).toContain('image_config {');
-        expect(mainTf).toContain('command = ["sh","-c","gunicorn config.wsgi"]');
+        expect(mainTf).toContain('command = ["sh", "-c", "gunicorn config.wsgi"]');
 
         await fs.rm(lambdaTargetDir, { recursive: true, force: true });
         await generateTemplates(lambdaTargetDir, lambdaConfig());

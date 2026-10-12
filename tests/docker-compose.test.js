@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import {
     selectComposeWebService,
     isDatastoreImage,
     isSecretLikeEnvName,
     partitionComposeEnv,
+    parseDockerCompose,
 } from '../src/utils/dockerCompose.js';
 
 describe('isDatastoreImage', () => {
@@ -18,6 +22,16 @@ describe('isDatastoreImage', () => {
         ['valkey/valkey:8', true],
         ['mongo:7', true],
         ['memcached:1', true],
+        ['timescale/timescaledb:2.14', true],
+        ['timescale:2.14', true],
+        ['surrealdb/surrealdb:v2', true],
+        ['meilisearch:v1', true],
+        ['typesense/typesense:v26', true],
+        ['nats:2', true],
+        ['qdrant/qdrant:v1', true],
+        ['dragonflydb/dragonfly:v1', true],
+        ['couchdb:3', true],
+        ['hazelcast/hazelcast:5', true],
         ['myapp-postgres-migrator:1', false],
         ['myapp:latest', false],
         ['node:22-alpine', false],
@@ -131,5 +145,34 @@ describe('partitionComposeEnv', () => {
         expect(partitionComposeEnv({})).toEqual({ safe: {}, skipped: [] });
         expect(partitionComposeEnv(null)).toEqual({ safe: {}, skipped: [] });
         expect(partitionComposeEnv(undefined)).toEqual({ safe: {}, skipped: [] });
+    });
+});
+
+describe('parseDockerCompose ports', () => {
+    function writeCompose(portsYaml) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compose-ports-'));
+        fs.writeFileSync(path.join(dir, 'compose.yml'), [
+            'services:',
+            '  web:',
+            '    image: myapp:latest',
+            '    ports:',
+            ...portsYaml.map((line) => `      ${line}`),
+            '',
+        ].join('\n'));
+        return dir;
+    }
+
+    it('reads the container port from long-syntax mappings', () => {
+        const dir = writeCompose(['- target: 3000', '  published: 8080', '  protocol: tcp']);
+        const services = parseDockerCompose(dir);
+        expect(services).toHaveLength(1);
+        expect(services[0].port).toBe(3000);
+    });
+
+    it('yields null (never NaN) for unparseable port entries', () => {
+        const dir = writeCompose(['- protocol: tcp']);
+        const services = parseDockerCompose(dir);
+        expect(services).toHaveLength(1);
+        expect(services[0].port).toBeNull();
     });
 });

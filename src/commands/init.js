@@ -14,6 +14,7 @@ import {
     analyzeAstroConfig,
     analyzeNestApp,
     splitProcfileCommand,
+    toHclStringArray,
     frameworkDefaultPort,
     frameworkUsesStrippedRunner,
     isNpmShimCommand,
@@ -33,11 +34,11 @@ import { planExistingFiles, executeBackup, preserveManagedFiles, restoreManagedF
 import { checkStateAdoption } from '../utils/state-adoption.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { estimateMonthlyCost, parseTerraformConfig, renderDryRunPreview } from '../utils/visualizer.js';
-import { getTargetDirectory, getProjectConfig, promptWorkerCommand } from '../utils/prompts.js';
+import { getTargetDirectory, getProjectConfig, promptWorkerCommand, sanitizeProjectName } from '../utils/prompts.js';
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
 import { parseDockerCompose, selectComposeWebService } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe, COMPUTE_TARGETS, resolveInitSuffix } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS, resolveInitSuffix, readTerraformProjectName } from '../utils/resolvers.js';
 import { parseDomainTf } from '../utils/domains.js';
 
 // Greppable, invalid-as-real placeholder stamped into backend.tf and
@@ -49,12 +50,11 @@ export const OFFLINE_ACCOUNT_PLACEHOLDER = 'YOUR_AWS_ACCOUNT_ID';
 // so it lands in CI logs as well as terminals. Mirrors every call
 // provisionStateBucket makes (create + tag + versioning), including its
 // us-east-1 LocationConstraint exception.
-export function printOfflineChecklist({ projectName, region }) {
-    const bucket = formatStateBucketName(projectName, '<aws-account-id>');
+export function printOfflineChecklist({ bucket, region }) {
     const locationArg = region === 'us-east-1' ? '' : ` --create-bucket-configuration LocationConstraint=${region}`;
     console.log('');
     console.log(color.yellow('⚠️  Offline scaffold: no AWS resources were created. Reconcile before applying:'));
-    console.log(`  1. Create the state bucket (replace <aws-account-id> with yours):`);
+    console.log(`  1. Create the state bucket (replace ${OFFLINE_ACCOUNT_PLACEHOLDER} with yours):`);
     console.log(color.cyan(`     aws s3api create-bucket --bucket ${bucket} --region ${region}${locationArg}`));
     console.log(color.cyan(`     aws s3api put-bucket-tagging --bucket ${bucket} --tagging 'TagSet=[{Key=ManagedBy,Value=grada}]'`));
     console.log(color.cyan(`     aws s3api put-bucket-versioning --bucket ${bucket} --versioning-configuration Status=Enabled`));
@@ -102,7 +102,25 @@ async function mainStackMain(input = {}) {
     if (!isHeadless) intro(color.bgCyan(color.black(' grada ☁️  ')));
 
     // 2. Resolve Target & Scan Codebase
-    const dirConfig = await getTargetDirectory(isHeadless, headlessOptions);
+    const explicitProjectName = typeof initOptions.projectName === 'string' && initOptions.projectName.trim() !== ''
+        ? initOptions.projectName.trim()
+        : null;
+    const dirConfig = await getTargetDirectory(isHeadless, headlessOptions, { projectName: explicitProjectName });
+
+    // Re-init over an existing tree keeps the tree's project name: after a
+    // directory rename or copy, re-deriving from the basename would silently
+    // fork every singleton (state bucket, RDS, ECR…) into a parallel stack
+    // while the old one keeps billing. --project-name renames explicitly.
+    const treeProjectName = readTerraformProjectName(dirConfig.targetDir);
+    const sanitizedTreeName = treeProjectName ? sanitizeProjectName(treeProjectName) : null;
+    if (sanitizedTreeName && explicitProjectName && sanitizedTreeName !== dirConfig.actualProjectName) {
+        console.log(color.yellow(`⚠️  --project-name "${dirConfig.actualProjectName}" overrides this tree's project "${treeProjectName}" — the next apply will provision a NEW stack; the "${treeProjectName}" stack is left untouched (and still billing).`));
+        trackEvent('init_project_name_override', { projectName: dirConfig.actualProjectName });
+    } else if (sanitizedTreeName && !explicitProjectName && sanitizedTreeName !== dirConfig.actualProjectName) {
+        console.log(color.yellow(`⚠️  Directory "${path.basename(dirConfig.targetDir)}" doesn't match this tree's project "${sanitizedTreeName}" — keeping "${sanitizedTreeName}" so re-init doesn't fork your infrastructure. Pass --project-name <name> to rename explicitly.`));
+        trackEvent('init_project_name_reused', { projectName: sanitizedTreeName });
+        dirConfig.actualProjectName = sanitizedTreeName;
+    }
 
     // 2b. Fail-fast validation of init composition flags — before any
     // prompts, AWS calls, backups, or file writes.
@@ -298,7 +316,7 @@ async function mainStackMain(input = {}) {
     if (isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && (procfile?.worker || capabilities.worker.detected)) {
         const workerAnswer = await promptWorkerCommand(procfile, capabilities);
         if (workerAnswer.trim() !== '') {
-            workerCommandHcl = `command = ${JSON.stringify(splitProcfileCommand(workerAnswer.trim()))}`;
+            workerCommandHcl = `command = ${toHclStringArray(splitProcfileCommand(workerAnswer.trim()))}`;
         }
     }
     if (target === 'lambda' && (procfile?.worker || capabilities.worker.detected)) {
@@ -843,7 +861,9 @@ async function mainStackMain(input = {}) {
     ${color.magenta('🚀 Need help?')} ${color.underline('https://calendly.com/anton-codes-iac/15min')}`);
 
     if (offlineScaffold) {
-        printOfflineChecklist({ projectName: dirConfig.actualProjectName, region: config.region });
+        // Pass the exact backend bucket (suffix included) — recomputing
+        // from the bare project name prints a bucket terraform never uses.
+        printOfflineChecklist({ bucket: stateBucketName, region: config.region });
     }
 
     await flushTelemetry();

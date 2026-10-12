@@ -29,6 +29,7 @@ You can append any of these flags to customize the generated architecture. These
 | `--desiredCount=<number>` | Number of container replicas to run (`1` or `2`). | `1` |
 | `--branch=<name>` | The primary Git deployment branch for CI/CD. | `main` |
 | `--dir=<path>` | The directory to generate files into (use `.` for current).| `.` |
+| `--project-name=<name>` | Override the project name (default: directory basename; re-runs reuse the existing tree's name). | directory basename |
 | `--target=<target>` | Compute architecture: `ecs` (default, `fargate` synonym), `lambda` (scale-to-zero serverless), or `static` (S3 + CloudFront; static-site frameworks and detected static exports only). | `ecs` |
 | `--needsDatabase` | Provisions a managed AWS database alongside Fargate (engine via `--db-engine`). | `false` |
 | `--db-engine=<engine>` | Database engine: `postgres` (default), `mysql` (MySQL 8.0), or `aurora-postgresql` (Serverless v2 scale-to-zero). | `postgres` |
@@ -94,6 +95,16 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - Re-running setup over modified files fails with `MODIFIED_TREE` (pass `--force` to back up and regenerate).
 - Fresh `init` over a state bucket that already holds this project's key fails with `STATE_ALREADY_EXISTS` (pass `--adopt-state` to take over that state, or rename the project).
 - `wake` fails with `ECS_WAKE_CRASH_LOOP` when restored tasks keep crashing, or `ECS_WAKE_PULL_FAILURE` when a task is stuck `PENDING` on an unpullable image (the message names the most recent failure in both cases), or `ECS_WAKE_TIMEOUT` when tasks never reach the desired count — every path applies the restore first, so inspect with `status` and fix the task before retrying.
+- `apply` fails with `PARTIAL_STATE` when the outputs map comes back empty (pass `--allow-partial-outputs` for trees that legitimately declare no outputs).
+
+## Exit codes
+
+Conventions hold across commands: `0` means success (including no-op skips), `1` means failure or a declined/cancelled run. Two commands define their own non-zero codes so scripts can branch on them:
+
+- [`sleep`](/grada/cli/sleep/) with `--strict` exits `2` (instead of `0`) when there is nothing to do, with the `skipped` reason preserved.
+- [`rollback`](/grada/cli/rollback/) exits `3` on wrong-target refusals (distinct from failure's `1`); [`db enable-vector`](/grada/cli/db/) exits `3` when the container has no usable Postgres client.
+
+Each command page documents its own codes in an Automation & edge cases section — e.g. [apply](/grada/cli/apply/), [destroy](/grada/cli/destroy/), [sleep](/grada/cli/sleep/).
 
 ## See also
 

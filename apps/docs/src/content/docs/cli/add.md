@@ -16,13 +16,9 @@ Provision modular Day-2 cloud primitives without writing Terraform, configuring 
 - `cron` creates an EventBridge Scheduler schedule that runs a one-off Fargate task from your app's task definition on a `cron(...)` or `rate(...)` expression, with least-privilege `ecs:RunTask` + `iam:PassRole` permissions. One schedule per project: `--name` customizes it, and re-running with `--force` replaces it in place. On `--target lambda` projects the schedule invokes the function directly with a JSON payload carrying the command — handle scheduled events in application code.
 - `db:postgres`, `db:mysql`, and `db:aurora-postgresql` add a relational database to a project that was initialized without one: renders `terraform/database.tf` from the same templates `init --db-engine` uses and wires `DB_HOST`/`DB_PORT`/`DB_NAME` (plus `DB_ENGINE` for non-Postgres) into your container — as Secrets Manager references on ECS, as plain variables on Lambda (which also gets the VPC config and `random` provider). Refused on `--target static`; refuses when `main.tf` already references a database unless `--force` is passed.
 - Every addon attaches least-privilege IAM policies to your task role, so your application code can use the AWS SDK with no extra configuration.
-- Addon files live in `terraform/` (`s3.tf`, `dynamodb.tf`, `redis.tf`, `sqs.tf`, `bedrock.tf`, `ses.tf`, `cron.tf`, plus `database.tf` for post-init relational databases), so `destroy` tears them down and `eject` keeps them automatically. PR-preview workspaces get isolated per-workspace resources. If your project has a `worker.tf` background service, addon environment variables are injected there too.
-- On [ejected](/grada/cli/eject/) projects, new addon files render without managed headers to match the vanilla tree (billing docs and resources are unchanged), with a warning and an `ejected: true` marker on the `add_run` telemetry event.
-- On `--target static` projects addon infrastructure still scaffolds (queues, tables, buckets, identities), but container env injection is skipped — there is no task role to inject into. Read the resource names from the generated `.tf` files and wire them into your build manually.
-- Concurrent `add` runs serialize under a project lock instead of clobbering each other's files — safe to run several in rapid succession or from a CI loop.
-- On an asleep environment, scaffolding proceeds with a warning (the files land, but `apply` stays gated until you [`wake`](/grada/cli/sleep/)).
-- **Stripped runners:** on ECS, the cron schedule executes `--cmd` inside your app image — and Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage, so the `npm run cron` default (or any `npm`/`npx` command) fails with `command not found`. When your `Dockerfile` strips those binaries, `add cron` refuses headless (`NPM_CMD_STRIPPED_RUNNER`) and warns loudly interactively; pass a `node ...` command instead. (Lambda cron invokes the function with the command as an event payload, so it is exempt.)
-- Emits an `add_run` telemetry event recording the capability and outcome.
+- Addon files live in `terraform/`, so `destroy` tears them down and `eject` keeps them automatically; PR previews get isolated per-workspace resources.
+- **Stripped runners:** on ECS, the cron schedule executes `--cmd` inside your app image — and Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage, so the `npm run cron` default fails with `command not found`. Pass a `node ...` command instead. (Lambda cron invokes the function with the command as an event payload, so it is exempt.)
+- On `--target static` projects addon infrastructure still scaffolds, but container env injection is skipped — read the resource names from the generated `.tf` files and wire them into your build manually.
 
 > **Bedrock model access:** AWS requires you to enable model access in the Bedrock console before your first `InvokeModel` call — including in the regions behind your `us.*` cross-region inference profile. IAM permissions alone are not enough. Anthropic models additionally require a one-time First Time Use (FTU) form in the Bedrock console.
 
@@ -74,6 +70,14 @@ To switch Bedrock models later, just run `grada add ai:bedrock` again (interacti
 | `--headless` | Scaffold without interactive prompts, using flag values and built-in defaults (Bedrock default model, daily cron schedule). |
 
 Requires a project initialized with `grada` (`terraform/main.tf` must exist).
+
+## Automation & edge cases
+
+- Headless `add cron` refuses `npm`/`npx` commands with `NPM_CMD_STRIPPED_RUNNER` when the `Dockerfile` strips those binaries (warns interactively). Full catalog: [Headless Mode](/grada/guides/headless/).
+- Concurrent `add` runs serialize under a project lock — safe to run several in rapid succession or from a CI loop.
+- On an asleep environment, scaffolding proceeds with a warning (the files land, but `apply` stays gated until you [`wake`](/grada/cli/sleep/)).
+- On [ejected](/grada/cli/eject/) projects, new addon files render without managed headers to match the vanilla tree (billing docs and resources are unchanged), with a warning.
+- With a `worker.tf` background service, addon environment variables are injected there too.
 
 ## Cost & Billing Drivers
 

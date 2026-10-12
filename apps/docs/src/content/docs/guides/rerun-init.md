@@ -13,7 +13,7 @@ Every run records content hashes of what it generated in `.grada/manifest.json` 
 
 ## The conflict prompt
 
-When setup finds any of `terraform/`, `Dockerfile`, or `.github/workflows/deploy.yml` in the target directory (`src/utils/backup.js`), it lists the conflicts and offers two choices:
+When setup finds any of `terraform/`, `Dockerfile`, or `.github/workflows/deploy.yml` in the target directory, it lists the conflicts and offers two choices:
 
 - **Backup & Regenerate** — each conflicting path is renamed with a timestamp suffix (e.g. `terraform.bak.1726771200000`), then fresh files are generated.
 - **Cancel** — exits immediately with no changes.
@@ -32,10 +32,10 @@ After backing up, setup appends a `# grada backups` block (`*.bak.*`) to `.gitig
 
 ## What regeneration touches
 
-`src/utils/generator.js` writes a fixed file set and handles pre-existing files explicitly:
+Setup writes a fixed file set and handles pre-existing files explicitly:
 
 - `terraform/*.tf`, `Dockerfile`, `.github/workflows/deploy.yml`, plus `preview.yml`/`teardown.yml` only when PR previews are enabled. Switching `--target` on a re-run regenerates a different set (e.g. static drops the `Dockerfile`); `preview.yml`/`teardown.yml` are never in the conflict set, so delete them by hand when moving to a target without previews.
-- `terraform/secret_keys.json` is preserved when it already exists (only created as `[]` on first setup) — on Backup & Regenerate its contents are automatically restored over the fresh tree (recorded in a `preserved_files_restored` telemetry event), so your key map survives even though `terraform/` moves to `terraform.bak.<timestamp>` wholesale.
+- `terraform/secret_keys.json` is preserved when it already exists (only created as `[]` on first setup) — on Backup & Regenerate its contents are automatically restored over the fresh tree, so your key map survives even though `terraform/` moves to `terraform.bak.<timestamp>` wholesale.
 - If your repo already has a `README.md`, it is kept and gets a short Deployment pointer appended; the generated guide goes to `DEPLOYMENT.md` instead (`GRADA.md` when both files are yours — see [`npx grada-run`](/grada/cli/init/)).
 - Existing `.gitignore` / `.dockerignore` files are preserved with only the grada entries appended (Terraform state paths, `.env`); missing ones are created with framework-appropriate presets.
 - **Rails only:** if `ci.yml` or `dependabot.yml` exist, setup asks whether to disable them by renaming to `.bak` (default CI usually crashes without a database service); in headless mode they are disabled automatically.
@@ -43,6 +43,10 @@ After backing up, setup appends a `# grada backups` block (`*.bak.*`) to `.gitig
 ## The resource suffix survives re-runs
 
 The random resource suffix (`grada_resource_suffix`, e.g. `-a1b2c3`) minted on first setup is parsed out of the existing tree and reused on every re-run — target pivots and flag changes never re-mint it, since a new suffix would rename live singletons like the RDS identifier. Treat the local as immutable: editing it by hand replaces those resources. Trees scaffolded before suffixes keep rendering unsuffixed names (zero drift).
+
+## The project name survives re-runs
+
+The project name is read back out of the existing tree (`app_name` in `terraform/main.tf`) and reused, so renaming or copying the directory and re-running setup keeps rendering the same resource names. When the directory basename disagrees with the tree, setup warns loudly and keeps the tree's name — re-deriving from the directory would silently provision a parallel stack on the next apply while the old one keeps billing. Pass `--project-name <name>` to rename explicitly (setup warns that the next apply forks a new stack); cloning a tree as the starting point for a genuinely new project needs the same flag.
 
 ## Suggested workflow
 

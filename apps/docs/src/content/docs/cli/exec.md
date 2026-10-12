@@ -8,13 +8,9 @@ Drop into a secure shell inside your live Fargate container to inspect files, ch
 ## What it does
 
 - Finds a running container for the current project automatically and opens an interactive shell (`/bin/sh` by default) via ECS Exec.
-- Resolves its inputs automatically: cluster (`<project-name>-cluster`, overridable via `ECS_CLUSTER`), service (`<project-name>-service`, overridable via `ECS_SERVICE`), container (`<project-name>-container`, overridable via `ECS_CONTAINER`), and region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`).
-- Checks that the AWS CLI is installed first; if missing, prints install links and exits 1 instead of failing cryptically.
-- Checks that the Session Manager plugin is installed next; if missing, prints install instructions for your OS (`brew install session-manager-plugin` on Mac, download links on Windows/Linux) and exits 1.
-- When no containers are running (e.g. scaled to zero or still booting), explains that a running container is required, points you to `status` and `apply`, and exits 1.
-- On expired AWS credentials, points you to `aws sso login` / `aws configure` and exits 1 instead of throwing.
-- Compute-guarded: on `--target lambda` and `--target static` projects the command fails fast (`ECS Exec is not supported on Lambda or Static targets`) before any AWS lookup — functions and static sites have no shell to attach to — and points you to `logs` instead.
-- Emits an `exec_run` telemetry event recording success and outcome.
+- Checks the AWS CLI and Session Manager plugin first, printing install instructions for anything missing instead of failing cryptically.
+- When no containers are running, explains what to do (`status`, `apply`) and exits 1.
+- Lambda and static projects have no shell to attach to — the command says so up front and points you to `logs` instead.
 
 ## Usage
 
@@ -36,6 +32,11 @@ Type `exit` to leave the shell.
 | `--container <name>` | Explicit container name override. |
 | `--command <cmd>` | Shell to open (default `/bin/sh`). |
 | `--region <region>` | Explicit AWS region override. |
+
+## Automation & edge cases
+
+- Inputs resolve automatically: cluster, service, and container from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE` / `ECS_CONTAINER`), region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`).
+- On expired credentials you get the `aws sso login` / `aws configure` pointer and exit 1 instead of an error dump.
 
 ## Prerequisites
 
