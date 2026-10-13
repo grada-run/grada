@@ -175,12 +175,25 @@ async function runWakeMain(input = {}) {
     // nothing is found at all, fall through to the main flow so the
     // NOTHING_TO_WAKE guidance is preserved.
     let probedServices = null;
+    let probedServicesSettled = false;
     let probedDb = null;
     let probedDbSettled = false;
     if (!entry) {
-        const appSvc = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.appService);
-        const workerSvc = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.workerService);
-        probedServices = { app: appSvc, worker: workerSvc };
+        // Same settle-flag pattern as the DB probe below: a failed ECS
+        // probe must fall through to the main flow (which formats via
+        // failAwsError), never throw the raw SDK error past every catch.
+        // All-or-nothing like the DB probe — a partial pair is discarded
+        // and the main flow re-fetches both services inside its try.
+        let appSvc = null;
+        let workerSvc = null;
+        try {
+            appSvc = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.appService);
+            workerSvc = isLambda ? null : await fetchActiveService(ecsClient, target.cluster, target.workerService);
+            probedServices = { app: appSvc, worker: workerSvc };
+            probedServicesSettled = true;
+        } catch {
+            probedServicesSettled = false;
+        }
         if (!skipDb) {
             try {
                 probedDb = lambdaDbProbed
@@ -198,7 +211,7 @@ async function runWakeMain(input = {}) {
         }
         const foundServices = [appSvc, workerSvc].filter(Boolean);
         const foundDb = probedDbSettled && probedDb;
-        if (probedDbSettled && (foundServices.length > 0 || foundDb)) {
+        if (probedServicesSettled && probedDbSettled && (foundServices.length > 0 || foundDb)) {
             const servicesAwake = foundServices.every((service) => (service.desiredCount ?? 0) > 0);
             const dbAwake = !foundDb || foundDb.status !== 'stopped';
             if (servicesAwake && dbAwake) {

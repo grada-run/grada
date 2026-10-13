@@ -86,9 +86,20 @@ describe('github workflow templates', () => {
         // publish and failed the release on live versions.
         expect(guard.run).toContain('https://registry.npmjs.org/${ENCODED}/${EXPECTED}');
         expect(guard.run).toContain('"%{http_code}"');
-        // Registry write delays are real: the guard must retry on a
-        // minutes-long window, not seconds.
-        expect(guard.run).toContain('seq 1 30');
+        // npm exposes new versions minutes after accepting them, so the
+        // read-back confirmation is advisory only: it must retry briefly
+        // and report a notice — never fail the job (0.40.2/0.40.3/0.40.4
+        // each failed a hard read-back gate on live versions).
+        expect(guard.run).toContain('seq 1 12');
+        expect(guard.run).not.toContain('exit 1');
+        expect(guard.run).toContain('::notice::');
+        // The publish steps are the real acceptance gate: each must assert
+        // npm's own success line for its package, since only the write path
+        // can confirm acceptance.
+        const primary = steps.find((s) => typeof s?.name === 'string' && s.name.includes('Publish Primary Package'));
+        expect(primary.run).toContain('grada-run@${EXPECTED}');
+        const scoped = steps.find((s) => typeof s?.name === 'string' && s.name.includes('Publish Scoped Alias'));
+        expect(scoped.run).toContain('@grada-run/grada@${EXPECTED}');
         // Re-runs must survive already-live versions (tolerating only the
         // specific already-published error), or a retried release can never
         // go green.

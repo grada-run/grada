@@ -667,6 +667,15 @@ describe('trackEvent capture', () => {
             });
         });
 
+        it('matches the scoped distribution manifest too', () => {
+            withTmpDir((base) => {
+                writeManifest(base, '@grada-run/grada', '1.2.3-scoped');
+                const deep = path.join(base, 'a', 'b');
+                fs.mkdirSync(deep, { recursive: true });
+                expect(resolveCliVersion({ startDir: deep })).toBe('1.2.3-scoped');
+            });
+        });
+
         it('skips wrong-named and malformed manifests while climbing', () => {
             withTmpDir((base) => {
                 writeManifest(base, 'grada-run', '9.9.9-top');

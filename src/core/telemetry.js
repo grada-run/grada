@@ -57,10 +57,13 @@ function currentCommandName() {
         : null;
 }
 
-// The installed package's own name. The version resolver matches it so an
-// upward manifest search never mistakes a parent project's package.json
-// (monorepo root, npx cache parent, global node_modules scope) for ours.
-const CLI_PACKAGE_NAME = 'grada-run';
+// The installed package's own names, one per distribution channel (the
+// bare `grada-run` package and the `@grada-run/grada` scoped alias —
+// same tarball, renamed at publish time). The version resolver matches
+// them so an upward manifest search never mistakes a parent project's
+// package.json (monorepo root, npx cache parent, global node_modules
+// scope) for ours, while still resolving on both install paths.
+const CLI_PACKAGE_NAMES = new Set(['grada-run', '@grada-run/grada']);
 
 // Operator escape hatch for distributions that cannot ship package.json
 // next to the code (single-binary bundlers). Only consulted when no
@@ -84,7 +87,7 @@ export function resolveCliVersion({ startDir, readFile = fs.readFileSync, env = 
     while (typeof dir === 'string' && dir !== '') {
         try {
             const pkg = JSON.parse(readFile(path.join(dir, 'package.json'), 'utf-8'));
-            if (pkg && pkg.name === CLI_PACKAGE_NAME && typeof pkg.version === 'string' && pkg.version.trim() !== '') {
+            if (pkg && CLI_PACKAGE_NAMES.has(pkg.name) && typeof pkg.version === 'string' && pkg.version.trim() !== '') {
                 return pkg.version;
             }
         } catch {

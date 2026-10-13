@@ -33,10 +33,14 @@ import {
 
 
 
-vi.mock('../src/utils/aws.js', () => ({
-    handleAuthErrorBranch: () => false,
-    resolveClient: (injected) => injected,
-}));
+vi.mock('../src/utils/aws.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        handleAuthErrorBranch: () => false,
+        resolveClient: (injected) => injected,
+    };
+});
 
 const tmp = createTmpDirTracker();
 let exitSpy;
@@ -569,6 +573,32 @@ describe('runWake', () => {
         expect(updates).toContainEqual({ service: 'myapp-staging-worker-service', desiredCount: 1 });
         // No polling: two discovery Describes (app + worker), then UpdateService only.
         expect(ecsClient.send.mock.calls.filter(([command]) => command.constructor.name === 'DescribeServicesCommand')).toHaveLength(2);
+    });
+
+    it('formats an ECS probe failure instead of throwing the raw SDK error', async () => {
+        const dir = makeTmp();
+        const networkError = Object.assign(
+            new Error('getaddrinfo ENOTFOUND ecs.us-east-2.amazonaws.com'),
+            { code: 'ENOTFOUND' }
+        );
+        const ecsClient = { send: vi.fn(async () => { throw networkError; }) };
+        const rdsClient = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'DescribeDBInstancesCommand') {
+                    return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'available' }] };
+                }
+                throw new Error(`unexpected RDS command: ${command.constructor.name}`);
+            }),
+        };
+        // No ledger entry, so the already-awake probe runs first: its ECS
+        // pair must not leak the raw SDK error — the main flow formats it.
+        const result = await runWake(wakeOptions(dir, { ecsClient, rdsClient, noWait: true }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('error');
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const output = logSpy.mock.calls.map(([line]) => stripVTControlCharacters(String(line))).join('\n');
+        expect(output).toContain('getaddrinfo ENOTFOUND');
+        expect(output).toContain('Check your AWS credentials and region');
     });
 
     it('fails on RDS wake timeout and keeps the ledger for retry', async () => {
