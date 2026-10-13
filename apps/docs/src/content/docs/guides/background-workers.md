@@ -36,6 +36,7 @@ There is no `add worker` command: if you scaffolded without a worker, `add queue
 ## Day-2 operations and cost
 
 - Stream worker output with [`logs`](/grada/cli/logs/) — worker entries carry the `worker` stream prefix in the shared group — and open a shell with [`exec`](/grada/cli/exec/) using its service and container overrides.
+- Every CI deploy ships worker code too: the pipeline registers a SHA-pinned worker revision and force-deploys the worker service alongside web (see [CI/CD Pipeline](/grada/guides/cicd-pipeline/)).
 - A running worker roughly doubles the Fargate baseline (~$18.02/mo at micro size), falling to $0 compute while its queue is empty; each open PR preview runs its own copy while the PR is open. See [Understanding Your AWS Bill](/grada/guides/understanding-your-bill/).
 
 ## See also

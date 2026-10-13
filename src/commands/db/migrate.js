@@ -16,6 +16,7 @@ import {
     resolveHeadless,
     resolveCwd,
     readFileSafe,
+    readTerraformComputeTarget,
 } from '../../utils/resolvers.js';
 import { detectMigrationCommand, isNpmShimCommand, dockerfileStripsNpmShims } from '../../utils/detector.js';
 import { resolveContainer } from '../../utils/ecs.js';
@@ -82,7 +83,7 @@ export function quoteShellArg(value) {
     return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function renderGateBlock({ cmd, includeSetupNode, taskDefRef }) {
+function renderGateBlock({ includeSetupNode, stepName, runLine }) {
     const lines = [`      ${GATE_START_MARKER}`];
     if (includeSetupNode) {
         lines.push(
@@ -94,12 +95,22 @@ function renderGateBlock({ cmd, includeSetupNode, taskDefRef }) {
         );
     }
     lines.push(
-        '      - name: Pre-Deploy Database Migration',
+        `      - name: ${stepName}`,
         '        run: |',
-        `          npx grada-run db migrate --cmd ${quoteShellArg(cmd)} --task-def "${taskDefRef}" --headless`,
+        `          ${runLine}`,
         `      ${GATE_END_MARKER}`
     );
     return `${lines.join('\n')}\n`;
+}
+
+// Strips any previous gate block first so the setup-node check below
+// never matches a node step that only exists inside the old block.
+function stripPreviousGateBlock(content) {
+    const previous = findGateBlock(content);
+    if (!previous) return content;
+    const lineStart = content.lastIndexOf('\n', previous.startIdx) + 1;
+    const lineEnd = content.indexOf('\n', previous.endIdx);
+    return content.slice(0, lineStart) + content.slice(lineEnd === -1 ? content.length : lineEnd + 1);
 }
 
 // Idempotently injects (or refreshes) the migration gate block into a
@@ -109,22 +120,37 @@ export function injectMigrationGate(workflowContent, { cmd }) {
     const content = String(workflowContent ?? '');
     const taskDefRef = '${{ steps.register-task-def.outputs.task-arn }}';
 
-    // Strip any previous gate block first so the setup-node check below
-    // never matches a node step that only exists inside the old block.
-    let base = content;
-    const previous = findGateBlock(base);
-    if (previous) {
-        const lineStart = base.lastIndexOf('\n', previous.startIdx) + 1;
-        const lineEnd = base.indexOf('\n', previous.endIdx);
-        base = base.slice(0, lineStart) + base.slice(lineEnd === -1 ? base.length : lineEnd + 1);
-    }
-
+    const base = stripPreviousGateBlock(content);
     const includeSetupNode = !base.includes('actions/setup-node');
-    const block = renderGateBlock({ cmd, includeSetupNode, taskDefRef });
+    const block = renderGateBlock({
+        includeSetupNode,
+        stepName: 'Pre-Deploy Database Migration',
+        runLine: `npx grada-run db migrate --cmd ${quoteShellArg(cmd)} --task-def "${taskDefRef}" --headless`,
+    });
 
     const forceIdx = base.indexOf('- name: Force ECS deployment');
     if (forceIdx === -1) return null;
     const insertAt = base.lastIndexOf('\n', forceIdx) + 1;
+    return `${base.slice(0, insertAt)}${block}${base.slice(insertAt)}`;
+}
+
+// Idempotently injects (or refreshes) the migration gate block into a
+// preview.yml document (ECS only — Lambda has no migrate-gate story yet).
+// Previews have no register step, so `db migrate` resolves the workspace
+// service itself via --workspace. Returns null without the anchor.
+export function injectPreviewMigrationGate(workflowContent, { cmd }) {
+    const content = String(workflowContent ?? '');
+    const base = stripPreviousGateBlock(content);
+    const includeSetupNode = !base.includes('actions/setup-node');
+    const block = renderGateBlock({
+        includeSetupNode,
+        stepName: 'Preview Database Migration',
+        runLine: `npx grada-run db migrate --cmd ${quoteShellArg(cmd)} --workspace "\${{ env.WORKSPACE }}" --headless`,
+    });
+
+    const commentIdx = base.indexOf('- name: Comment PR');
+    if (commentIdx === -1) return null;
+    const insertAt = base.lastIndexOf('\n', commentIdx) + 1;
     return `${base.slice(0, insertAt)}${block}${base.slice(insertAt)}`;
 }
 
@@ -368,6 +394,24 @@ async function runDbMigrateMain(input = {}) {
         fsSync.writeFileSync(workflowFile, updated, 'utf8');
         console.log(color.green('\n✅ Pre-deploy migration gate installed in .github/workflows/deploy.yml.'));
         console.log(color.dim('  Migrations now run against the new image revision before the ECS service updates.\n'));
+        if (readTerraformComputeTarget(cwd) === 'ecs') {
+            const previewFile = path.join(cwd, '.github', 'workflows', 'preview.yml');
+            let previewContent = null;
+            try {
+                if (fsSync.existsSync(previewFile)) previewContent = fsSync.readFileSync(previewFile, 'utf8');
+            } catch {
+                previewContent = null;
+            }
+            if (previewContent !== null) {
+                const previewUpdated = injectPreviewMigrationGate(previewContent, { cmd: resolvedCmd });
+                if (previewUpdated !== null) {
+                    fsSync.writeFileSync(previewFile, previewUpdated, 'utf8');
+                    console.log(color.green('✅ Preview migration gate installed in .github/workflows/preview.yml.'));
+                } else {
+                    console.log(color.yellow('⚠️  Could not wire the preview migration gate: the Comment PR anchor was not found in .github/workflows/preview.yml.'));
+                }
+            }
+        }
         await trackSuccess('db_migrate_run', { projectName, cmd_source: cmdSource, ci_setup: true });
         outro(color.green('Setup complete.'));
         return { ok: true, ciSetup: true, workflowFile, cmdSource };

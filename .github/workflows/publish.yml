@@ -111,3 +111,23 @@ jobs:
         run: |
           npm pkg set name="@grada-run/grada"
           npm publish --access public --provenance
+
+      # Dual-package lockstep: the bare and scoped packages must resolve to
+      # the same version, or consumers chronically run one release behind.
+      # Retries tolerate npm registry replication lag after publish.
+      - name: Verify dual-package version lockstep
+        run: |
+          EXPECTED=$(node -p "require('./package.json').version")
+          for PKG in grada-run @grada-run/grada; do
+            PUBLISHED=""
+            for _ in 1 2 3 4 5 6; do
+              PUBLISHED=$(npm view "$PKG" version 2>/dev/null || true)
+              [ "$PUBLISHED" = "$EXPECTED" ] && break
+              sleep 10
+            done
+            if [ "$PUBLISHED" != "$EXPECTED" ]; then
+              echo "::error::Package $PKG resolved to '${PUBLISHED:-MISSING}', expected $EXPECTED. Republish to restore lockstep."
+              exit 1
+            fi
+            echo "$PKG at $PUBLISHED"
+          done

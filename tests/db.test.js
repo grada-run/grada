@@ -49,7 +49,7 @@ import {
     buildTargetClientCommand,
     buildSourceDumpCommand,
 } from '../src/commands/db.js';
-import { injectMigrationGate, quoteShellArg, buildMigrationCommand, findGateBlock } from '../src/commands/db/migrate.js';
+import { injectMigrationGate, injectPreviewMigrationGate, quoteShellArg, buildMigrationCommand, findGateBlock } from '../src/commands/db/migrate.js';
 import { resolveWorkspaceSuffix } from '../src/utils/resolvers.js';
 
 vi.mock('@clack/prompts', () => clackPromptsMockFactory());
@@ -1485,6 +1485,46 @@ describe('db migrate: --setup-ci and gate injection', () => {
         }));
         expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true, workflowFile }));
     });
+
+    it('--setup-ci also wires the preview workflow when present', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        writeWorkflow(dir);
+        const previewFile = path.join(dir, '.github', 'workflows', 'preview.yml');
+        fs.writeFileSync(previewFile, [
+            'name: Ephemeral PR Preview',
+            'jobs:',
+            '  deploy-preview:',
+            '    steps:',
+            '      - name: Terraform Init & Apply',
+            '        run: terraform apply -auto-approve',
+            '      - name: Comment PR',
+            '        uses: actions/github-script@v7',
+            '',
+        ].join('\n'));
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true,
+            cmd: 'node ./dist/migrate.cjs',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true }));
+        const updated = fs.readFileSync(previewFile, 'utf8');
+        expect(updated).toContain('# grada:db-migrate-start');
+        expect(updated).toContain(`--cmd 'node ./dist/migrate.cjs'`);
+        expect(updated).toContain('--workspace "${{ env.WORKSPACE }}"');
+        expect(output.join('\n')).toContain('preview.yml');
+    });
+
+    it('--setup-ci succeeds without a preview workflow', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        writeWorkflow(dir);
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true,
+            cmd: 'node ./dist/migrate.cjs',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true }));
+        expect(fs.existsSync(path.join(dir, '.github', 'workflows', 'preview.yml'))).toBe(false);
+    });
 });
 
 describe('db migrate: gate helpers', () => {
@@ -1516,6 +1556,34 @@ describe('db migrate: gate helpers', () => {
     it('quoteShellArg single-quotes and escapes embedded quotes', () => {
         expect(quoteShellArg('npx prisma migrate deploy')).toBe(`'npx prisma migrate deploy'`);
         expect(quoteShellArg(`don't stop`)).toBe(`'don'\\''t stop'`);
+    });
+
+    it('injectPreviewMigrationGate places a workspace-scoped block before Comment PR', () => {
+        const preview = [
+            'name: Ephemeral PR Preview',
+            'jobs:',
+            '  deploy-preview:',
+            '    steps:',
+            '      - name: Terraform Init & Apply',
+            '        run: terraform apply -auto-approve',
+            '      - name: Comment PR',
+            '        uses: actions/github-script@v7',
+            '',
+        ].join('\n');
+        const updated = injectPreviewMigrationGate(preview, { cmd: 'node ./dist/migrate.cjs' });
+        expect(updated).toContain('# grada:db-migrate-start');
+        expect(updated).toContain(`--cmd 'node ./dist/migrate.cjs'`);
+        expect(updated).toContain('--workspace "${{ env.WORKSPACE }}"');
+        expect(updated).toContain('actions/setup-node@v4');
+        expect(updated.indexOf('# grada:db-migrate-end')).toBeLessThan(updated.indexOf('- name: Comment PR'));
+        // Idempotent refresh, not duplication.
+        const twice = injectPreviewMigrationGate(updated, { cmd: 'node ./dist/other.cjs' });
+        expect(twice.match(/# grada:db-migrate-start/g)).toHaveLength(1);
+        expect(twice).toContain(`--cmd 'node ./dist/other.cjs'`);
+    });
+
+    it('injectPreviewMigrationGate returns null without an anchor', () => {
+        expect(injectPreviewMigrationGate('steps: []', { cmd: 'x' })).toBeNull();
     });
 });
 

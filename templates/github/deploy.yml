@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - {{DEPLOY_BRANCH}}
-    schedule:
-    - cron: '0 0 * * 0'
 
 env:
   AWS_REGION: {{REGION}}
@@ -13,6 +11,8 @@ env:
   ECS_CLUSTER: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cluster
   ECS_SERVICE: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-service
   ECS_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-task
+  ECS_WORKER_SERVICE: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-service
+  ECS_WORKER_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-task
 
 permissions:
   id-token: write
@@ -134,5 +134,38 @@ jobs:
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE }} \
             --task-definition ${{ steps.register-task-def.outputs.task-arn }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      # The background worker ships the same image as web, so it gets the
+      # same SHA-pinned revision treatment — otherwise it would run stale
+      # code forever while web moves on. Skipped on workerless projects.
+      - name: Register worker task definition revision
+        if: hashFiles('terraform/worker.tf') != ''
+        id: register-worker-task-def
+        run: |
+          IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA::7}
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_WORKER_TASK_FAMILY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' \
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
+            --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --region ${{ env.AWS_REGION }} \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force worker deployment
+        if: hashFiles('terraform/worker.tf') != ''
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_WORKER_SERVICE }} \
+            --task-definition ${{ steps.register-worker-task-def.outputs.task-arn }} \
             --force-new-deployment \
             --region ${{ env.AWS_REGION }}

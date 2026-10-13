@@ -270,6 +270,56 @@ describe('Command: logs (mocked CloudWatch Logs)', () => {
         }
     });
 
+    it('wraps unexpected SDK failures in a clean message and exits 1 instead of throwing', async () => {
+        const failure = new Error('socket hang up');
+        failure.name = 'NetworkingError';
+        // Verification probe passes; the fetch itself fails.
+        mockLogsSend.mockImplementation((cmd) => {
+            if (cmd instanceof MockDescribeLogStreamsCommand) return Promise.resolve({ logStreams: [] });
+            return Promise.reject(failure);
+        });
+
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+
+        try {
+            const result = await runLogs({ tail: 5, region: 'us-east-2' });
+            expect(result.ok).toBe(false);
+            const text = output.join('\n');
+            expect(text).toContain('socket hang up');
+            expect(text).toContain('credentials');
+            expect(text).not.toContain('$metadata');
+            expect(exitSpy).toHaveBeenCalledWith(1);
+        } finally {
+            consoleSpy.mockRestore();
+            exitSpy.mockRestore();
+        }
+    });
+
+    it('returns a structured failure without exiting when headless', async () => {
+        const failure = new Error('socket hang up');
+        failure.name = 'NetworkingError';
+        mockLogsSend.mockImplementation((cmd) => {
+            if (cmd instanceof MockDescribeLogStreamsCommand) return Promise.resolve({ logStreams: [] });
+            return Promise.reject(failure);
+        });
+
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+
+        try {
+            const result = await runLogs({ tail: 5, region: 'us-east-2', isHeadless: true });
+            expect(result).toEqual(expect.objectContaining({ ok: false, exitCode: 1 }));
+            expect(exitSpy).not.toHaveBeenCalled();
+        } finally {
+            consoleSpy.mockRestore();
+            exitSpy.mockRestore();
+        }
+    });
+
     it('resolves the default log group from the project name', async () => {
         const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
         try {

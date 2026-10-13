@@ -243,7 +243,7 @@ describe('Headless contract (automation-safe)', () => {
             expect(mainTf).toContain('BEDROCK_MODEL_ID');
             const workerTf = await fs.readFile(path.join(tmpDir, 'terraform', 'worker.tf'), 'utf-8');
             expect(workerTf).toContain('REDIS_URL');
-            expect(workerTf).toContain('ignore_changes = [desired_count]');
+            expect(workerTf).toMatch(/ignore_changes\s*=\s*\[task_definition,\s*desired_count\]/);
             expect(trackEvent).toHaveBeenCalledWith(
                 'project_provisioned',
                 expect.objectContaining({ selected_addons: ['db:redis', 'queue:sqs', 'ai:bedrock'] })
@@ -715,6 +715,32 @@ describe('Headless contract (automation-safe)', () => {
                 'project_provisioned',
                 expect.objectContaining({ migration_gate_enabled: true })
             );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('headless init wires the migration gate into preview.yml too', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'alembic.ini'), '[alembic]\n');
+        const parsed = parseCliArgs(['--headless', '--framework=python', '--needsDatabase', '--setup-ci-migrate', '--enablePrPreviews']);
+        const spies = mockConsoleTrio();
+        const { exitSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expectNoInteractivePrompts();
+            expect(exitSpy).not.toHaveBeenCalled();
+            const previewYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'preview.yml'), 'utf-8');
+            expect(previewYml).toContain('# grada:db-migrate-start');
+            expect(previewYml).toContain('--workspace "${{ env.WORKSPACE }}"');
+            expect(previewYml.indexOf('# grada:db-migrate-end')).toBeLessThan(previewYml.indexOf('- name: Comment PR'));
         } finally {
             spies.restore();
         }

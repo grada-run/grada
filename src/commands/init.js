@@ -23,7 +23,7 @@ import {
 import { detectProjectCapabilities } from '../utils/capabilities.js';
 import { ADDON_REGISTRY } from '../utils/addons.js';
 import { validateAddonFlags, resolveAddonOptions, scaffoldAddon, DEFAULT_BEDROCK_MODEL } from './add.js';
-import { injectMigrationGate } from './db/migrate.js';
+import { injectMigrationGate, injectPreviewMigrationGate } from './db/migrate.js';
 import { scaffoldDriftWorkflow } from './drift.js';
 import { trackEvent, flushTelemetry, getCliVersion, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
@@ -666,6 +666,19 @@ async function mainStackMain(input = {}) {
             console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml'));
         } else {
             log.warn(color.yellow('⚠️  Could not wire the migration gate: the deploy workflow anchor was not found.'));
+        }
+        if (target === 'ecs') {
+            const previewYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'preview.yml');
+            const previewContent = readFileSafe(previewYmlPath);
+            if (previewContent) {
+                const previewGated = injectPreviewMigrationGate(previewContent, { cmd: migrationCmd });
+                if (previewGated) {
+                    atomicWriteFileSync(previewYmlPath, previewGated);
+                    console.log(color.green('✅ Wired the preview database migration gate into .github/workflows/preview.yml'));
+                } else {
+                    log.warn(color.yellow('⚠️  Could not wire the preview migration gate: the Comment PR anchor was not found.'));
+                }
+            }
         }
     }
 

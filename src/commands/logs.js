@@ -4,7 +4,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, isComputeTarget } from '../utils/resolvers.js';
-import { failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { sleep } from '../utils/system.js';
 
 export const DEFAULT_TAIL_LINES = 50;
@@ -255,7 +255,12 @@ async function runLogsMain(input = {}) {
             return { logs: [], logGroup, region, service };
         }
 
-        throw error;
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: `✖ ${error?.message || error}`,
+            hint: 'Check your AWS credentials and region, then try again.',
+            resultExtra: { logGroup, region, service, logs: [] },
+        });
     } finally {
         if (follow) process.removeListener('SIGINT', onSigint);
     }

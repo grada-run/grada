@@ -17,6 +17,10 @@ When a PR is opened, Terraform creates a new workspace (e.g., `pr-12`). It provi
 
 To save time and simplify architecture, PR environments **share** your production AWS Secrets Manager vault and ECR Image Repository.
 
+### Preview database migrations
+
+On ECS projects with a database, the preview workflow migrates the preview database after provisioning — the same pre-deploy gate as production, run against the PR workspace — so DB-backed apps work on first load instead of crashing on missing tables. The gate is wired when previews are enabled at scaffold time (see [`init --setup-ci-migrate`](/grada/cli/init/)) or by running [`db migrate --setup-ci`](/grada/cli/db/) on a tree with previews enabled. Lambda previews skip the gate (run migrations from CI against your database endpoint instead).
+
 ### Should I enable this?
 
 **Enable PR previews if:**

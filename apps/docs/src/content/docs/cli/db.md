@@ -76,7 +76,7 @@ npx grada-run db migrate --cmd "node ./dist/seed.cjs" --timeout 1200
 | `--cmd <command>` | Migration command to run. Auto-detected when omitted. |
 | `--task-def <task-def>` | Task definition (ARN or `family:revision`) to run. Defaults to the live service revision. |
 | `--timeout <seconds>` | Give up after this long (default `600`). The task is stopped automatically. |
-| `--setup-ci` | Install the pre-deploy migration gate into `.github/workflows/deploy.yml` instead of running. |
+| `--setup-ci` | Install the pre-deploy migration gate into `.github/workflows/deploy.yml` (plus `preview.yml` when PR previews are enabled) instead of running. |
 | `--project-name <name>` | Explicit project name override. |
 | `--workspace <name>` | Target a PR-preview environment. |
 | `--cluster <name>` | Explicit cluster name override. |
@@ -92,7 +92,7 @@ npx grada-run db migrate --cmd "node ./dist/seed.cjs" --timeout 1200
 npx grada-run db migrate --cmd "node ./dist/migrate.cjs" --setup-ci
 ```
 
-The step is re-installed cleanly on every run, so re-running the command updates the wired migration command in place.
+The step is re-installed cleanly on every run, so re-running the command updates the wired migration command in place. On ECS trees with PR previews enabled, the same run also wires the preview gate into `preview.yml`, which migrates the preview database post-apply — Lambda previews skip the gate.
 
 ## db backup
 

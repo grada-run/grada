@@ -33,7 +33,7 @@ npx grada-run logs -f --since 5m
 ## Automation & edge cases
 
 - Inputs resolve automatically: log group from the project name (overridable via `ECS_LOG_GROUP`), region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`).
-- Follow mode polls every 2 seconds. On expired credentials you get the `aws sso login` / `aws configure` hint and exit 1; on a missing log group, the matching `aws logs describe-log-groups` lookup instead of an error dump.
+- Follow mode polls every 2 seconds. On expired credentials you get the `aws sso login` / `aws configure` hint and exit 1; on a missing log group, the matching `aws logs describe-log-groups` lookup instead of an error dump. Any other AWS failure prints a one-line message with the credentials hint and exits 1 (headless callers get a structured `{ ok: false }` result instead) — never a raw SDK dump.
 
 ## See also
 

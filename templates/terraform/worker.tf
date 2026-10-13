@@ -63,7 +63,10 @@ resource "aws_ecs_service" "worker" {
 
   # Queue-depth auto-scaling (see `grada add queue:sqs`) manages
   # desired_count outside Terraform; ignore it to avoid apply-time drift.
+  # CI registers SHA-pinned task revisions via the API on every deploy,
+  # so task_definition is ignored too — otherwise the next apply would
+  # downgrade the service to the stale Terraform-tracked revision.
   lifecycle {
-    ignore_changes = [desired_count]
+    ignore_changes = [task_definition, desired_count]
   }
 }

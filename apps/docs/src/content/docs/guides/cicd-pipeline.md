@@ -9,10 +9,7 @@ Every `npx grada-run` run generates `.github/workflows/deploy.yml`. This page ex
 
 ## When it runs
 
-The workflow triggers on two events (`templates/github/deploy.yml`):
-
-- A `push` to your deploy branch (`{{DEPLOY_BRANCH}}`, chosen during setup).
-- A weekly Sunday cron (`0 0 * * 0`) that re-applies the Terraform configuration, so drift and base-image updates converge automatically.
+The workflow triggers on a `push` to your deploy branch (`{{DEPLOY_BRANCH}}`, chosen during setup). There is no scheduled trigger on the deploy workflow — recurring checks live in the opt-in drift workflow below, so a broken schedule can never silently disable your deploys.
 
 The region, ECR repository, ECS cluster, and ECS service names are baked in at generation time as `<project>-repo`, `<project>-cluster`, and `<project>-service`.
 
@@ -34,7 +31,7 @@ and assumes the `{{PROJECT_NAME}}-github-actions-role` IAM role created by `terr
 2. **Infrastructure sync.** The `grada-run/grada-action@v1` step runs Terraform against `terraform/`, so infrastructure changes committed alongside code are applied before the new image rolls out.
 3. **Build & push.** The workflow logs in to Amazon ECR, runs `docker build` on your generated `Dockerfile`, and tags the result with both the short commit SHA (e.g. `abc1234`, the immutable deploy artifact) and `latest` (kept for convenience and scanning).
 4. **Container scan.** Trivy scans the built image (`os,library`, `ignore-unfixed: true`), again informational only with results in the step summary.
-5. **Deploy.** Both tags are pushed to ECR then the workflow registers a brand-new ECS task definition revision pinned to the SHA-tagged image and deploys it (`aws ecs update-service --task-definition <new-revision> --force-new-deployment`), which rolls the new image across your tasks behind the ALB. Because every push creates a fresh revision, `npx grada-run rollback [revision]` always has history to return to — and Terraform is configured to leave the service's task definition alone (`lifecycle { ignore_changes = [task_definition] }`), so the next `apply` never reverts a code-only deploy.
+5. **Deploy.** Both tags are pushed to ECR then the workflow registers a brand-new ECS task definition revision pinned to the SHA-tagged image and deploys it (`aws ecs update-service --task-definition <new-revision> --force-new-deployment`), which rolls the new image across your tasks behind the ALB. When the project has a worker (`terraform/worker.tf`), the same stage registers a SHA-pinned worker revision and force-deploys the worker service too, so background-task code ships with every push. Because every push creates a fresh revision, `npx grada-run rollback [revision]` always has history to return to — and Terraform is configured to leave both services' task definitions alone (`lifecycle { ignore_changes = [task_definition] }`), so the next `apply` never reverts a code-only deploy. (Rollback itself stays web-only: it restores the web revision, never the worker.)
 
 ## Lambda target pipeline
 

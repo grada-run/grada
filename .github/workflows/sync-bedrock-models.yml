@@ -20,11 +20,16 @@ jobs:
         id: guard
         run: |
           if [ -z "${{ vars.AWS_ROLE_ARN }}" ]; then
-            echo "Bedrock catalog sync skipped: set the AWS_ROLE_ARN repository variable to enable weekly syncs." >> "$GITHUB_STEP_SUMMARY"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Bedrock catalog sync not configured"
+              echo ""
+              echo "Set the \`AWS_ROLE_ARN\` repository variable (Settings → Secrets and variables → Actions → Variables)"
+              echo "to an IAM role trusting this repo's OIDC provider, then re-run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::AWS_ROLE_ARN repository variable is not set — cannot sync the Bedrock catalog."
+            exit 1
           fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
         if: steps.guard.outputs.enabled == 'true'
@@ -55,3 +60,17 @@ jobs:
           commit-message: 'chore(bedrock): sync model catalog'
           title: 'chore(bedrock): sync AWS Bedrock model catalog'
           body: Automated weekly refresh of `src/data/bedrock-models.json` from live AWS Bedrock data.
+
+      - name: Report sync failure
+        if: failure()
+        run: |
+          {
+            echo "## Bedrock catalog sync failed"
+            echo ""
+            echo "Reproduce and fix locally, then push the updated catalog:"
+            echo '```'
+            echo "npm ci"
+            echo "npm run sync:bedrock-models"
+            echo '```'
+            echo "Unknown model families must gain hint rules in \`src/utils/bedrock-catalog.js\` (\`generateHintForModel\`) before the catalog accepts them."
+          } >> "$GITHUB_STEP_SUMMARY"

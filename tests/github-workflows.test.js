@@ -1,0 +1,100 @@
+import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+import { load as yamlLoad, CORE_SCHEMA } from 'js-yaml';
+import { injectMigrationGate } from '../src/commands/db/migrate.js';
+
+const TEMPLATES_DIR = path.resolve('templates/github');
+// Placeholders ({{FOO}}) break YAML parsing, so substitute dummies first.
+// GitHub expressions (${{ ... }}) are valid plain scalars — leave them.
+const PLACEHOLDER_RE = /(?<!\$)\{\{[^}]+\}\}/g;
+
+function parseTemplate(filename) {
+    const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+    return yamlLoad(raw.replace(PLACEHOLDER_RE, 'dummy'), { schema: CORE_SCHEMA });
+}
+
+const TOP_LEVEL_TRIGGERS = new Set([
+    'push', 'pull_request', 'schedule', 'workflow_dispatch', 'workflow_call',
+]);
+// `schedule` is a top-level trigger only — nested under push/pull_request
+// GitHub rejects the whole workflow file.
+const NESTABLE_TRIGGER_KEYS = new Set([
+    'branches', 'branches-ignore', 'paths', 'paths-ignore', 'tags',
+    'tags-ignore', 'types', 'paths-ignore',
+]);
+
+describe('github workflow templates', () => {
+    const templates = fs.readdirSync(TEMPLATES_DIR).filter((f) => f.endsWith('.yml'));
+
+    it.each(templates)('%s parses as valid YAML with a valid `on:` block', (filename) => {
+        const doc = parseTemplate(filename);
+        expect(doc).toBeTypeOf('object');
+        expect(doc.on).toBeTypeOf('object');
+        for (const key of Object.keys(doc.on)) {
+            expect(TOP_LEVEL_TRIGGERS.has(key), `unknown top-level trigger '${key}' in ${filename}`).toBe(true);
+        }
+        for (const nested of ['push', 'pull_request']) {
+            if (doc.on[nested] == null) continue;
+            expect(doc.on[nested]).toBeTypeOf('object');
+            for (const key of Object.keys(doc.on[nested])) {
+                expect(NESTABLE_TRIGGER_KEYS.has(key), `'${key}' nested under '${nested}' in ${filename}`).toBe(true);
+            }
+        }
+        if (doc.on.schedule !== undefined) {
+            expect(Array.isArray(doc.on.schedule)).toBe(true);
+            for (const entry of doc.on.schedule) {
+                expect(entry).toHaveProperty('cron');
+            }
+        }
+    });
+
+    it('deploy.yml redeploys the worker service alongside web', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
+        // Worker identity (mirrors the ECS_SERVICE/ECS_TASK_FAMILY pair).
+        expect(raw).toContain('ECS_WORKER_SERVICE: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-service');
+        expect(raw).toContain('ECS_WORKER_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-task');
+        // SHA-pinned revision + force-deploy, gated on worker existence so
+        // workerless projects skip cleanly.
+        expect(raw).toContain('- name: Register worker task definition');
+        expect(raw).toContain('- name: Force worker deployment');
+        expect(raw).toContain("if: hashFiles('terraform/worker.tf') != ''");
+        expect(raw).toContain('steps.register-worker-task-def.outputs.task-arn');
+        expect(raw).toContain('--service ${{ env.ECS_WORKER_SERVICE }}');
+    });
+
+    it('preview.yml still parses after preview-gate injection', async () => {
+        const { injectPreviewMigrationGate } = await import('../src/commands/db/migrate.js');
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview.yml'), 'utf8');
+        const injected = injectPreviewMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs' });
+        expect(injected).toContain('# grada:db-migrate-start');
+        const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
+        const steps = doc.jobs['deploy-preview'].steps;
+        expect(steps.some((s) => s?.name === 'Preview Database Migration')).toBe(true);
+    });
+
+    it('publish.yml verifies both npm packages land at the same version', () => {
+        const raw = fs.readFileSync(path.resolve('.github/workflows/publish.yml'), 'utf8');
+        const doc = yamlLoad(raw, { schema: CORE_SCHEMA });
+        const steps = doc.jobs['build-and-publish'].steps;
+        const guard = steps.find((s) => typeof s?.name === 'string' && /lockstep|version.*match/i.test(s.name));
+        expect(guard, 'publish.yml must have a dual-package version guard step').toBeDefined();
+        expect(guard.run).toContain('grada-run');
+        expect(guard.run).toContain('@grada-run/grada');
+        expect(guard.run).toContain('npm view');
+        // Must run after both publishes so it verifies the live registry.
+        const names = steps.map((s) => s?.name || '');
+        const guardIdx = names.indexOf(guard.name);
+        expect(guardIdx).toBeGreaterThan(names.findIndex((n) => /Publish Primary Package/.test(n)));
+        expect(guardIdx).toBeGreaterThan(names.findIndex((n) => /Publish Scoped Alias/.test(n)));
+    });
+
+    it('deploy.yml still parses after migration-gate injection', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
+        const injected = injectMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs' });
+        expect(injected).toContain('# grada:db-migrate-start');
+        const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
+        const steps = doc.jobs.deploy.steps;
+        expect(steps.some((s) => typeof s?.run === 'string' && s.run.includes('migrate'))).toBe(true);
+    });
+});

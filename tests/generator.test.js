@@ -228,6 +228,16 @@ describe('worker.tf without a database', () => {
         expect(workerTf).toContain('${local.ecr_url}');
         expect(workerTf).not.toContain('aws_ecr_repository.app.repository_url');
     });
+
+    it('worker service ignores CI-managed task_definition revisions', async () => {
+        // The deploy workflow registers SHA-pinned worker revisions via the
+        // API; without this lifecycle guard the next apply would downgrade
+        // the service back to the stale Terraform-tracked revision.
+        const template = await fs.readFile(
+            path.join(process.cwd(), 'templates/terraform/worker.tf'), 'utf8'
+        );
+        expect(template).toMatch(/ignore_changes\s*=\s*\[task_definition,\s*desired_count\]/);
+    });
 });
 
 describe('database env vars render as bare HCL references', () => {
@@ -1021,7 +1031,7 @@ describe('R18: sleep auto-vars guards (plan-identity fixtures)', () => {
 
     it('worker.tf keeps desired_count ignored (autoscaling-owned, no guard needed)', async () => {
         const content = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'worker.tf'), 'utf-8');
-        expect(content).toContain('ignore_changes = [desired_count]');
+        expect(content).toMatch(/ignore_changes\s*=\s*\[task_definition,\s*desired_count\]/);
         expect(content).not.toContain('var.asleep');
     });
 });

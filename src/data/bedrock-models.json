@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-09-27",
+  "updatedAt": "2026-10-12",
   "defaultModelId": "us.anthropic.claude-sonnet-4-6",
   "providers": [
     {
@@ -138,6 +138,24 @@
             "us",
             "global"
           ]
+        },
+        {
+          "id": "us.anthropic.claude-sonnet-5-5",
+          "name": "Anthropic Claude Sonnet 5.5",
+          "hint": "Sonnet-tier coding & agents (adaptive thinking on; omit temperature)",
+          "scopes": [
+            "us",
+            "global"
+          ]
+        },
+        {
+          "id": "us.anthropic.claude-haiku-5-5",
+          "name": "Anthropic Claude Haiku 5.5",
+          "hint": "Haiku-tier low-latency, high-throughput workloads",
+          "scopes": [
+            "us",
+            "global"
+          ]
         }
       ]
     },
@@ -246,6 +264,15 @@
           "hint": "Safety moderation & content classification",
           "scopes": [
             "regional"
+          ]
+        },
+        {
+          "id": "us.openai.gpt-6.1-sol",
+          "name": "OpenAI GPT-6.1 Sol",
+          "hint": "Flagship multi-step reasoning & agentic workflows (Converse API)",
+          "scopes": [
+            "us",
+            "global"
           ]
         }
       ]
@@ -535,6 +562,15 @@
             "us",
             "global"
           ]
+        },
+        {
+          "id": "us.xai.grok-4.7",
+          "name": "xAI Grok 4.7",
+          "hint": "Real-time reasoning, coding & tool use",
+          "scopes": [
+            "us",
+            "global"
+          ]
         }
       ]
     },
@@ -555,6 +591,14 @@
           "hint": "Long-context agentic tool use & coding",
           "scopes": [
             "regional"
+          ]
+        },
+        {
+          "id": "global.moonshotai.kimi-k3",
+          "name": "Moonshot AI Kimi K3",
+          "hint": "Long-context agentic tool use & coding",
+          "scopes": [
+            "global"
           ]
         }
       ]
@@ -690,8 +734,7 @@
           "name": "TwelveLabs Pegasus v1.2",
           "hint": "Video understanding, search & narrative extraction",
           "scopes": [
-            "us",
-            "global"
+            "us"
           ]
         }
       ]
@@ -725,8 +768,7 @@
           "name": "Moonshot AI Kimi K3",
           "hint": "Long-context agentic tool use & coding",
           "scopes": [
-            "us",
-            "global"
+            "us"
           ]
         }
       ]
@@ -888,6 +930,42 @@
           "hint": "Enterprise-focused writing, document analysis & vision",
           "scopes": [
             "regional"
+          ]
+        }
+      ]
+    },
+    {
+      "provider": "TwelveLabs",
+      "models": [
+        {
+          "id": "global.twelvelabs.pegasus-1-2-v1:0",
+          "name": "TwelveLabs Pegasus v1.2",
+          "hint": "Video understanding, search & narrative extraction",
+          "scopes": [
+            "global"
+          ]
+        },
+        {
+          "id": "us.twelvelabs.pegasus-1-5-v1:0",
+          "name": "TwelveLabs Pegasus v1.5",
+          "hint": "Video understanding, search & narrative extraction",
+          "scopes": [
+            "us",
+            "global"
+          ]
+        }
+      ]
+    },
+    {
+      "provider": "Zhipu AI",
+      "models": [
+        {
+          "id": "us.zai.glm-5.3",
+          "name": "Z.AI GLM 5.3",
+          "hint": "Bilingual Chinese-English reasoning, coding & tool use",
+          "scopes": [
+            "us",
+            "global"
           ]
         }
       ]
