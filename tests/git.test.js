@@ -15,6 +15,9 @@ describe('parseGitHubRepoFromUrl', () => {
         ['ssh://git@github.com/acme/widgets.git', 'acme/widgets'],
         ['https://x-access-token:sekret@github.com/acme/widgets.git', 'acme/widgets'],
         ['https://github.com/My-Org/my.repo_name-2', 'My-Org/my.repo_name-2'],
+        ['ssh://git@github.com:22/acme/widgets.git', 'acme/widgets'],
+        ['https://github.com:8443/acme/widgets.git', 'acme/widgets'],
+        ['https://x-access-token:sekret@github.com:443/acme/widgets', 'acme/widgets'],
     ])('parses %s', (url, expected) => {
         expect(parseGitHubRepoFromUrl(url)).toBe(expected);
     });

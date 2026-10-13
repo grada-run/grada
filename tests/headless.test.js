@@ -11,7 +11,7 @@ import { parseCliArgs } from '../src/core/parser.js';
 import { getProjectConfig, getTargetDirectory, sanitizeProjectName } from '../src/utils/prompts.js';
 import { trackEvent } from '../src/core/telemetry.js';
 import { provisionStateBucket } from '../src/utils/aws.js';
-import { mainStack } from '../src/commands/init.js';
+import { mainStack, resolveOidcTrust } from '../src/commands/init.js';
 
 // Deep-mock the interactive prompt library. The CLI only uses
 // `@clack/prompts` for interactive mode (verified: no `inquirer` or
@@ -1229,5 +1229,231 @@ describe('Headless: OIDC trust scoping', () => {
 
         expect(await renderedTrust()).toBe('repo:*');
         expect(logText).toContain('repo:*');
+    });
+
+    async function handEditTrust(subValue) {
+        const oidcPath = path.join(tmpDir, 'terraform', 'oidc.tf');
+        const oidc = await fs.readFile(oidcPath, 'utf-8');
+        await fs.writeFile(
+            oidcPath,
+            oidc.replace(
+                /"token\.actions\.githubusercontent\.com:sub"\s*:\s*"[^"]*"/,
+                `"token.actions.githubusercontent.com:sub" : ${subValue}`
+            )
+        );
+    }
+
+    it('refuses headless widening of a multi-entry list trust', async () => {
+        await runHeadlessInit(['--headless', '--framework=node']);
+        await handEditTrust('["repo:acme/a:*", "repo:acme/b:*"]');
+        vi.clearAllMocks();
+        const { result, exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect(result).toMatchObject({ ok: false, reason: 'oidc-trust-widening-refused' });
+        expect(exitCalls).toEqual([1]);
+        expect(trackEvent).toHaveBeenCalledWith(
+            'cli-error',
+            expect.objectContaining({ step: 'init_oidc_trust', error_code: 'OIDC_TRUST_WIDENING_REFUSED' })
+        );
+        // Refusal precedes backup/regeneration: the hand edit is untouched.
+        const oidc = await fs.readFile(path.join(tmpDir, 'terraform', 'oidc.tf'), 'utf-8');
+        expect(oidc).toContain('"repo:acme/a:*", "repo:acme/b:*"');
+        expect(provisionStateBucket).not.toHaveBeenCalled();
+    });
+
+    it('--github-repo proceeds over a multi-entry list, warning about dropped entries', async () => {
+        await runHeadlessInit(['--headless', '--framework=node']);
+        await handEditTrust('["repo:acme/a:*", "repo:acme/b:*"]');
+        vi.clearAllMocks();
+        const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node', '--force', '--github-repo=acme/c']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('repo:acme/c:*');
+        expect(logText).toContain('repo:acme/a:*');
+        expect(logText).toContain('repo:acme/b:*');
+    });
+
+    it('unwraps single-entry lists silently on re-init', async () => {
+        await runHeadlessInit(['--headless', '--framework=node']);
+        await handEditTrust('["repo:acme/widgets:*"]');
+        vi.clearAllMocks();
+        const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(logText).not.toContain('repo:*');
+        expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
+    });
+
+    it('refuses headless widening of non-literal trusts', async () => {
+        await runHeadlessInit(['--headless', '--framework=node']);
+        await handEditTrust('var.allowed_repos');
+        vi.clearAllMocks();
+        const { result, exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect(result).toMatchObject({ ok: false, reason: 'oidc-trust-widening-refused' });
+        expect(exitCalls).toEqual([1]);
+    });
+});
+
+describe('resolveOidcTrust', () => {
+    let logged;
+    const base = { targetDir: '/tmp/oidc-test', log: (...args) => { logged.push(args.join(' ')); } };
+
+    beforeEach(() => {
+        logged = [];
+    });
+
+    it('flag wins over a scoped tree string, warning about the override', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            explicitSlug: 'acme/c',
+            treeClaim: { kind: 'string', value: 'repo:acme/a:*' },
+        });
+        expect(result).toEqual({ sub: 'repo:acme/c:*', source: 'flag' });
+        expect(logged.join('\n')).toContain('repo:acme/a:*');
+    });
+
+    it('flag matching the tree stays silent', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            explicitSlug: 'acme/a',
+            treeClaim: { kind: 'string', value: 'repo:acme/a:*' },
+        });
+        expect(result).toEqual({ sub: 'repo:acme/a:*', source: 'flag' });
+        expect(logged).toEqual([]);
+    });
+
+    it('flag over a multi-entry list warns naming the dropped entries', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            explicitSlug: 'acme/c',
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:acme/b:*'] },
+        });
+        expect(result).toEqual({ sub: 'repo:acme/c:*', source: 'flag' });
+        const text = logged.join('\n');
+        expect(text).toContain('repo:acme/a:*');
+        expect(text).toContain('repo:acme/b:*');
+    });
+
+    it('flag over a non-literal claim warns', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            explicitSlug: 'acme/c',
+            treeClaim: { kind: 'unparseable' },
+        });
+        expect(result).toEqual({ sub: 'repo:acme/c:*', source: 'flag' });
+        expect(logged.join('\n')).toMatch(/non-literal/);
+    });
+
+    it('keeps scoped tree strings silently', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'string', value: 'repo:acme/a:*' },
+        });
+        expect(result).toEqual({ sub: 'repo:acme/a:*', source: 'tree' });
+        expect(logged).toEqual([]);
+    });
+
+    it('keeps open tree strings with a warning', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'string', value: 'repo:*' },
+        });
+        expect(result).toEqual({ sub: 'repo:*', source: 'tree' });
+        expect(logged.join('\n')).toContain('repo:*');
+    });
+
+    it('unwraps single-entry lists like their bare string', async () => {
+        const scoped = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*'] },
+        });
+        expect(scoped).toEqual({ sub: 'repo:acme/a:*', source: 'tree' });
+        expect(logged).toEqual([]);
+        const open = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:*'] },
+        });
+        expect(open).toEqual({ sub: 'repo:*', source: 'tree' });
+        expect(logged.join('\n')).toContain('repo:*');
+    });
+
+    it('derives from the remote, warning when replacing a complex claim', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:acme/b:*'] },
+            readRemote: () => 'acme/c',
+        });
+        expect(result).toEqual({ sub: 'repo:acme/c:*', source: 'remote' });
+        expect(logged.join('\n')).toContain('repo:acme/a:*');
+    });
+
+    it('prompts interactively and proceeds scoped with a warning', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            isInteractive: true,
+            treeClaim: { kind: 'unparseable' },
+            readRemote: () => null,
+            promptRepo: async () => 'acme/c',
+        });
+        expect(result).toEqual({ sub: 'repo:acme/c:*', source: 'prompt' });
+        expect(logged.join('\n')).toMatch(/non-literal/);
+    });
+
+    it('falls back with a warning when nothing identifies the repo', async () => {
+        const result = await resolveOidcTrust({ ...base, readRemote: () => null });
+        expect(result).toEqual({ sub: 'repo:*', source: 'fallback' });
+        const text = logged.join('\n');
+        expect(text).toContain('repo:*');
+        expect(text).toContain('--github-repo');
+    });
+
+    it('refuses headless widening of multi-entry lists', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:acme/b:*'] },
+            readRemote: () => null,
+        });
+        expect(result.refusal).toMatchObject({
+            errorCode: 'OIDC_TRUST_WIDENING_REFUSED',
+            reason: 'oidc-trust-widening-refused',
+        });
+        expect(result.refusal.hint).toContain('--github-repo');
+    });
+
+    it('refuses headless widening of non-literal claims', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'unparseable' },
+            readRemote: () => null,
+        });
+        expect(result.refusal).toMatchObject({ reason: 'oidc-trust-widening-refused' });
+    });
+
+    it('confirms interactively before widening on a skipped prompt', async () => {
+        let confirmedMessage = '';
+        const result = await resolveOidcTrust({
+            ...base,
+            isInteractive: true,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:acme/b:*'] },
+            readRemote: () => null,
+            promptRepo: async () => null,
+            confirmWiden: async (message) => { confirmedMessage = message; return true; },
+        });
+        expect(result).toEqual({ sub: 'repo:*', source: 'fallback' });
+        expect(confirmedMessage).toContain('repo:acme/a:*');
+    });
+
+    it('cancels when the widening confirm is declined', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            isInteractive: true,
+            treeClaim: { kind: 'unparseable' },
+            readRemote: () => null,
+            promptRepo: async () => null,
+            confirmWiden: async () => false,
+        });
+        expect(result).toEqual({ cancelled: true });
     });
 });

@@ -752,6 +752,38 @@ describe('db: dispatcher', () => {
         expect(result.reason).toBe('unknown-db-subcommand');
         expect(exitSpy).toHaveBeenCalledWith(1);
     });
+
+    it.each([
+        ['db', 'migrate', '--help'],
+        ['db', 'backup', '--help'],
+        ['db', 'connect', '-h'],
+        ['db', 'enable-vector', '--help'],
+        ['db', 'restore', '--help'],
+        ['db', 'import', '--help'],
+    ])('prints usage without dispatching for %s', async (...argv) => {
+        const result = await runDb(argv);
+        expect(result).toEqual({ ok: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        const text = stripVTControlCharacters(output.join('\n'));
+        expect(text).toContain('db migrate');
+        expect(text).toContain('db backup');
+        expect(mockTrackEvent).not.toHaveBeenCalled();
+    });
+
+    it('prints usage with exit 0 for bare db --help', async () => {
+        const result = await runDb(['db', '--help']);
+        expect(result).toEqual({ ok: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(stripVTControlCharacters(output.join('\n'))).toContain('db migrate');
+        expect(mockTrackEvent).not.toHaveBeenCalled();
+    });
+
+    it('prefers usage over the unknown-subcommand error', async () => {
+        const result = await runDb(['db', 'frobnicate', '--help']);
+        expect(result).toEqual({ ok: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(stripVTControlCharacters(output.join('\n'))).not.toContain('Unknown db subcommand');
+    });
 });
 
 describe('db: migrate/backup/restore parsers', () => {

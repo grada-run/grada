@@ -654,6 +654,59 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('warns on list trusts containing an open repo:* entry', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : ["repo:acme/a:*", "repo:*"]\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/repo:\*/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+                check_oidc_trust_scope: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes list trusts with only scoped entries', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : ["repo:acme/a:*", "repo:acme/b:*"]\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_oidc_trust_scope: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('skips non-literal trusts as not parseable, not as missing', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : var.allowed_repos\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            const text = output.join('\n');
+            expect(text).toMatch(/not parseable/i);
+            expect(text).not.toMatch(/no oidc\.tf trust found/);
+        } finally {
+            restore();
+        }
+    });
+
     it('skips the OIDC trust check when oidc.tf is absent', async () => {
         writeProjectWithBackend();
         const s3Client = { send: vi.fn(async () => ({ Contents: [] })) };

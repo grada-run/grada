@@ -126,15 +126,26 @@ export function readTerraformProjectName(cwd = process.cwd()) {
     return null;
 }
 
-// Reads the GitHub OIDC trust (`repo:owner/name:*` or the open `repo:*`)
-// from an existing tree's oidc.tf, so re-init preserves the rendered
-// trust instead of re-deriving it. Null when the file or claim is absent.
+// Reads the GitHub OIDC trust from an existing tree's oidc.tf: a bare
+// string (`repo:owner/name:*` or the open `repo:*`), a hand-maintained
+// list, or a non-literal (var/ref/function) claim. Null when the file or
+// claim is absent. Callers distinguish "no trust" (null) from "trust we
+// cannot render" (list/unparseable) so re-init never silently widens.
 export function readTerraformOidcTrust(cwd = process.cwd()) {
     const base = resolveCwd({}, cwd);
     const oidcTf = readFileSafe(path.join(base, 'terraform', 'oidc.tf'));
     if (!oidcTf) return null;
-    const match = oidcTf.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*"([^"]+)"/);
-    return match ? match[1] : null;
+    const claimMatch = oidcTf.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*(\[[\s\S]*?\]|"[^"]*")/);
+    if (!claimMatch) {
+        const hasClaim = /"token\.actions\.githubusercontent\.com:sub"\s*:/.test(oidcTf);
+        return hasClaim ? { kind: 'unparseable' } : null;
+    }
+    const raw = claimMatch[1];
+    if (raw.startsWith('[')) {
+        const entries = [...raw.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+        return { kind: 'list', entries };
+    }
+    return { kind: 'string', value: raw.slice(1, -1) };
 }
 
 // Collision-resistant naming: init mints a `-a1b2c3` suffix per project,

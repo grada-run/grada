@@ -12,12 +12,13 @@ function runCliHelp(args) {
         const stdout = execFileSync(process.execPath, [CLI_PATH, ...args], {
             encoding: 'utf8',
             cwd,
+            stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...process.env, DO_NOT_TRACK: '1', FORCE_COLOR: '0' },
-            timeout: 30000,
+            timeout: 60000,
         });
-        return { status: 0, stdout };
+        return { status: 0, stdout, stderr: '', entries: fs.readdirSync(cwd) };
     } catch (error) {
-        return { status: error.status ?? 1, stdout: String(error.stdout ?? '') };
+        return { status: error.status ?? 1, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? ''), entries: fs.readdirSync(cwd) };
     } finally {
         fs.rmSync(cwd, { recursive: true, force: true });
     }
@@ -70,10 +71,63 @@ describe('CLI Executable', () => {
         expect(stdout).toContain('db backup');
     });
 
+    it.each(['migrate', 'backup', 'connect', 'enable-vector', 'restore', 'import'])(
+        'db %s --help prints db usage instead of executing',
+        (leaf) => {
+            const { status, stdout } = runCliHelp(['db', leaf, '--help']);
+            expect(status).toBe(0);
+            expect(stdout).toContain('db migrate');
+            expect(stdout).not.toContain('grada — Provision production-ready AWS infrastructure');
+        }
+    );
+
     it('bare --help still prints the top-level usage', () => {
         const { status, stdout } = runCliHelp(['--help']);
         expect(status).toBe(0);
         expect(stdout).toContain('grada — Provision production-ready AWS infrastructure');
+    });
+
+    it.each([['--version'], ['-v']])('%s prints the CLI version and exits 0', (flag) => {
+        const { status, stdout } = runCliHelp([flag]);
+        const { version } = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+        expect(status).toBe(0);
+        expect(stdout.trim()).toBe(`grada ${version}`);
+    });
+
+    it('destroy --version prints the version instead of executing', () => {
+        const { status, stdout } = runCliHelp(['destroy', '--version']);
+        expect(status).toBe(0);
+        expect(stdout).toMatch(/^grada \d+\.\d+\.\d+/m);
+    });
+
+    it('db --version prints the version (no db exemption for version)', () => {
+        const { status, stdout } = runCliHelp(['db', '--version']);
+        expect(status).toBe(0);
+        expect(stdout).toMatch(/^grada \d+\.\d+\.\d+/m);
+    });
+
+    it('documents --version in the global options', () => {
+        const content = fs.readFileSync(CLI_PATH, 'utf8');
+        expect(content).toContain('--version, -v');
+    });
+
+    it('rejects unknown commands with usage and exit 1, writing nothing', () => {
+        const { status, stdout, stderr, entries } = runCliHelp(['frobnicate', '--headless', '--offline']);
+        expect(status).toBe(1);
+        expect(stderr).toContain('Unknown command "frobnicate"');
+        expect(stdout).toContain('grada — Provision production-ready AWS infrastructure');
+        expect(entries).toEqual([]);
+    });
+
+    it('still routes an explicit init positional to scaffolding', () => {
+        const { status, entries } = runCliHelp(['init', '--headless', '--framework=node', '--offline']);
+        expect(status).toBe(0);
+        expect(entries).toContain('terraform');
+    });
+
+    it('still routes bare no-args invocations to the init wizard', () => {
+        const content = fs.readFileSync(CLI_PATH, 'utf8');
+        expect(content).toMatch(/positionalArgs\[0\] === undefined[\s\S]{0,200}mainStack/);
     });
 
     it('documents the telemetry opt-out in help text and routes the command', () => {

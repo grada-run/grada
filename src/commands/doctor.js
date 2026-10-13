@@ -190,14 +190,20 @@ async function checkStateLock({ cwd, s3Client, deep }) {
 // warning): surfaces yellow without flipping the verdict red.
 // Project check: an open `repo:*` OIDC trust lets any GitHub repo's
 // Actions assume the deploy role. Warning-grade (pre-fix trees render it
-// by default): surfaces yellow without flipping the verdict red.
+// by default): surfaces yellow without flipping the verdict red. List
+// trusts flag when any entry is open; non-literal claims (var/ref)
+// skip honestly as not parseable rather than as missing.
 function checkOidcTrustScope({ cwd }) {
     const trust = readTerraformOidcTrust(cwd);
     if (trust === null) return { ok: true, skipped: 'no oidc.tf trust found' };
-    if (trust !== 'repo:*') return { ok: true };
+    if (trust.kind === 'unparseable') {
+        return { ok: true, skipped: 'trust value not parseable (non-literal claim — review by hand)' };
+    }
+    const entries = trust.kind === 'list' ? trust.entries : [trust.value];
+    if (!entries.includes('repo:*')) return { ok: true };
     return {
         ok: false,
-        detailLines: ['CI trust is open (repo:*): any repo\'s Actions can assume the deploy role — re-scope before going live.'],
+        detailLines: [`CI trust is open (${trust.kind === 'list' ? 'list entry repo:*' : 'repo:*'}): any repo's Actions can assume the deploy role — re-scope before going live.`],
     };
 }
 

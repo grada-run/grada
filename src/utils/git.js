@@ -9,9 +9,10 @@ export function isValidGitHubRepoSlug(slug) {
 }
 
 // Extracts `owner/name` from https (with or without userinfo, as CI
-// checkouts embed tokens), ssh://, and scp-like remote URLs. Anything
-// else (non-GitHub hosts, malformed input) yields null.
-const REMOTE_URL_RE = /^(?:https?:\/\/(?:[^@/\s]+@)?github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i;
+// checkouts embed tokens, and optional ports), ssh:// (optional port),
+// and scp-like remote URLs. Anything else (non-GitHub hosts, malformed
+// input) yields null.
+const REMOTE_URL_RE = /^(?:https?:\/\/(?:[^@/\s]+@)?github\.com(?::\d+)?\/|ssh:\/\/git@github\.com(?::\d+)?\/|git@github\.com:)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i;
 
 export function parseGitHubRepoFromUrl(url) {
     if (typeof url !== 'string') return null;

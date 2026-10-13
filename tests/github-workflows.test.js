@@ -81,9 +81,13 @@ describe('github workflow templates', () => {
         expect(guard, 'publish.yml must have a dual-package version guard step').toBeDefined();
         expect(guard.run).toContain('grada-run');
         expect(guard.run).toContain('@grada-run/grada');
-        expect(guard.run).toContain('npm view');
-        // Registry/CDN read-after-write lag lasts minutes: the guard must
-        // retry on a minutes-long window, not seconds.
+        // The guard must read the immutable version-doc endpoint, never the
+        // packument: `npm view` stayed stale 10+ minutes after the 0.40.3
+        // publish and failed the release on live versions.
+        expect(guard.run).toContain('https://registry.npmjs.org/${ENCODED}/${EXPECTED}');
+        expect(guard.run).toContain('"%{http_code}"');
+        // Registry write delays are real: the guard must retry on a
+        // minutes-long window, not seconds.
         expect(guard.run).toContain('seq 1 30');
         // Re-runs must survive already-live versions (tolerating only the
         // specific already-published error), or a retried release can never

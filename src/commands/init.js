@@ -1,6 +1,6 @@
 import fsSync from 'fs';
 import path from 'path';
-import { intro, outro, spinner, log, confirm, multiselect, select, cancel } from '@clack/prompts';
+import { intro, outro, spinner, log, confirm, multiselect, select, cancel, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 
 import { checkDependency } from '../utils/system.js';
@@ -78,6 +78,94 @@ export async function mainStack(input = {}) {
     } finally {
         resetActiveCommandName();
     }
+}
+
+// Classifies an existing tree's OIDC claim for re-init: a bare string (or
+// single-entry list, IAM-identical) renders verbatim; anything richer is
+// described for warnings and guarded against silent widening.
+function classifyTreeTrust(claim) {
+    if (!claim) return { trust: null, complex: null };
+    if (claim.kind === 'string') return { trust: claim.value, complex: null };
+    if (claim.kind === 'list' && claim.entries.length === 1) {
+        return { trust: claim.entries[0], complex: null };
+    }
+    if (claim.kind === 'list') {
+        const entries = claim.entries.length > 0 ? ` (${claim.entries.join(', ')})` : '';
+        return { trust: null, complex: `${claim.entries.length}-entry list${entries}` };
+    }
+    return { trust: null, complex: 'non-literal trust value' };
+}
+
+// Resolves the OIDC trust to render: explicit flag wins, then the tree's
+// rendered trust, then the git remote, then one skippable interactive
+// prompt, then the open fallback. Never silently widens a non-trivial
+// existing claim (multi-entry list, var/ref) to the fallback: headless
+// refuses, interactive confirms. Returns { sub, source }, { refusal }, or
+// { cancelled }. Prompt/confirm/remote/log are injectable for tests.
+export async function resolveOidcTrust({
+    explicitSlug = null,
+    treeClaim = null,
+    targetDir = process.cwd(),
+    isInteractive = false,
+    readRemote = readGitHubRepoFromRemote,
+    promptRepo = promptGitHubRepo,
+    confirmWiden = null,
+    log = console.log,
+} = {}) {
+    const confirmFn = confirmWiden ?? (async (message) => {
+        const answer = await confirm({ message, initialValue: false });
+        return answer === true && !isCancel(answer);
+    });
+    const { trust: treeTrust, complex: complexClaim } = classifyTreeTrust(treeClaim);
+    if (explicitSlug) {
+        if (complexClaim) {
+            log(color.yellow(`⚠️  --github-repo replaces this tree's ${complexClaim} — the next apply trusts ${explicitSlug} only.`));
+        } else if (treeTrust && treeTrust !== `repo:${explicitSlug}:*`) {
+            log(color.yellow(`⚠️  --github-repo overrides this tree's CI trust (${treeTrust}) — the next apply re-scopes the deploy role.`));
+        }
+        return { sub: `repo:${explicitSlug}:*`, source: 'flag' };
+    }
+    if (treeTrust) {
+        if (treeTrust === 'repo:*') {
+            log(color.yellow('⚠️  Keeping this tree\'s open CI trust (repo:*): any GitHub repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
+        }
+        return { sub: treeTrust, source: 'tree' };
+    }
+    const remoteSlug = readRemote(targetDir);
+    if (remoteSlug) {
+        if (complexClaim) {
+            log(color.yellow(`⚠️  Derived repo ${remoteSlug} from the git remote, replacing this tree's ${complexClaim} — the next apply re-scopes the deploy role.`));
+        }
+        return { sub: `repo:${remoteSlug}:*`, source: 'remote' };
+    }
+    if (isInteractive) {
+        const promptedSlug = await promptRepo();
+        if (promptedSlug) {
+            if (complexClaim) {
+                log(color.yellow(`⚠️  Scoping the deploy role to ${promptedSlug}, replacing this tree's ${complexClaim}.`));
+            }
+            return { sub: `repo:${promptedSlug}:*`, source: 'prompt' };
+        }
+    }
+    if (complexClaim) {
+        if (!isInteractive) {
+            return {
+                refusal: {
+                    message: `\n✖ Refusing to widen this tree's ${complexClaim} to the open repo:* trust.`,
+                    hint: '  Re-run with --github-repo owner/name to scope it explicitly, or narrow terraform/oidc.tf by hand.\n',
+                    useErrorStream: true,
+                    event: 'cli-error',
+                    telemetry: { step: 'init_oidc_trust' },
+                    errorCode: 'OIDC_TRUST_WIDENING_REFUSED',
+                    reason: 'oidc-trust-widening-refused',
+                },
+            };
+        }
+        const proceed = await confirmFn(`Replace this tree's ${complexClaim} with the open repo:* trust?`);
+        if (proceed !== true) return { cancelled: true };
+    }
+    log(color.yellow('⚠️  Could not determine your GitHub repo (no --github-repo, no git remote) — CI trust is OPEN (repo:*): any repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
+    return { sub: 'repo:*', source: 'fallback' };
 }
 
 async function mainStackMain(input = {}) {
@@ -268,44 +356,26 @@ async function mainStackMain(input = {}) {
     const config = await getProjectConfig(isHeadless, headlessOptions, dirConfig.targetDir, detectedFramework, { capabilities, dbEngine: explicitDbEngine, target });
     config.target = target;
 
-    // 3a. Scope the GitHub OIDC trust: explicit flag wins, then the existing
-    // tree's rendered trust (re-init never re-derives), then the git remote,
-    // then one skippable interactive prompt; headless falls through to the
-    // open trust with a loud warning. Telemetry records the mode only —
-    // never the owner/repo.
-    const treeOidcTrust = readTerraformOidcTrust(dirConfig.targetDir);
-    let oidcTrustSub;
-    let oidcTrustSource;
-    if (explicitGitHubRepo) {
-        oidcTrustSub = `repo:${explicitGitHubRepo}:*`;
-        oidcTrustSource = 'flag';
-        if (treeOidcTrust && treeOidcTrust !== oidcTrustSub) {
-            console.log(color.yellow(`⚠️  --github-repo overrides this tree's CI trust (${treeOidcTrust}) — the next apply re-scopes the deploy role.`));
-        }
-    } else if (treeOidcTrust) {
-        oidcTrustSub = treeOidcTrust;
-        oidcTrustSource = 'tree';
-        if (treeOidcTrust === 'repo:*') {
-            console.log(color.yellow('⚠️  Keeping this tree\'s open CI trust (repo:*): any GitHub repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
-        }
-    } else {
-        const remoteSlug = readGitHubRepoFromRemote(dirConfig.targetDir);
-        if (remoteSlug) {
-            oidcTrustSub = `repo:${remoteSlug}:*`;
-            oidcTrustSource = 'remote';
-        } else if (isInteractive) {
-            const promptedSlug = await promptGitHubRepo();
-            if (promptedSlug) {
-                oidcTrustSub = `repo:${promptedSlug}:*`;
-                oidcTrustSource = 'prompt';
-            }
-        }
-        if (!oidcTrustSub) {
-            oidcTrustSub = 'repo:*';
-            oidcTrustSource = 'fallback';
-            console.log(color.yellow('⚠️  Could not determine your GitHub repo (no --github-repo, no git remote) — CI trust is OPEN (repo:*): any repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
-        }
+    // 3a. Scope the GitHub OIDC trust (see resolveOidcTrust): explicit flag
+    // wins, then the tree's rendered trust, then the git remote, then one
+    // skippable prompt; headless falls through to the open trust — unless
+    // that would widen a non-trivial existing claim, which refuses
+    // (headless) or confirms (interactive). Telemetry records the mode
+    // only — never the owner/repo.
+    const oidcResolution = await resolveOidcTrust({
+        explicitSlug: explicitGitHubRepo,
+        treeClaim: readTerraformOidcTrust(dirConfig.targetDir),
+        targetDir: dirConfig.targetDir,
+        isInteractive,
+    });
+    if (oidcResolution.refusal) {
+        return failCommand({ ...oidcResolution.refusal });
     }
+    if (oidcResolution.cancelled) {
+        cancel('Operation cancelled. Re-run with --github-repo owner/name to scope the trust explicitly.');
+        process.exit(0);
+    }
+    const { sub: oidcTrustSub, source: oidcTrustSource } = oidcResolution;
     trackEvent('init_oidc_trust', {
         projectName: dirConfig.actualProjectName,
         mode: oidcTrustSub === 'repo:*' ? 'fallback' : 'scoped',

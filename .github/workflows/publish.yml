@@ -128,24 +128,30 @@ jobs:
             esac
           }
 
-      # Dual-package lockstep: the bare and scoped packages must resolve to
-      # the same version, or consumers chronically run one release behind.
-      # Retries tolerate npm registry/CDN read-after-write lag after publish
-      # (stale packuments can persist for minutes, not seconds).
+      # Dual-package lockstep: both packages must carry the release version,
+      # or consumers chronically run one release behind. Verified against
+      # the immutable version-doc endpoint — a never-before-requested URL,
+      # so every read is a cache miss served from origin. Deliberately NOT
+      # `npm view` (packument): packument reads stayed stale 10+ minutes
+      # after the 0.40.3 publish (CDN edge TTL plus the CLI's own cache),
+      # failing the release on versions that were already live. The
+      # `latest` tag is printed best-effort only — it lives in the same
+      # stale packument, so it can never be a fail criterion here.
       - name: Verify dual-package version lockstep
         run: |
           EXPECTED=$(node -p "require('./package.json').version")
           for PKG in grada-run @grada-run/grada; do
-            PUBLISHED=""
+            ENCODED="${PKG//\//%2F}"
+            OK=""
             for i in $(seq 1 30); do
-              PUBLISHED=$(npm view "$PKG" version 2>/dev/null || true)
-              if [ "$PUBLISHED" = "$EXPECTED" ]; then break; fi
-              echo "Waiting for $PKG@$EXPECTED (registry shows '${PUBLISHED:-MISSING}', attempt $i/30)..."
+              CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${ENCODED}/${EXPECTED}" || echo 000)
+              if [ "$CODE" = "200" ]; then OK=1; break; fi
+              echo "Waiting for $PKG@$EXPECTED (registry: HTTP $CODE, attempt $i/30)..."
               sleep 10
             done
-            if [ "$PUBLISHED" != "$EXPECTED" ]; then
-              echo "::error::Package $PKG resolved to '${PUBLISHED:-MISSING}', expected $EXPECTED. Republish to restore lockstep."
+            if [ -z "$OK" ]; then
+              echo "::error::$PKG@$EXPECTED not found on the registry after 5 minutes. Check the publish steps above."
               exit 1
             fi
-            echo "$PKG at $PUBLISHED"
+            echo "$PKG@$EXPECTED published (latest tag: $(npm view "$PKG" version 2>/dev/null || echo unknown))"
           done

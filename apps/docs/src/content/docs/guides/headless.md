@@ -97,6 +97,7 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - Fresh `init` over a state bucket that already holds this project's key fails with `STATE_ALREADY_EXISTS` (pass `--adopt-state` to take over that state, or rename the project).
 - `wake` fails with `ECS_WAKE_CRASH_LOOP` when restored tasks keep crashing, or `ECS_WAKE_PULL_FAILURE` when a task is stuck `PENDING` on an unpullable image (the message names the most recent failure in both cases), or `ECS_WAKE_TIMEOUT` when tasks never reach the desired count — every path applies the restore first, so inspect with `status` and fix the task before retrying.
 - `apply` fails with `PARTIAL_STATE` when the outputs map comes back empty (pass `--allow-partial-outputs` for trees that legitimately declare no outputs).
+- Re-running setup over a multi-entry or non-literal OIDC trust fails with `OIDC_TRUST_WIDENING_REFUSED` when no repo can be determined (pass `--github-repo owner/name` to scope it explicitly, or narrow `terraform/oidc.tf` by hand) — headless never widens such a trust to `repo:*` silently.
 
 ## Exit codes
 

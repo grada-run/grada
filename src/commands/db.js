@@ -61,6 +61,13 @@ async function runDbMain(argv = [], extraOptions = {}) {
     const args = normalizeArgv(argv);
     const extra = normalizeOptions(extraOptions);
     if (args[0] === 'db') args.shift();
+    // Help wins over every leaf: a help request must print usage without
+    // dispatching, guarding, or emitting failure telemetry — symmetric
+    // with the top-level --help handling in bin/cli.js.
+    if (args.includes('--help') || args.includes('-h')) {
+        printDbUsage();
+        return { ok: true };
+    }
     const subcommand = args[0] && !String(args[0]).startsWith('-') ? args[0] : undefined;
 
     // Static sites provision no database, so every subcommand would fail

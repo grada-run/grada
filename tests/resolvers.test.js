@@ -20,35 +20,53 @@ afterEach(() => {
 });
 
 describe('readTerraformOidcTrust', () => {
+    function writeOidc(dir, body) {
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'oidc.tf'), body);
+    }
+
     it('returns null when terraform/oidc.tf is missing', () => {
         expect(readTerraformOidcTrust(makeTmp())).toBeNull();
     });
 
     it('extracts the scoped OIDC sub claim', () => {
         const dir = makeTmp();
-        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
-        fs.writeFileSync(
-            path.join(dir, 'terraform', 'oidc.tf'),
-            '"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"\n'
-        );
-        expect(readTerraformOidcTrust(dir)).toBe('repo:acme/widgets:*');
+        writeOidc(dir, '"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"\n');
+        expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'string', value: 'repo:acme/widgets:*' });
     });
 
     it('extracts the open repo:* trust verbatim', () => {
         const dir = makeTmp();
-        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
-        fs.writeFileSync(
-            path.join(dir, 'terraform', 'oidc.tf'),
-            '"token.actions.githubusercontent.com:sub" : "repo:*"\n'
-        );
-        expect(readTerraformOidcTrust(dir)).toBe('repo:*');
+        writeOidc(dir, '"token.actions.githubusercontent.com:sub" : "repo:*"\n');
+        expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'string', value: 'repo:*' });
     });
 
     it('returns null when the sub claim is absent', () => {
         const dir = makeTmp();
-        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
-        fs.writeFileSync(path.join(dir, 'terraform', 'oidc.tf'), '# empty\n');
+        writeOidc(dir, '# empty\n');
         expect(readTerraformOidcTrust(dir)).toBeNull();
+    });
+
+    it('parses single-line list trusts', () => {
+        const dir = makeTmp();
+        writeOidc(dir, '"token.actions.githubusercontent.com:sub" : ["repo:acme/a:*", "repo:acme/b:*"]\n');
+        expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'list', entries: ['repo:acme/a:*', 'repo:acme/b:*'] });
+    });
+
+    it('parses multiline list trusts with trailing commas', () => {
+        const dir = makeTmp();
+        writeOidc(dir, '"token.actions.githubusercontent.com:sub" : [\n  "repo:acme/a:*",\n  "repo:*",\n]\n');
+        expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'list', entries: ['repo:acme/a:*', 'repo:*'] });
+    });
+
+    it.each([
+        ['"token.actions.githubusercontent.com:sub" : var.allowed_repos\n'],
+        ['"token.actions.githubusercontent.com:sub" : local.trust\n'],
+        ['"token.actions.githubusercontent.com:sub" : jsondecode(var.trust_json)\n'],
+    ])('reports non-literal claims as unparseable: %s', (body) => {
+        const dir = makeTmp();
+        writeOidc(dir, body);
+        expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'unparseable' });
     });
 });
 

@@ -70,7 +70,7 @@ Not sure which to pick? Choose `ecs` for steady or latency-sensitive traffic, lo
 | `--setup-ci-drift` | Scaffold `.github/workflows/drift.yml`: a daily 06:00 UTC `terraform plan` check that opens (or updates) a GitHub Issue labeled `iac-drift` on drift and closes it when resolved. |
 | `--offline` | Scaffold without any AWS calls (for template development and CI fixtures): no state bucket is created, `terraform/backend.tf` and workflow role ARNs get greppable `YOUR_AWS_ACCOUNT_ID` placeholders, and a reconciliation checklist is printed. Reconcile before applying. |
 | `--adopt-state` | Take over existing remote state when the state bucket already holds a key for this project name. Without it, headless inits fail with `STATE_ALREADY_EXISTS`; interactive inits prompt adopt / rename / wipe. |
-| `--github-repo=<owner/name>` | Scope the CI OIDC trust to this repo (`repo:<owner>/<name>:*`). Without it, init reads your git remote, then asks once (skippable) — headless falls back to the open `repo:*` trust with a warning. Re-runs keep the tree's rendered trust. |
+| `--github-repo=<owner/name>` | Scope the CI OIDC trust to this repo (`repo:<owner>/<name>:*`). Without it, init reads your git remote, then asks once (skippable) — headless falls back to the open `repo:*` trust with a warning. Re-runs keep the tree's rendered trust; re-running over a multi-entry or non-literal trust without a determinable repo refuses headless (`OIDC_TRUST_WIDENING_REFUSED`) instead of widening it. |
 | `--no-telemetry` | Disable telemetry for this run (or set `DO_NOT_TRACK=1` for all runs). |
 
 ## Automation & edge cases

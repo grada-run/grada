@@ -23,6 +23,7 @@ import { runAlerts, parseAlertsArgs } from '../src/commands/alerts.js';
 import { runMcp, parseMcpArgs } from '../src/commands/mcp.js';
 import { runTelemetry } from '../src/commands/telemetry.js';
 import { parseCliArgs } from '../src/core/parser.js';
+import { getCliVersion } from '../src/core/telemetry.js';
 
 const HELP_TEXT = [
     'grada — Provision production-ready AWS infrastructure in seconds.',
@@ -69,6 +70,7 @@ const HELP_TEXT = [
     '  --adopt-state  Take over remote state when the state bucket already holds a key for this project name (headless inits refuse without it)',
     '',
     'Global options:',
+    '  --version, -v  Print the CLI version and exit',
     '  --no-telemetry  Disable telemetry for this run only (persistent: grada telemetry off; every run: DO_NOT_TRACK=1)',
 ];
 
@@ -112,9 +114,15 @@ function runCommand(promise) {
 
 // Help wins over every subcommand: no flow — destructive or otherwise —
 // may execute from a help invocation. `db` keeps its own usage path
-// inside runDb (missing-subcommand warning + db usage, exit 1).
+// inside runDb (db usage for `db --help` and every `db <leaf> --help`,
+// exit 0; bare `db` still reports its missing subcommand).
 const wantsHelp = positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h');
-if (wantsHelp && positionalArgs[0] !== 'db') {
+// Version wins over every subcommand like help does — but unlike help it
+// needs no `db` exemption: the version is global, identical everywhere.
+const wantsVersion = rawArgs.includes('--version') || rawArgs.includes('-v');
+if (wantsVersion) {
+    console.log(`grada ${getCliVersion()}`);
+} else if (wantsHelp && positionalArgs[0] !== 'db') {
     console.log(HELP_TEXT.join('\n'));
 } else if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     const envFile = positionalArgs[2] || '.env';
@@ -168,6 +176,11 @@ if (wantsHelp && positionalArgs[0] !== 'db') {
     runCommand(runMcp(parseMcpArgs(rawArgs)));
 } else if (positionalArgs[0] === 'telemetry') {
     runCommand(runTelemetry({ subcommand: positionalArgs[1], ...(isHeadless ? { isHeadless: true } : {}) }));
-} else {
+} else if (positionalArgs[0] === undefined || positionalArgs[0] === 'init') {
     runCommand(mainStack({ isHeadless, isPreconfigured, headlessOptions, initOptions }));
+} else {
+    // Unknown input must never scaffold: a typo is not an init request.
+    console.error(`\n✖ Unknown command "${positionalArgs[0]}".`);
+    console.log(HELP_TEXT.join('\n'));
+    process.exit(1);
 }
