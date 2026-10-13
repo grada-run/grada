@@ -1,10 +1,12 @@
 // Centralized `@clack/prompts` mock for the test suite.
 //
-// Every handle is a stable per-file singleton (Vitest isolates modules per
-// test file), so tests can import handles directly:
+// Registered suite-wide in tests/setup.js — test files import handles
+// directly (mockConfirm, clackMocks, ...) with no per-file vi.mock line.
+// A file needing custom prompt behavior keeps its own vi.mock, which wins
+// over the suite registration (terraform-lifecycle.test.js).
 //
-//   import { clackPromptsMockFactory, mockConfirm } from './helpers/clack.js';
-//   vi.mock('@clack/prompts', () => clackPromptsMockFactory());
+// Every handle is a stable per-file singleton (Vitest isolates modules per
+// test file).
 //
 // Rules preserved from the previously hand-rolled blocks:
 // - Bare defaults: no preset return values. Tests needing a specific answer

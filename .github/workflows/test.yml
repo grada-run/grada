@@ -61,7 +61,7 @@ jobs:
           (cd "$SCAN_ROOT/static/terraform" && tflint) || true
 
       - name: Run Trivy IaC Config Scanner (ECS)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '${{ env.SCAN_ROOT }}/ecs'
@@ -70,7 +70,7 @@ jobs:
           exit-code: '0' # Set to '1' to block PRs on Trivy findings once baselined
 
       - name: Run Trivy IaC Config Scanner (Lambda)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '${{ env.SCAN_ROOT }}/lambda'
@@ -79,7 +79,7 @@ jobs:
           exit-code: '0' # Set to '1' to block PRs on Trivy findings once baselined
 
       - name: Run Trivy IaC Config Scanner (Static)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '${{ env.SCAN_ROOT }}/static'

@@ -4,10 +4,10 @@ import { ECSClient, DescribeServicesCommand, UpdateServiceCommand } from '@aws-s
 import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, StartDBInstanceCommand, StartDBClusterCommand } from '@aws-sdk/client-rds';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
+import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { findDbTarget, dbStatusOf } from '../utils/rds.js';
@@ -539,19 +539,16 @@ async function runWakeMain(input = {}) {
             restoreApplied,
         };
     } catch (error) {
-        await trackFailure('wake_run', {
-            projectName,
-            env_kind: target.envKind,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('wake_run', error, { projectName, env_kind: target.envKind });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', cluster: target.cluster, region };
         }
         try { s.stop(color.red('❌ Wake failed.')); } catch { /* spinner already stopped */ }
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'wake_run',
+            error,
+            telemetry: { projectName, env_kind: target.envKind },
             reason: 'error',
             resultExtra: { cluster: target.cluster, region },
         });

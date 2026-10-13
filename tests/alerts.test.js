@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, mockSelect, mockText } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { mockSelect, mockText } from './helpers/clack.js';
 import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import path from 'path';
@@ -20,9 +19,7 @@ import {
 } from '../src/commands/alerts.js';
 import { trackEvent } from '../src/core/telemetry.js';
 
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 const tmp = createTmpDirTracker();
 let exitSpy;

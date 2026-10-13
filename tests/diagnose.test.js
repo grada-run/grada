@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
 import { stripVTControlCharacters } from 'node:util';
 import fs from 'fs';
 import os from 'os';
@@ -60,9 +58,7 @@ vi.mock('@aws-sdk/client-cloudwatch-logs', () => {
 });
 
 // Silence interactive prompts and telemetry during tests
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 describe('Command: diagnose', () => {
     beforeEach(() => {

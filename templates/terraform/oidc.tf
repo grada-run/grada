@@ -44,8 +44,10 @@ resource "aws_iam_role" "github_actions" {
         }
         Condition = {
           StringLike = {
-            # ⚠️ SECURITY: Update "repo:*" to "repo:your-github-username/your-repo-name:*" in production
-            "token.actions.githubusercontent.com:sub" : "repo:*"
+            # CI trust, scoped at scaffold time from --github-repo, the git
+            # remote, or the setup prompt. "repo:*" means any GitHub repo's
+            # Actions can assume this role — re-scope before going live.
+            "token.actions.githubusercontent.com:sub" : "{{GITHUB_REPO_SUB}}"
           }
           StringEquals = {
             "token.actions.githubusercontent.com:aud" : "sts.amazonaws.com"
@@ -56,7 +58,9 @@ resource "aws_iam_role" "github_actions" {
   })
 }
 
-# Grant the CI/CD pipeline permissions to provision infrastructure
+# Grant the CI/CD pipeline permissions to provision infrastructure.
+# Intentionally broad: this role runs full Terraform applies from CI.
+# Narrow only with a reviewed least-privilege policy.
 resource "aws_iam_role_policy_attachment" "github_actions_admin" {
   count      = terraform.workspace == "default" ? 1 : 0
   role       = aws_iam_role.github_actions[0].name

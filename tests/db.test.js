@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, mockText, mockSelect, mockConfirm, mockPassword, mockSpinner } from './helpers/clack.js';
-import { telemetryMockFactory, mockTrackEvent } from './helpers/telemetry.js';
+import { mockText, mockSelect, mockConfirm, mockPassword, mockSpinner } from './helpers/clack.js';
+import { mockTrackEvent } from './helpers/telemetry.js';
 import { netMockFactory, resetNetMock, mockNetConnect, mockNetCreateServer } from './helpers/net.js';
 import fs from 'fs';
 import os from 'os';
@@ -52,9 +52,7 @@ import {
 import { injectMigrationGate, injectPreviewMigrationGate, quoteShellArg, buildMigrationCommand, findGateBlock } from '../src/commands/db/migrate.js';
 import { resolveWorkspaceSuffix } from '../src/utils/resolvers.js';
 
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 vi.mock('node:net', () => netMockFactory());
 

@@ -4,8 +4,8 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe } from '../utils/resolvers.js';
 
@@ -243,17 +243,12 @@ async function runDriftMain(input = {}) {
             resultExtra: { region },
         });
     } catch (error) {
-        await trackFailure('drift_run', {
-            projectName,
-            action: 'check',
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
         try { s.stop(color.red('❌ Drift check failed.')); } catch { /* spinner already stopped */ }
-        return failCommand({
+        return failAwsError({
+            event: 'drift_run',
+            error,
             noExit,
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+            telemetry: { projectName, action: 'check' },
             reason: 'error',
             resultExtra: { region },
         });

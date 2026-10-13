@@ -7,10 +7,10 @@ import { createReadStream } from 'node:fs';
 import zlib from 'node:zlib';
 import color from 'picocolors';
 import { intro, outro, spinner, select, text, password, confirm, cancel, isCancel } from '@clack/prompts';
-import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
-import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
+import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
     resolveRegion,
     resolveProjectName,
@@ -590,19 +590,16 @@ async function runDbImportMain(input = {}) {
         outro(color.green('Done.'));
         return { ok: true, source: source.type, targetId: target.id };
     } catch (error) {
-        await trackFailure('db_import_run', {
-            projectName,
-            source: source?.type,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('db_import_run', error, { projectName, source: source?.type });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', cluster, service, region };
         }
         try { s.stop(color.red('❌ Db import failed.')); } catch { /* spinner already stopped */ }
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'db_import_run',
+            error,
+            telemetry: { projectName, source: source?.type },
             reason: 'error',
             resultExtra: { cluster, service, region },
         });

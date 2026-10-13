@@ -4,9 +4,9 @@ import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cl
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { normalizeOptions } from '../utils/args.js';
-import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
+import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 
 export const LOG_FETCH_LIMIT = 50;
@@ -467,20 +467,23 @@ async function runDiagnoseMain(input = {}) {
             logs
         };
     } catch (error) {
-        await trackFailure('diagnose_run', {
-            error_code: error.name || 'UNKNOWN',
-            error_message: error.message,
-            stack_trace: error.name === 'TypeError' ? error.stack : undefined,
-            log_source: 'none'
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('diagnose_run', error, {
+                stack_trace: error.name === 'TypeError' ? error.stack : undefined,
+                log_source: 'none',
+            });
+            handleAuthErrorBranch(error, s, options);
             return;
         }
         s.stop(color.red('❌ Diagnose failed.'));
-        return failCommand({
+        return failAwsError({
+            event: 'diagnose_run',
+            error,
             noExit,
-            message: `✖ ${error.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+            telemetry: {
+                stack_trace: error.name === 'TypeError' ? error.stack : undefined,
+                log_source: 'none',
+            },
         });
     }
 }

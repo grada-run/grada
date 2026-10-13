@@ -34,11 +34,12 @@ import { planExistingFiles, executeBackup, preserveManagedFiles, restoreManagedF
 import { checkStateAdoption } from '../utils/state-adoption.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { estimateMonthlyCost, parseTerraformConfig, renderDryRunPreview } from '../utils/visualizer.js';
-import { getTargetDirectory, getProjectConfig, promptWorkerCommand, sanitizeProjectName } from '../utils/prompts.js';
+import { getTargetDirectory, getProjectConfig, promptWorkerCommand, promptGitHubRepo, sanitizeProjectName } from '../utils/prompts.js';
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
 import { parseDockerCompose, selectComposeWebService } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe, COMPUTE_TARGETS, resolveInitSuffix, readTerraformProjectName } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust } from '../utils/resolvers.js';
+import { readGitHubRepoFromRemote, isValidGitHubRepoSlug } from '../utils/git.js';
 import { parseDomainTf } from '../utils/domains.js';
 
 // Greppable, invalid-as-real placeholder stamped into backend.tf and
@@ -105,6 +106,9 @@ async function mainStackMain(input = {}) {
     const explicitProjectName = typeof initOptions.projectName === 'string' && initOptions.projectName.trim() !== ''
         ? initOptions.projectName.trim()
         : null;
+    const explicitGitHubRepo = typeof initOptions.githubRepo === 'string' && initOptions.githubRepo.trim() !== ''
+        ? initOptions.githubRepo.trim()
+        : null;
     const dirConfig = await getTargetDirectory(isHeadless, headlessOptions, { projectName: explicitProjectName });
 
     // Re-init over an existing tree keeps the tree's project name: after a
@@ -134,6 +138,15 @@ async function mainStackMain(input = {}) {
             event: 'cli-error',
             telemetry: { step: 'init_validation', error_code: 'INVALID_FRAMEWORK' },
             reason: 'invalid-framework',
+        });
+    }
+    if (explicitGitHubRepo !== null && !isValidGitHubRepoSlug(explicitGitHubRepo)) {
+        return failCommand({
+            message: `\n✖ Invalid --github-repo "${explicitGitHubRepo}".`,
+            hint: '  Expected owner/name (e.g. --github-repo=acme/widgets).\n',
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'INVALID_GITHUB_REPO' },
+            reason: 'invalid-github-repo',
         });
     }
     const withList = Array.isArray(initOptions.with)
@@ -254,6 +267,50 @@ async function mainStackMain(input = {}) {
     // 3. Gather Configuration & Framework Quirks
     const config = await getProjectConfig(isHeadless, headlessOptions, dirConfig.targetDir, detectedFramework, { capabilities, dbEngine: explicitDbEngine, target });
     config.target = target;
+
+    // 3a. Scope the GitHub OIDC trust: explicit flag wins, then the existing
+    // tree's rendered trust (re-init never re-derives), then the git remote,
+    // then one skippable interactive prompt; headless falls through to the
+    // open trust with a loud warning. Telemetry records the mode only —
+    // never the owner/repo.
+    const treeOidcTrust = readTerraformOidcTrust(dirConfig.targetDir);
+    let oidcTrustSub;
+    let oidcTrustSource;
+    if (explicitGitHubRepo) {
+        oidcTrustSub = `repo:${explicitGitHubRepo}:*`;
+        oidcTrustSource = 'flag';
+        if (treeOidcTrust && treeOidcTrust !== oidcTrustSub) {
+            console.log(color.yellow(`⚠️  --github-repo overrides this tree's CI trust (${treeOidcTrust}) — the next apply re-scopes the deploy role.`));
+        }
+    } else if (treeOidcTrust) {
+        oidcTrustSub = treeOidcTrust;
+        oidcTrustSource = 'tree';
+        if (treeOidcTrust === 'repo:*') {
+            console.log(color.yellow('⚠️  Keeping this tree\'s open CI trust (repo:*): any GitHub repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
+        }
+    } else {
+        const remoteSlug = readGitHubRepoFromRemote(dirConfig.targetDir);
+        if (remoteSlug) {
+            oidcTrustSub = `repo:${remoteSlug}:*`;
+            oidcTrustSource = 'remote';
+        } else if (isInteractive) {
+            const promptedSlug = await promptGitHubRepo();
+            if (promptedSlug) {
+                oidcTrustSub = `repo:${promptedSlug}:*`;
+                oidcTrustSource = 'prompt';
+            }
+        }
+        if (!oidcTrustSub) {
+            oidcTrustSub = 'repo:*';
+            oidcTrustSource = 'fallback';
+            console.log(color.yellow('⚠️  Could not determine your GitHub repo (no --github-repo, no git remote) — CI trust is OPEN (repo:*): any repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
+        }
+    }
+    trackEvent('init_oidc_trust', {
+        projectName: dirConfig.actualProjectName,
+        mode: oidcTrustSub === 'repo:*' ? 'fallback' : 'scoped',
+        source: oidcTrustSource,
+    });
     // Explicit flag wins everywhere (headless defaults to postgres, the
     // interactive prompt is skipped); anything else falls back to postgres.
     if (explicitDbEngine) {
@@ -627,6 +684,7 @@ async function mainStackMain(input = {}) {
         HEALTH_CHECK_PATH: config.healthCheckPath,
         DESIRED_COUNT: config.desiredCount,
         DEPLOY_BRANCH: config.branch,
+        GITHUB_REPO_SUB: oidcTrustSub,
         BUILD_DIR: buildDir,
         finalFramework: config.framework,
         NEEDS_DATABASE: config.needsDatabase,

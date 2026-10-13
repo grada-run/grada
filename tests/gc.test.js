@@ -4,8 +4,7 @@ import os from 'os';
 import path from 'path';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, clackMocks as clack } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { clackMocks as clack } from './helpers/clack.js';
 import {
     runGc,
     parseGcArgs,
@@ -70,7 +69,7 @@ vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
 }));
 
 // --- Mock AWS SDK: EC2 ---
-const { mockEc2Send, MockEC2Client, MockDescribeAddressesCommand, MockReleaseAddressCommand } = vi.hoisted(() => {
+const { mockEc2Send, MockEC2Client, MockDescribeAddressesCommand, MockReleaseAddressCommand, MockDescribeVpcsCommand } = vi.hoisted(() => {
     const send = vi.fn();
     const makeCommand = (name) =>
         vi.fn(function (input) {
@@ -84,6 +83,7 @@ const { mockEc2Send, MockEC2Client, MockDescribeAddressesCommand, MockReleaseAdd
         }),
         MockDescribeAddressesCommand: makeCommand('DescribeAddressesCommand'),
         MockReleaseAddressCommand: makeCommand('ReleaseAddressCommand'),
+        MockDescribeVpcsCommand: makeCommand('DescribeVpcsCommand'),
     };
 });
 
@@ -91,12 +91,31 @@ vi.mock('@aws-sdk/client-ec2', () => ({
     EC2Client: MockEC2Client,
     DescribeAddressesCommand: MockDescribeAddressesCommand,
     ReleaseAddressCommand: MockReleaseAddressCommand,
+    DescribeVpcsCommand: MockDescribeVpcsCommand,
+}));
+
+// --- Mock AWS SDK: Secrets Manager (deep scan only) ---
+const { mockSecretsSend, MockSecretsClient, MockListSecretsCommand } = vi.hoisted(() => {
+    const send = vi.fn();
+    return {
+        mockSecretsSend: send,
+        MockSecretsClient: vi.fn(function () {
+            this.send = send;
+        }),
+        MockListSecretsCommand: vi.fn(function (input) {
+            this.commandName = 'ListSecretsCommand';
+            Object.assign(this, input);
+        }),
+    };
+});
+
+vi.mock('@aws-sdk/client-secrets-manager', () => ({
+    SecretsManagerClient: MockSecretsClient,
+    ListSecretsCommand: MockListSecretsCommand,
 }));
 
 // --- Mock interactive prompts (controllable confirm) ---
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 const PROJECT = 'myapp';
 
@@ -496,5 +515,64 @@ describe('gc: lambda log group discovery', () => {
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
+    });
+});
+
+describe('gc: AWS failure wrapping', () => {
+    let exitSpy;
+    let consoleSpy;
+    let output;
+
+    beforeEach(() => {
+        output = [];
+        exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+    });
+
+    afterEach(() => {
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
+    it('wraps discovery failures in a clean message and exits 1 instead of throwing', async () => {
+        const failure = new Error('socket hang up');
+        failure.name = 'NetworkingError';
+        mockEcrSend.mockRejectedValue(failure);
+
+        const result = await runGc({ projectName: PROJECT, region: 'us-east-2' });
+        expect(result.ok).toBe(false);
+        const text = output.join('\n');
+        expect(text).toContain('socket hang up');
+        expect(text).toContain('credentials');
+        expect(text).not.toContain('$metadata');
+        expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it('wraps deep-scan failures the same way', async () => {
+        const failure = new Error('socket hang up');
+        failure.name = 'NetworkingError';
+        mockEc2Send.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockDescribeAddressesCommand) return { Addresses: [] };
+            if (cmd instanceof MockDescribeVpcsCommand) throw failure;
+            throw new Error(`Unexpected EC2 command: ${cmd?.commandName}`);
+        });
+        mockSecretsSend.mockResolvedValue({ SecretList: [] });
+
+        const result = await runGc({ projectName: PROJECT, region: 'us-east-2', deep: true });
+        expect(result.ok).toBe(false);
+        const text = output.join('\n');
+        expect(text).toContain('socket hang up');
+        expect(text).toContain('credentials');
+        expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it('returns a structured failure without exiting when headless', async () => {
+        mockEcrSend.mockRejectedValue(new Error('socket hang up'));
+
+        const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: true });
+        expect(result).toEqual(expect.objectContaining({ ok: false, exitCode: 1 }));
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 });

@@ -110,7 +110,13 @@ function runCommand(promise) {
     });
 }
 
-if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
+// Help wins over every subcommand: no flow — destructive or otherwise —
+// may execute from a help invocation. `db` keeps its own usage path
+// inside runDb (missing-subcommand warning + db usage, exit 1).
+const wantsHelp = positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h');
+if (wantsHelp && positionalArgs[0] !== 'db') {
+    console.log(HELP_TEXT.join('\n'));
+} else if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     const envFile = positionalArgs[2] || '.env';
     const projectName = path.basename(process.cwd());
     runCommand(pushSecrets(envFile, projectName, { isHeadless, region: parseRegionFlag(rawArgs) }));
@@ -162,8 +168,6 @@ if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     runCommand(runMcp(parseMcpArgs(rawArgs)));
 } else if (positionalArgs[0] === 'telemetry') {
     runCommand(runTelemetry({ subcommand: positionalArgs[1], ...(isHeadless ? { isHeadless: true } : {}) }));
-} else if (positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h')) {
-    console.log(HELP_TEXT.join('\n'));
 } else {
     runCommand(mainStack({ isHeadless, isPreconfigured, headlessOptions, initOptions }));
 }

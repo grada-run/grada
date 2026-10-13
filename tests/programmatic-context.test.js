@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory } from './helpers/clack.js';
 import { telemetryMockFactory } from './helpers/telemetry.js';
 import { mockConsoleTrio } from './helpers/console.js';
 import fs from 'fs';
@@ -34,7 +33,6 @@ import { runDbMigrate } from '../src/commands/db/migrate.js';
 import { runDbRestore } from '../src/commands/db/restore.js';
 import { pushSecrets, pullSecrets, auditSecrets } from '../src/commands/secrets.js';
 
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 const spies = vi.hoisted(() => ({ setSpy: null, resetSpy: null }));
 

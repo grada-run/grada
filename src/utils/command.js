@@ -1,5 +1,5 @@
 import color from 'picocolors';
-import { trackEvent, flushTelemetry } from '../core/telemetry.js';
+import { trackEvent, trackFailure, flushTelemetry } from '../core/telemetry.js';
 import { normalizeOptions } from './args.js';
 
 // True when a destructive confirm must be skipped: explicit approval flags
@@ -90,6 +90,44 @@ export async function failCommand({
         process.exit(exitCode);
     }
     return { ok: false, ...(reason === null ? {} : { reason }), ...resultExtra };
+}
+
+// Shared AWS-failure stamps: the one-line trackFailure every catch block
+// repeats. Used directly on early-return branches (auth expiry, watch
+// retries) that record the failure without exiting through failAwsError.
+export async function trackAwsFailure(event, error, telemetry = {}) {
+    await trackFailure(event, {
+        ...telemetry,
+        error_code: error?.name || 'UNKNOWN',
+        error_message: error?.message,
+    });
+}
+
+// Shared AWS-failure exit: records the failure event with the error stamps,
+// then prints the one-line message + credentials hint and exits (or returns
+// `{ ok: false }` for programmatic callers when noExit is set). Collapses
+// the trackFailure + failCommand pair every command repeats, so the shape
+// can only change in one place. Sites with custom telemetry stamps or
+// messages (non error-derived codes, error_type payloads) keep their own
+// explicit pair instead of bending this helper with overrides.
+export async function failAwsError({
+    event,
+    error,
+    noExit = false,
+    telemetry = {},
+    reason = null,
+    resultExtra = {},
+    exitCode = 1,
+} = {}) {
+    await trackAwsFailure(event, error, telemetry);
+    return failCommand({
+        noExit,
+        message: `✖ ${error?.message || error}`,
+        hint: 'Check your AWS credentials and region, then try again.',
+        reason,
+        resultExtra,
+        exitCode,
+    });
 }
 
 // Shared project-resolution failure: when a command cannot determine even

@@ -33,6 +33,7 @@ npx grada-run gc --yes
 
 - `--yes` is the CI hatch for standard-target deletion; deep findings stay report-only with or without it.
 - Discovery paginates fully, so large accounts are completely scanned.
+- AWS failures print a one-line message with the credentials hint and exit 1 (headless callers get a structured `{ ok: false }` result instead) — never a raw SDK dump.
 
 ## Safety
 

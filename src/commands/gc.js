@@ -10,7 +10,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
-import { failProjectNotInitialized, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 
 export const CONFIRM_MESSAGE = 'Are you sure you want to permanently delete these orphaned resources? (y/N)';
@@ -407,9 +407,13 @@ async function runGcMain(input = {}) {
         });
     } catch (error) {
         s.stop(color.red('❌ Discovery failed.'));
-        console.log(color.red(`✖ ${error?.message || error}`));
         await trackFailure('gc_run', { projectName, error_message: error?.message });
-        throw error;
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: `✖ ${error?.message || error}`,
+            hint: 'Check your AWS credentials and region, then try again.',
+            resultExtra: { projectName, region },
+        });
     }
     s.stop('Discovery complete.');
 
@@ -430,9 +434,13 @@ async function runGcMain(input = {}) {
             deepResult = await discoverDeepOrphans({ ec2Client, secretsClient, cwd, projectName });
         } catch (error) {
             ds.stop(color.red('❌ Deep discovery failed.'));
-            console.log(color.red(`✖ ${error?.message || error}`));
             await trackFailure('gc_run', { projectName, deep: true, error_message: error?.message });
-            throw error;
+            return failCommand({
+                noExit: isProgrammaticCall(options),
+                message: `✖ ${error?.message || error}`,
+                hint: 'Check your AWS credentials and region, then try again.',
+                resultExtra: { projectName, region },
+            });
         }
         ds.stop('Deep discovery complete.');
         printDeepReport(deepResult, projectName);

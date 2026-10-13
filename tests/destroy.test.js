@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, clackMocks as clack } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { clackMocks as clack } from './helpers/clack.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -24,7 +23,6 @@ vi.mock('child_process', async (importOriginal) => {
 });
 
 // --- Silence interactive UI; confirm is controllable per test ---
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 // --- Never touch AWS or the network ---
 vi.mock('../src/utils/aws.js', () => ({
@@ -63,7 +61,6 @@ vi.mock('../src/utils/system.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 import { destroyStack } from '../src/commands/destroy.js';
 import { teardownStateBucket, drainBucketObjects } from '../src/utils/aws.js';

@@ -28,7 +28,10 @@ function codeTokens(source) {
 
 function telemetryImports(source) {
     const names = new Set();
-    const importRe = /import\s*\{([^}]*)\}\s*from\s*['"](?:\.\.\/)+core\/telemetry\.js['"]/g;
+    // Telemetry helpers live in core/telemetry.js — except the shared
+    // trackAwsFailure stamps helper, which command.js defines alongside
+    // failAwsError (both are equally typo-proof imports).
+    const importRe = /import\s*\{([^}]*)\}\s*from\s*['"](?:\.\.\/)+(?:core\/telemetry|utils\/command)\.js['"]/g;
     for (const match of source.matchAll(importRe)) {
         for (const spec of match[1].split(',')) {
             const name = spec.trim().split(/\s+as\s+/)[0].trim();

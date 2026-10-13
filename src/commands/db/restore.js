@@ -3,10 +3,10 @@ import fsSync from 'fs';
 import path from 'path';
 import color from 'picocolors';
 import { intro, outro, spinner, select, confirm, cancel, isCancel } from '@clack/prompts';
-import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
-import { handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
+import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveAppName, resolveHeadless, resolveCwd } from '../../utils/resolvers.js';
 import { findResourceBlock } from '../../utils/hcl.js';
 import { resolveDbIdentifier, resolveDbClusterIdentifier } from '../../utils/rds.js';
@@ -351,18 +351,16 @@ async function runDbRestoreMain(input = {}) {
         outro(color.green('Done.'));
         return { ok: true, snapshotId };
     } catch (error) {
-        await trackFailure('db_restore_run', {
-            projectName,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('db_restore_run', error, { projectName });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', dbIdentifier, region };
         }
         try { s.stop(color.red('❌ Db restore failed.')); } catch { /* spinner already stopped */ }
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'db_restore_run',
+            error,
+            telemetry: { projectName },
             reason: 'error',
             resultExtra: { dbIdentifier, region },
         });

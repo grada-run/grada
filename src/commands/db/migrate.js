@@ -2,10 +2,10 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner, text, isCancel } from '@clack/prompts';
-import { trackEvent, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
+import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
-import { handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
+import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
     resolveRegion,
     resolveProjectName,
@@ -531,20 +531,16 @@ async function runDbMigrateMain(input = {}) {
             exitCode: propagated,
         });
     } catch (error) {
-        await trackFailure('db_migrate_run', {
-            projectName,
-            cmd_source: cmdSource,
-            ci_setup: false,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('db_migrate_run', error, { projectName, cmd_source: cmdSource, ci_setup: false });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', cluster, service, region };
         }
         try { s.stop(color.red('❌ Db migrate failed.')); } catch { /* spinner already stopped */ }
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'db_migrate_run',
+            error,
+            telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
             reason: 'error',
             resultExtra: { cluster, service, region },
         });

@@ -4,10 +4,10 @@ import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { spawn } from 'child_process';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../../utils/command.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
-import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
+import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveAppName, resolveCwd } from '../../utils/resolvers.js';
 import { findDbTarget, resolveDbIdentifier, resolveDbClusterIdentifier } from '../../utils/rds.js';
 import {
@@ -294,18 +294,16 @@ async function runDbConnectMain(input = {}) {
     } catch (error) {
         // Only non-sensitive metadata is telemetered here. The password, username, and
         // connection string are never passed to trackEvent in any path.
-        await trackFailure('db_connect_run', {
-            projectName,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('db_connect_run', error, { projectName });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', cluster, service, region };
         }
         s.stop(color.red('❌ Db connect failed.'));
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'db_connect_run',
+            error,
+            telemetry: { projectName },
             reason: 'error',
             resultExtra: { cluster, service, region },
         });

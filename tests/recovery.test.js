@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, mockConfirm } from './helpers/clack.js';
+import { mockConfirm } from './helpers/clack.js';
 import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import path from 'path';
 
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 vi.mock('../src/utils/aws.js', () => ({
     provisionStateBucket: vi.fn().mockResolvedValue({

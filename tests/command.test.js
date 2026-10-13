@@ -1,12 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { telemetryMockFactory } from './helpers/telemetry.js';
 import { mockConsoleTrio } from './helpers/console.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../src/utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall } from '../src/utils/command.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 describe('failCommand', () => {
     let exitSpy;
@@ -152,6 +150,62 @@ describe('failCommand', () => {
         const result = await failProjectNotInitialized({ event: 'drift_run', noExit: true });
         expect(exitSpy).not.toHaveBeenCalled();
         expect(result).toEqual({ ok: false, exitCode: 1, reason: 'project-not-initialized' });
+    });
+});
+
+describe('failAwsError', () => {
+    let spies;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        spies = mockConsoleTrio();
+    });
+
+    afterEach(() => {
+        spies.restore();
+    });
+
+    it('stamps error telemetry, prints the message + credentials hint, and exits 1', async () => {
+        const error = Object.assign(new Error('socket hang up'), { name: 'NetworkingError' });
+        await failAwsError({ event: 'gc_run', error, telemetry: { projectName: 'myapp' } });
+
+        expect(trackEvent).toHaveBeenCalledWith('gc_run', {
+            projectName: 'myapp',
+            error_code: 'NetworkingError',
+            error_message: 'socket hang up',
+            success: false,
+        });
+        expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining('socket hang up'));
+        expect(spies.logSpy).toHaveBeenCalledWith(
+            expect.stringContaining('Check your AWS credentials and region, then try again.')
+        );
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it('passes reason, result extras, and exit code through, honoring noExit', async () => {
+        const result = await failAwsError({
+            event: 'exec_run',
+            error: new Error('boom'),
+            noExit: true,
+            reason: 'error',
+            resultExtra: { region: 'us-east-2' },
+            exitCode: 1,
+        });
+
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+        expect(result).toEqual({ ok: false, exitCode: 1, reason: 'error', region: 'us-east-2' });
+    });
+
+    it('falls back to UNKNOWN for nameless errors', async () => {
+        await failAwsError({ event: 'logs_streamed', error: new Error('boom'), noExit: true });
+
+        expect(trackEvent).toHaveBeenCalledWith('logs_streamed', expect.objectContaining({
+            error_code: 'Error',
+        }));
+        await failAwsError({ event: 'logs_streamed', error: 'string-thrown', noExit: true });
+        expect(trackEvent).toHaveBeenCalledWith('logs_streamed', expect.objectContaining({
+            error_code: 'UNKNOWN',
+        }));
     });
 });
 

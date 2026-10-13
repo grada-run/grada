@@ -77,7 +77,7 @@ jobs:
           (cd "$SCAN_ROOT/static/terraform" && tflint) || true
 
       - name: Run Trivy IaC Config Scanner (ECS)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '${{ env.SCAN_ROOT }}/ecs'
@@ -86,7 +86,7 @@ jobs:
           exit-code: '0'
 
       - name: Run Trivy IaC Config Scanner (Lambda)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '${{ env.SCAN_ROOT }}/lambda'
@@ -95,7 +95,7 @@ jobs:
           exit-code: '0'
 
       - name: Run Trivy IaC Config Scanner (Static)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '${{ env.SCAN_ROOT }}/static'
@@ -104,25 +104,43 @@ jobs:
           exit-code: '0'
       
       # --- Phase 3: Publish ---
+      # Idempotent publishes: a re-run after a partial publish (or a
+      # verification-only retry) must not fail on already-live versions.
+      # Only the specific "already published" error is tolerated.
       - name: Publish Primary Package (grada-run)
-        run: npm publish --provenance
+        run: |
+          OUT=$(npm publish --provenance 2>&1) && echo "$OUT" || {
+            echo "$OUT"
+            case "$OUT" in
+              *"previously published versions"*) echo "grada-run already at this version, continuing." ;;
+              *) exit 1 ;;
+            esac
+          }
 
       - name: Publish Scoped Alias (@grada-run/grada)
         run: |
           npm pkg set name="@grada-run/grada"
-          npm publish --access public --provenance
+          OUT=$(npm publish --access public --provenance 2>&1) && echo "$OUT" || {
+            echo "$OUT"
+            case "$OUT" in
+              *"previously published versions"*) echo "@grada-run/grada already at this version, continuing." ;;
+              *) exit 1 ;;
+            esac
+          }
 
       # Dual-package lockstep: the bare and scoped packages must resolve to
       # the same version, or consumers chronically run one release behind.
-      # Retries tolerate npm registry replication lag after publish.
+      # Retries tolerate npm registry/CDN read-after-write lag after publish
+      # (stale packuments can persist for minutes, not seconds).
       - name: Verify dual-package version lockstep
         run: |
           EXPECTED=$(node -p "require('./package.json').version")
           for PKG in grada-run @grada-run/grada; do
             PUBLISHED=""
-            for _ in 1 2 3 4 5 6; do
+            for i in $(seq 1 30); do
               PUBLISHED=$(npm view "$PKG" version 2>/dev/null || true)
-              [ "$PUBLISHED" = "$EXPECTED" ] && break
+              if [ "$PUBLISHED" = "$EXPECTED" ]; then break; fi
+              echo "Waiting for $PKG@$EXPECTED (registry shows '${PUBLISHED:-MISSING}', attempt $i/30)..."
               sleep 10
             done
             if [ "$PUBLISHED" != "$EXPECTED" ]; then

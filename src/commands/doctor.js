@@ -6,6 +6,7 @@ import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/clien
 import { checkDependency } from '../utils/system.js';
 import { checkAwsCredentials, TROUBLESHOOTING_URL } from '../utils/aws.js';
 import { readLastRunMarker, isInterruptedMarker } from '../utils/terraform.js';
+import { readTerraformOidcTrust } from '../utils/resolvers.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
 import { trackEvent, flushTelemetry, detectCiProvider, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
@@ -30,6 +31,7 @@ export const DOCTOR_CHECKS = [
 export const PROJECT_CHECKS = [
     { id: 'state_lock', label: 'Terraform state lock', scope: 'project', severity: 'fail', run: checkStateLock, hint: () => 'If no apply is running, release it with: terraform force-unlock <lock-id> (find the holder via grada doctor --deep).' },
     { id: 'interrupted_run', label: 'Interrupted Terraform run', scope: 'project', severity: 'warn', run: checkInterruptedRun, hint: () => 'Review the last apply/destroy output before trusting applied state; the next run overwrites the marker.' },
+    { id: 'oidc_trust_scope', label: 'OIDC trust scope', scope: 'project', severity: 'warn', run: checkOidcTrustScope, hint: () => 'Re-scope with: npx grada-run init --github-repo owner/name (or edit the sub claim in terraform/oidc.tf).' },
 ];
 
 const INSTALL_HINTS = {
@@ -186,6 +188,19 @@ async function checkStateLock({ cwd, s3Client, deep }) {
 // Project check: a leftover interrupted/running marker means the last
 // Terraform run never settled. Warning-grade (apply proceeds with its own
 // warning): surfaces yellow without flipping the verdict red.
+// Project check: an open `repo:*` OIDC trust lets any GitHub repo's
+// Actions assume the deploy role. Warning-grade (pre-fix trees render it
+// by default): surfaces yellow without flipping the verdict red.
+function checkOidcTrustScope({ cwd }) {
+    const trust = readTerraformOidcTrust(cwd);
+    if (trust === null) return { ok: true, skipped: 'no oidc.tf trust found' };
+    if (trust !== 'repo:*') return { ok: true };
+    return {
+        ok: false,
+        detailLines: ['CI trust is open (repo:*): any repo\'s Actions can assume the deploy role — re-scope before going live.'],
+    };
+}
+
 function checkInterruptedRun({ cwd }) {
     const marker = readLastRunMarker(cwd);
     if (!isInterruptedMarker(marker)) return { ok: true };

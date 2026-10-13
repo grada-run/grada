@@ -2,9 +2,9 @@ import { ECSClient, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/clie
 import { spawn } from 'child_process';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { hasAwsCli, AWS_CLI_INSTALL_URL, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, guardComputeTarget } from '../utils/resolvers.js';
 import {
@@ -233,19 +233,17 @@ async function runExecMain(input = {}) {
 
         return { ok: true, cluster, service, taskArn, container: resolvedContainer, region };
     } catch (error) {
-        await trackFailure('exec_run', {
-            projectName,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('exec_run', error, { projectName });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', cluster, service, region };
         }
         s.stop(color.red('❌ Exec failed.'));
-        return failCommand({
+        return failAwsError({
+            event: 'exec_run',
+            error,
             noExit,
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+            telemetry: { projectName },
             reason: 'error',
             resultExtra: { cluster, service, region },
         });

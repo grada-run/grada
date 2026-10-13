@@ -85,6 +85,7 @@ describe('Infrastructure Generator', () => {
                 HEALTH_CHECK_PATH: '/health',
                 DESIRED_COUNT: '1',
                 DEPLOY_BRANCH: 'main',
+                GITHUB_REPO_SUB: 'repo:acme/widgets:*',
                 BUILD_DIR: tc.buildDir,
                 finalFramework: tc.framework,
                 NEEDS_DATABASE: tc.needsDb,
@@ -201,6 +202,7 @@ describe('worker.tf without a database', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -264,6 +266,7 @@ describe('database env vars render as bare HCL references', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: true,
@@ -323,6 +326,7 @@ describe('multi-engine database generation', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: true,
@@ -402,6 +406,7 @@ describe('Generator gitignore handling of secret_keys.json', () => {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
+        GITHUB_REPO_SUB: 'repo:acme/widgets:*',
         BUILD_DIR: '',
         finalFramework: 'node',
         NEEDS_DATABASE: false,
@@ -471,6 +476,7 @@ describe('Generator doc ownership & secret_keys preservation', () => {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
+        GITHUB_REPO_SUB: 'repo:acme/widgets:*',
         BUILD_DIR: '',
         finalFramework: 'node',
         NEEDS_DATABASE: false,
@@ -634,6 +640,7 @@ describe('Infrastructure Generator: --target lambda', () => {
             HEALTH_CHECK_PATH: '/',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -807,6 +814,7 @@ describe('Infrastructure Generator: --target static', () => {
             HEALTH_CHECK_PATH: '/',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: 'dist',
             finalFramework: 'static',
             NEEDS_DATABASE: false,
@@ -857,6 +865,14 @@ describe('Infrastructure Generator: --target static', () => {
         await expect(fs.stat(path.join(staticTargetDir, 'terraform', 'backend.tf'))).resolves.toBeTruthy();
         await expect(fs.stat(path.join(staticTargetDir, 'Dockerfile'))).rejects.toThrow();
         await expect(fs.stat(path.join(staticTargetDir, '.dockerignore'))).rejects.toThrow();
+    });
+
+    it('renders the OIDC trust from GITHUB_REPO_SUB with no leftover placeholder', async () => {
+        await generateTemplates(staticTargetDir, staticConfig());
+
+        const oidcTf = await readTf('oidc.tf');
+        expect(oidcTf).toContain('"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"');
+        expect(oidcTf).not.toContain('{{GITHUB_REPO_SUB}}');
     });
 
     it('deploys by syncing the build output instead of building images', async () => {
@@ -973,6 +989,7 @@ describe('R18: sleep auto-vars guards (plan-identity fixtures)', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '2',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -1071,6 +1088,7 @@ describe('M2: GradaProject default tag in all provider blocks', () => {
                 HEALTH_CHECK_PATH: '/health',
                 DESIRED_COUNT: '1',
                 DEPLOY_BRANCH: 'main',
+                GITHUB_REPO_SUB: 'repo:acme/widgets:*',
                 BUILD_DIR: '',
                 finalFramework: 'node',
                 NEEDS_DATABASE: false,
@@ -1116,6 +1134,7 @@ describe('Compose merge safety', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
             BUILD_DIR: '',
             finalFramework: 'nextjs',
             NEEDS_DATABASE: false,

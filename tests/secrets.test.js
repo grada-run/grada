@@ -1,8 +1,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, mockConfirm, mockOutro, mockSpinnerStart, mockSpinnerStop } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { mockConfirm, mockOutro, mockSpinnerStart, mockSpinnerStop } from './helpers/clack.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { pushSecrets, pullSecrets, auditSecrets, resolveSecretsRegion } from '../src/commands/secrets.js';
@@ -53,10 +52,8 @@ vi.mock('@aws-sdk/client-ecs', () => ({
 }));
 
 // 3. Mock @clack/prompts to prevent hangs on user input during testing
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 // 4. Mock telemetry to prevent real network calls during testing
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 describe('Secrets Push Command', () => {
     const originalCwd = process.cwd();

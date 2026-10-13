@@ -3,6 +3,7 @@ import { text, select, multiselect, confirm, group, cancel } from '@clack/prompt
 import color from 'picocolors';
 import { execSync } from 'child_process';
 import { frameworkDefaultPort } from './detector.js';
+import { isValidGitHubRepoSlug } from './git.js';
 
 // Sanitizes a raw project name for AWS resource compatibility (ALB names
 // allow `[a-zA-Z0-9-]` only; ECR repositories require lowercase): trim,
@@ -252,6 +253,26 @@ export async function promptWorkerCommand(procfile, capabilities = null) {
         process.exit(0);
     }
     return typeof answer === 'string' ? answer : '';
+}
+
+// Asks for the GitHub `owner/name` used to scope the OIDC trust policy.
+// Empty input skips (the caller falls back to the open trust + warning);
+// cancel aborts like every other wizard prompt.
+export async function promptGitHubRepo() {
+    const answer = await text({
+        message: 'Which GitHub repo will deploy this project? (Scopes the CI trust policy; empty keeps it open)',
+        placeholder: 'owner/name',
+        validate: (value) => {
+            if (!value || isValidGitHubRepoSlug(value)) return undefined;
+            return 'Enter owner/name (e.g. acme/widgets), or leave empty to skip.';
+        },
+    });
+    if (typeof answer === 'symbol') {
+        cancel('Operation cancelled.');
+        process.exit(0);
+    }
+    const trimmed = typeof answer === 'string' ? answer.trim() : '';
+    return trimmed === '' ? null : trimmed;
 }
 
 export async function getAiAssistants() {

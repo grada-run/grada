@@ -4,10 +4,10 @@ import { ECSClient, UpdateServiceCommand } from '@aws-sdk/client-ecs';
 import { RDSClient, StopDBInstanceCommand, StopDBClusterCommand } from '@aws-sdk/client-rds';
 import color from 'picocolors';
 import { intro, outro, spinner, confirm, cancel } from '@clack/prompts';
-import { trackEvent, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
+import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveHeadless, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { findDbTarget } from '../utils/rds.js';
@@ -501,19 +501,16 @@ async function runSleepMain(input = {}) {
             savings,
         };
     } catch (error) {
-        await trackFailure('sleep_run', {
-            projectName,
-            env_kind: target.envKind,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
-        if (handleAuthErrorBranch(error, s, options)) {
+        if (isAuthError(error)) {
+            await trackAwsFailure('sleep_run', error, { projectName, env_kind: target.envKind });
+            handleAuthErrorBranch(error, s, options);
             return { ok: false, reason: 'error', cluster: target.cluster, region };
         }
         try { s.stop(color.red('❌ Sleep failed.')); } catch { /* spinner already stopped */ }
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'sleep_run',
+            error,
+            telemetry: { projectName, env_kind: target.envKind },
             reason: 'error',
             resultExtra: { cluster: target.cluster, region },
         });

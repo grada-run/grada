@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -17,6 +17,39 @@ beforeEach(() => {
 
 afterEach(() => {
     tmp.cleanup();
+});
+
+describe('readTerraformOidcTrust', () => {
+    it('returns null when terraform/oidc.tf is missing', () => {
+        expect(readTerraformOidcTrust(makeTmp())).toBeNull();
+    });
+
+    it('extracts the scoped OIDC sub claim', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"\n'
+        );
+        expect(readTerraformOidcTrust(dir)).toBe('repo:acme/widgets:*');
+    });
+
+    it('extracts the open repo:* trust verbatim', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:*"\n'
+        );
+        expect(readTerraformOidcTrust(dir)).toBe('repo:*');
+    });
+
+    it('returns null when the sub claim is absent', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'oidc.tf'), '# empty\n');
+        expect(readTerraformOidcTrust(dir)).toBeNull();
+    });
 });
 
 describe('readTerraformProjectName', () => {

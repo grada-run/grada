@@ -6,5 +6,6 @@ export default defineConfig({
             FORCE_COLOR: '1',
         },
         exclude: [...defaultExclude, 'tests/e2e/**'],
+        setupFiles: ['./tests/setup.js'],
     },
 });

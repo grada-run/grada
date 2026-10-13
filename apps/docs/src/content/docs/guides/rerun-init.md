@@ -48,6 +48,10 @@ The random resource suffix (`grada_resource_suffix`, e.g. `-a1b2c3`) minted on f
 
 The project name is read back out of the existing tree (`app_name` in `terraform/main.tf`) and reused, so renaming or copying the directory and re-running setup keeps rendering the same resource names. When the directory basename disagrees with the tree, setup warns loudly and keeps the tree's name — re-deriving from the directory would silently provision a parallel stack on the next apply while the old one keeps billing. Pass `--project-name <name>` to rename explicitly (setup warns that the next apply forks a new stack); cloning a tree as the starting point for a genuinely new project needs the same flag.
 
+## The OIDC trust survives re-runs
+
+The CI trust is read back out of the existing tree (`terraform/oidc.tf`) and re-rendered verbatim — re-running setup never re-derives it from the git remote or re-prompts, so an explicit `--github-repo` re-scope is the only thing that changes it. Trees that still carry the open `repo:*` trust keep it (with a warning); `doctor` flags them until re-scoped.
+
 ## Suggested workflow
 
 1. Commit your work before re-running, so `git status` shows exactly what regeneration changed.

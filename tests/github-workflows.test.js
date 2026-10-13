@@ -82,11 +82,36 @@ describe('github workflow templates', () => {
         expect(guard.run).toContain('grada-run');
         expect(guard.run).toContain('@grada-run/grada');
         expect(guard.run).toContain('npm view');
+        // Registry/CDN read-after-write lag lasts minutes: the guard must
+        // retry on a minutes-long window, not seconds.
+        expect(guard.run).toContain('seq 1 30');
+        // Re-runs must survive already-live versions (tolerating only the
+        // specific already-published error), or a retried release can never
+        // go green.
+        for (const name of ['Publish Primary Package', 'Publish Scoped Alias']) {
+            const step = steps.find((s) => typeof s?.name === 'string' && s.name.includes(name));
+            expect(step.run).toContain('previously published versions');
+        }
         // Must run after both publishes so it verifies the live registry.
         const names = steps.map((s) => s?.name || '');
         const guardIdx = names.indexOf(guard.name);
         expect(guardIdx).toBeGreaterThan(names.findIndex((n) => /Publish Primary Package/.test(n)));
         expect(guardIdx).toBeGreaterThan(names.findIndex((n) => /Publish Scoped Alias/.test(n)));
+    });
+
+    it('pins every third-party action to an immutable ref (no @master/@main)', () => {
+        const roots = [TEMPLATES_DIR, path.resolve('.github/workflows')];
+        for (const root of roots) {
+            for (const file of fs.readdirSync(root).filter((f) => f.endsWith('.yml'))) {
+                const raw = fs.readFileSync(path.join(root, file), 'utf8');
+                for (const match of raw.matchAll(/uses:\s*([^\s#]+)/g)) {
+                    const ref = match[1];
+                    if (ref.startsWith('./') || ref.startsWith('docker://')) continue;
+                    const pin = ref.split('@')[1] || '';
+                    expect(pin, `${file}: '${ref}' must not float on a branch`).not.toMatch(/^(master|main|latest|stable)$/);
+                }
+            }
+        }
     });
 
     it('deploy.yml still parses after migration-gate injection', () => {

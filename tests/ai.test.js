@@ -1,21 +1,18 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, mockMultiselect } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { mockMultiselect } from './helpers/clack.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { syncAi } from '../src/commands/sync-ai.js';
 import { injectManagedBlock } from '../src/utils/ai-rules.js';
 
 // 1. Mock the interactive prompts to simulate user input
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 // Simulate the user selecting 'claude' from the list and hitting Enter
 mockMultiselect.mockResolvedValue(['claude']);
 
 // 2. Mock telemetry to prevent real network calls
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 describe('AI Context Synchronization', () => {
     const originalCwd = process.cwd();

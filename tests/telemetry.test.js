@@ -5,6 +5,10 @@ import os from 'os';
 import path from 'path';
 import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath } from '../src/core/telemetry.js';
 
+// This file tests the real telemetry module: opt out of the suite-wide
+// mock registered in tests/setup.js.
+vi.unmock('../src/core/telemetry.js');
+
 const SHA256_UNKNOWN_PREFIX = crypto.createHash('sha256').update('unknown').digest('hex').substring(0, 16);
 
 // Hermetic telemetry env for send-path tests: our own runner (VITEST) now

@@ -126,6 +126,17 @@ export function readTerraformProjectName(cwd = process.cwd()) {
     return null;
 }
 
+// Reads the GitHub OIDC trust (`repo:owner/name:*` or the open `repo:*`)
+// from an existing tree's oidc.tf, so re-init preserves the rendered
+// trust instead of re-deriving it. Null when the file or claim is absent.
+export function readTerraformOidcTrust(cwd = process.cwd()) {
+    const base = resolveCwd({}, cwd);
+    const oidcTf = readFileSafe(path.join(base, 'terraform', 'oidc.tf'));
+    if (!oidcTf) return null;
+    const match = oidcTf.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*"([^"]+)"/);
+    return match ? match[1] : null;
+}
+
 // Collision-resistant naming: init mints a `-a1b2c3` suffix per project,
 // rendered into `grada_resource_suffix` in terraform/main.tf. AWS-name
 // builders append it to whatever base they assemble (bare or

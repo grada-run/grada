@@ -6,6 +6,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { mockConsoleTrio } from './helpers/console.js';
 // NOTE: no telemetry mock here — these tests exercise the real suppression
 // machinery against a stubbed fetch and a scratch config file.
+vi.unmock('../src/core/telemetry.js');
 import { runTelemetry, TELEMETRY_SUBCOMMANDS } from '../src/commands/telemetry.js';
 import { resetTelemetryPreferenceCache } from '../src/core/telemetry.js';
 

@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, mockOutro } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { mockOutro } from './helpers/clack.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -20,9 +19,7 @@ vi.mock('../src/utils/aws.js', async (importOriginal) => {
     return { ...actual, checkAwsCredentials: vi.fn() };
 });
 
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 const realPlatform = process.platform;
 
@@ -615,6 +612,55 @@ describe('S27: project-aware doctor checks (R2)', () => {
                 success: true,
                 check_interrupted_run: false,
             }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('warns (without failing) on open repo:* OIDC trust', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:*"\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/repo:\*/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+                check_oidc_trust_scope: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes the OIDC trust check on scoped trust', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).not.toMatch(/repo:\*/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_oidc_trust_scope: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('skips the OIDC trust check when oidc.tf is absent', async () => {
+        writeProjectWithBackend();
+        const s3Client = { send: vi.fn(async () => ({ Contents: [] })) };
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir, s3Client });
+            expect(output.join('\n')).toMatch(/OIDC trust scope.*skipped/i);
         } finally {
             restore();
         }

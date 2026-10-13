@@ -1,12 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { telemetryMockFactory } from './helpers/telemetry.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { withProjectLock } from '../src/utils/file-lock.js';
 import { trackEvent } from '../src/core/telemetry.js';
 
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 function makeTmp() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'file-lock-'));

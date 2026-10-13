@@ -57,6 +57,7 @@ describe('CLI Argument Parser', () => {
             dbEngine: null,
             target: null,
             projectName: null,
+            githubRepo: null,
             setupCiMigrate: false,
             setupCiDrift: false,
         });
@@ -98,6 +99,14 @@ describe('CLI Argument Parser', () => {
         expect(spaced.initOptions.projectName).toBe('newname');
         expect(spaced.baseCommand).toBe('init');
         expect(parseCliArgs(['--headless']).initOptions.projectName).toBeNull();
+    });
+
+    it('parses --github-repo in space and equals forms', () => {
+        expect(parseCliArgs(['--github-repo=acme/widgets']).initOptions.githubRepo).toBe('acme/widgets');
+        const spaced = parseCliArgs(['--headless', '--github-repo', 'acme/widgets']);
+        expect(spaced.initOptions.githubRepo).toBe('acme/widgets');
+        expect(spaced.baseCommand).toBe('init');
+        expect(parseCliArgs(['--headless']).initOptions.githubRepo).toBeNull();
     });
 
     it('parses --setup-ci-migrate with an optional explicit command', () => {

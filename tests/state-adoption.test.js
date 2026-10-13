@@ -1,15 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, clackMocks as clack } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { clackMocks as clack } from './helpers/clack.js';
 import { checkStateAdoption, stateKeyExists, deleteStateKey, STATE_KEY } from '../src/utils/state-adoption.js';
 import { trackEvent } from '../src/core/telemetry.js';
 
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 // Silence telemetry so tests never hit the network.
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 function fakeS3(handler) {
     return { send: vi.fn(handler) };

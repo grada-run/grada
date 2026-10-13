@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
-import { clackPromptsMockFactory, clackMocks as clack } from './helpers/clack.js';
-import { telemetryMockFactory } from './helpers/telemetry.js';
+import { clackMocks as clack } from './helpers/clack.js';
 import { mockConsoleTrio } from './helpers/console.js';
 import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
+import { execSync } from 'child_process';
 import { parseCliArgs } from '../src/core/parser.js';
 import { getProjectConfig, getTargetDirectory, sanitizeProjectName } from '../src/utils/prompts.js';
 import { trackEvent } from '../src/core/telemetry.js';
@@ -18,7 +18,6 @@ import { mainStack } from '../src/commands/init.js';
 // `commander` prompt calls exist under src/ or bin/), so mocking every
 // `@clack/prompts` export is the correct automation guard. `inquirer` is
 // not a dependency, so there is nothing to mock there.
-vi.mock('@clack/prompts', () => clackPromptsMockFactory());
 
 // Never touch the real environment: fake terraform presence and AWS.
 vi.mock('../src/utils/system.js', () => ({
@@ -43,7 +42,6 @@ vi.mock('../src/utils/aws.js', async (importOriginal) => {
 });
 
 // Silence telemetry so tests never hit the network.
-vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
 
 function expectNoInteractivePrompts() {
     expect(clack.mockText).not.toHaveBeenCalled();
@@ -51,6 +49,31 @@ function expectNoInteractivePrompts() {
     expect(clack.mockMultiselect).not.toHaveBeenCalled();
     expect(clack.mockConfirm).not.toHaveBeenCalled();
     expect(clack.mockGroup).not.toHaveBeenCalled();
+}
+
+// Shared headless-init driver: parses argv, runs mainStack in the ambient
+// cwd (callers chdir to their tmp dir in beforeEach), and snapshots the
+// console/exit history before the spies are restored.
+async function runHeadlessInit(argv) {
+    const parsed = parseCliArgs(argv);
+    const spies = mockConsoleTrio();
+    try {
+        const result = await mainStack({
+            isHeadless: parsed.isHeadless,
+            isPreconfigured: parsed.isPreconfigured,
+            headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+            initOptions: parsed.initOptions,
+        });
+        // Snapshot before restore: mockRestore clears call history.
+        return {
+            result,
+            exitCalls: spies.exitSpy.mock.calls.map((call) => call[0]),
+            logText: spies.logSpy.mock.calls.flat().join('\n'),
+            errorText: spies.errorSpy.mock.calls.flat().join('\n'),
+        };
+    } finally {
+        spies.restore();
+    }
 }
 
 describe('Headless contract (automation-safe)', () => {
@@ -1068,27 +1091,6 @@ describe('Headless: state adoption gate', () => {
         });
     }
 
-    async function runHeadlessInit(argv) {
-        const parsed = parseCliArgs(argv);
-        const spies = mockConsoleTrio();
-        try {
-            const result = await mainStack({
-                isHeadless: parsed.isHeadless,
-                isPreconfigured: parsed.isPreconfigured,
-                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
-                initOptions: parsed.initOptions,
-            });
-            // Snapshot before restore: mockRestore clears call history.
-            return {
-                result,
-                exitCalls: spies.exitSpy.mock.calls.map((call) => call[0]),
-                errorText: spies.errorSpy.mock.calls.flat().join('\n'),
-            };
-        } finally {
-            spies.restore();
-        }
-    }
-
     it('refuses with STATE_ALREADY_EXISTS when remote state already exists', async () => {
         mockProvisionedBucket(keyPresentClient());
         const { result, exitCalls, errorText } = await runHeadlessInit(['--headless', '--framework=node']);
@@ -1121,5 +1123,111 @@ describe('Headless: state adoption gate', () => {
 
         expect(exitCalls).toEqual([]);
         await expect(fs.stat(path.join(tmpDir, 'terraform', 'main.tf'))).resolves.toBeTruthy();
+    });
+});
+
+describe('Headless: OIDC trust scoping', () => {
+    let tmpDir;
+
+    let hasGit = true;
+    try {
+        execSync('git --version', { stdio: 'pipe' });
+    } catch {
+        hasGit = false;
+    }
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        process.env.DO_NOT_TRACK = '1';
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-headless-oidc-'));
+        process.chdir(tmpDir);
+    });
+
+    afterEach(async () => {
+        process.chdir(path.dirname(tmpDir));
+        if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    async function renderedTrust() {
+        const oidc = await fs.readFile(path.join(tmpDir, 'terraform', 'oidc.tf'), 'utf-8');
+        return oidc.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*"([^"]+)"/)[1];
+    }
+
+    function trustTelemetry() {
+        return trackEvent.mock.calls.filter(([name]) => name === 'init_oidc_trust');
+    }
+
+    it('fails fast on an invalid --github-repo before provisioning', async () => {
+        const { result, exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--github-repo=not-a-slug']);
+
+        expect(result).toMatchObject({ ok: false, reason: 'invalid-github-repo' });
+        expect(exitCalls).toEqual([1]);
+        expect(provisionStateBucket).not.toHaveBeenCalled();
+        expect(trackEvent).toHaveBeenCalledWith(
+            'cli-error',
+            expect.objectContaining({ step: 'init_validation', error_code: 'INVALID_GITHUB_REPO' })
+        );
+    });
+
+    it('renders scoped trust from --github-repo without prompting', async () => {
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
+
+        expect(exitCalls).toEqual([]);
+        expectNoInteractivePrompts();
+        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        const calls = trustTelemetry();
+        expect(calls).toHaveLength(1);
+        expect(calls[0][1]).toMatchObject({ mode: 'scoped', source: 'flag' });
+        expect(JSON.stringify(calls[0][1])).not.toContain('acme/widgets');
+    });
+
+    it('falls back to repo:* with a loud warning when nothing identifies the repo', async () => {
+        const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('repo:*');
+        expect(logText).toContain('repo:*');
+        expect(logText).toContain('--github-repo');
+        const calls = trustTelemetry();
+        expect(calls).toHaveLength(1);
+        expect(calls[0][1]).toMatchObject({ mode: 'fallback', source: 'fallback' });
+    });
+
+    it.skipIf(!hasGit)('derives scoped trust from the git remote', async () => {
+        execSync('git init -q && git remote add origin git@github.com:acme/widgets.git', { cwd: tmpDir, stdio: 'pipe' });
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'remote' });
+    });
+
+    it('--github-repo wins over the git remote', async () => {
+        if (!hasGit) return;
+        execSync('git init -q && git remote add origin git@github.com:acme/other.git', { cwd: tmpDir, stdio: 'pipe' });
+        await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
+
+        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'flag' });
+    });
+
+    it('re-init preserves the tree trust instead of re-deriving it', async () => {
+        await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
+        vi.clearAllMocks();
+        const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(logText).not.toContain('repo:*');
+        expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
+    });
+
+    it('re-init keeps an open tree trust verbatim and warns', async () => {
+        await runHeadlessInit(['--headless', '--framework=node']);
+        vi.clearAllMocks();
+        const { logText } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(await renderedTrust()).toBe('repo:*');
+        expect(logText).toContain('repo:*');
     });
 });

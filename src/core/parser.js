@@ -130,6 +130,7 @@ export function parseCliArgs(processArgs) {
         dbEngine: getValueFlag('db-engine'),
         target: getValueFlag('target'),
         projectName: getValueFlag('project-name'),
+        githubRepo: getValueFlag('github-repo'),
         setupCiMigrate: getBoolOrValueFlag('setup-ci-migrate'),
         setupCiDrift: args.includes('--setup-ci-drift'),
     };

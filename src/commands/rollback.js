@@ -8,7 +8,7 @@ import {
 import color from 'picocolors';
 import { intro, outro, spinner, select, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
@@ -363,15 +363,11 @@ async function runRollbackMain(input = {}) {
             handleAwsAuthError(error, s, options);
             return { ok: false, reason: 'auth-error', cluster, service, region };
         }
-        await trackFailure('rollback_run', {
-            projectName,
-            error_code: error?.name || 'UNKNOWN',
-            error_message: error?.message,
-        });
         s.stop(color.red('❌ Rollback failed.'));
-        return failCommand({
-            message: `✖ ${error?.message || error}`,
-            hint: 'Check your AWS credentials and region, then try again.',
+        return failAwsError({
+            event: 'rollback_run',
+            error,
+            telemetry: { projectName },
             reason: 'error',
             resultExtra: { cluster, service, region },
             exitCode: 1,

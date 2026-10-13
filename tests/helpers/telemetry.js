@@ -1,8 +1,10 @@
 // Centralized `src/core/telemetry.js` mock for the test suite.
 //
-// Usage (one-liner per test file):
-//   import { telemetryMockFactory } from './helpers/telemetry.js';
-//   vi.mock('../src/core/telemetry.js', (importOriginal) => telemetryMockFactory(importOriginal));
+// Registered suite-wide in tests/setup.js — test files observe the shared
+// handles (mockTrackEvent, ...) without any per-file vi.mock line. Files
+// needing the real module opt out with vi.unmock (telemetry.test.js,
+// telemetry-command.test.js); files needing custom behavior layer their
+// own mock on top of telemetryMockFactory (programmatic-context.test.js).
 //
 // `trackSuccess`/`trackFailure` mirror the real delegation (calling through
 // to `trackEvent` + `flushTelemetry`) so success/failure-path assertions that
