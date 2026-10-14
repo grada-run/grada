@@ -266,6 +266,29 @@ describe('Command: destroy (mocked terraform spawn)', () => {
     );
   });
 
+  it('stamps the retry-terminal failure with a stable reason', async () => {
+    writeBackend();
+    const seen = [];
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      seen.push(args[0]);
+      if (args[0] === 'force-unlock') return makeChild({ code: 0, stdout: 'unlocked' });
+      if (args[0] === 'destroy' && seen.filter((a) => a === 'destroy').length === 1) {
+        return makeChild({ code: 1, stderr: 'Error: Error acquiring the state lock:\nLock Info:\n  ID:        destroy-lock-9\n' });
+      }
+      if (args[0] === 'destroy') {
+        return makeChild({ code: 1, stderr: 'Error: persistent failure' });
+      }
+      return makeChild({ code: 0, stdout: 'ok' });
+    });
+
+    await expect(destroyStack({ isHeadless: true, forceUnlock: 'destroy-lock-9' })).rejects.toMatchObject({ exitCode: 1 });
+    expect(seen.filter((a) => a === 'destroy')).toHaveLength(2);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_destroyed',
+      expect.objectContaining({ success: false, reason: 'destroy-retry-failed' })
+    );
+  });
+
   it('treats spawn errors (missing binary) as destroy failure', async () => {
     writeBackend();
     clack.mockConfirm.mockResolvedValueOnce(true);
@@ -600,6 +623,54 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(trackEvent).toHaveBeenCalledWith(
         'infrastructure_destroyed',
         expect.objectContaining({ success: false, error_code: 'RDS_DESTROY_PREFLIGHT_FAILED' })
+      );
+    });
+
+    it('prints the credentials hint when the database lookup fails', async () => {
+      writeBackend();
+      clack.mockConfirm.mockResolvedValueOnce(true);
+      mockSpawn.mockImplementation(() => makeChild({ code: 0, stdout: 'destroy complete' }));
+      const rdsClient = { send: vi.fn(async () => { throw new Error('boom'); }) };
+
+      const lines = [];
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation((...args) => { lines.push(args.join(' ')); });
+      try {
+        await expect(destroyStack({ rdsClient, sleepFn: noopSleep })).rejects.toMatchObject({ exitCode: 1 });
+      } finally {
+        consoleSpy.mockRestore();
+      }
+      expect(lines.join('\n')).toContain('Check your AWS credentials and region');
+    });
+
+    it('prints the credentials hint when the pre-destroy database wait fails', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = {
+        send: vi.fn(async (command) => {
+          const name = command.constructor.name;
+          if (name === 'DescribeDBInstancesCommand') {
+            return { DBInstances: [{ DBInstanceStatus: 'stopped', Engine: 'postgres' }] };
+          }
+          if (name === 'DescribeDBClustersCommand') {
+            throw Object.assign(new Error('DBClusterNotFoundFault'), { name: 'DBClusterNotFoundFault' });
+          }
+          throw Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+        }),
+      };
+
+      const lines = [];
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation((...args) => { lines.push(args.join(' ')); });
+      try {
+        await expect(destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true })).rejects.toMatchObject({ exitCode: 1 });
+      } finally {
+        consoleSpy.mockRestore();
+      }
+      expect(lines.join('\n')).toContain('Check your AWS credentials and region');
+      // The hint must not cost the specific code: .code still beats the
+      // fallback, and beats failAwsError's .name-derived stamp.
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ success: false, error_code: 'ECONNRESET' })
       );
     });
   });

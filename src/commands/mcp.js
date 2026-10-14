@@ -34,7 +34,10 @@ export const TOOL_NAMES = ['analyze_stack', 'add_primitive', 'stack_status', 'fe
 // failure cannot flood the model's context window.
 const MAX_ERROR_OUTPUT_CHARS = 4000;
 
-const ANSI_RE = /\x1B\[[0-9;]*m/g;
+// Full CSI matcher, not SGR-only: error output captured from clack
+// spinners carries cursor-control sequences (?25l/?25h, 1G, J, 1D,
+// 0K) that an SGR-only regex would leak into model context.
+const ANSI_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 
 export function stripAnsi(text) {
     return String(text ?? '').replace(ANSI_RE, '');
@@ -193,7 +196,11 @@ export async function handleAnalyzeStack({ cwd } = {}) {
         computeTarget = 'unknown';
     }
     const terraformDir = path.join(dir, 'terraform');
-    const initialized = fsSync.existsSync(path.join(terraformDir, 'main.tf'));
+    // Init state, not scaffold presence: main.tf exists from scaffold
+    // time, while `.terraform/` only appears once `terraform init` has
+    // installed providers. A lockfile alone (fresh clone) still reads
+    // false; emptiness is not checked — providerless configs init fine.
+    const initialized = fsSync.existsSync(path.join(terraformDir, '.terraform'));
     const installedAddons = Object.entries(ADDON_REGISTRY)
         .filter(([, addon]) => {
             try {
@@ -242,6 +249,11 @@ export async function handleStackStatus(args = {}) {
         if (error instanceof InterceptedExit) return exitError(error, error.output);
         throw error;
     }
+    // Same soft-failure branch as add_primitive above.
+    if (guarded.result && guarded.result.ok === false) {
+        const reason = guarded.result.reason || 'unknown';
+        return failureError(`grada status failed (${reason}).`, guarded.output);
+    }
     return toolText(guarded.result);
 }
 
@@ -255,6 +267,11 @@ export async function handleFetchLogs(args = {}) {
     } catch (error) {
         if (error instanceof InterceptedExit) return exitError(error, error.output);
         throw error;
+    }
+    // Same soft-failure branch as add_primitive above.
+    if (guarded.result && guarded.result.ok === false) {
+        const reason = guarded.result.reason || 'unknown';
+        return failureError(`grada logs failed (${reason}).`, guarded.output);
     }
     return toolText(guarded.result);
 }
@@ -272,6 +289,14 @@ export async function handleAuditSecrets(args = {}) {
     } catch (error) {
         if (error instanceof InterceptedExit) return exitError(error, error.output);
         throw error;
+    }
+    // Same soft-failure branch as add_primitive above. Unreachable
+    // today (audit exits, throws, or returns a success object without
+    // an `ok` field) — uniformity, so a future soft failure can't slip
+    // through silently.
+    if (guarded.result && guarded.result.ok === false) {
+        const reason = guarded.result.reason || 'unknown';
+        return failureError(`grada secrets audit failed (${reason}).`, guarded.output);
     }
     return toolText(guarded.result);
 }

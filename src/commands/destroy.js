@@ -89,7 +89,7 @@ async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy,
                 await attemptDestroy();
             } catch (retryError) {
                 // No retry loops: whatever the retry hits is terminal.
-                return { retried: false, result: failCommand({ message: String(retryError.message || retryError), useErrorStream: true, event: 'infrastructure_destroyed', errorCode: retryError.code || 'UNKNOWN' }) };
+                return { retried: false, result: failCommand({ message: String(retryError.message || retryError), useErrorStream: true, event: 'infrastructure_destroyed', errorCode: retryError.code || 'UNKNOWN', reason: 'destroy-retry-failed' }) };
             }
             return { retried: true };
         };
@@ -199,6 +199,7 @@ async function destroyStackMain(input = {}) {
                 useErrorStream: true,
                 event: 'infrastructure_destroyed',
                 telemetry: { projectName: projectNameForTelemetry, error_code: error.code || 'RDS_DESTROY_PREFLIGHT_FAILED' },
+                hint: 'Check your AWS credentials and region, then try again.',
             });
         }
     } else {
@@ -358,6 +359,7 @@ async function destroyStackMain(input = {}) {
             useErrorStream: true,
             event: 'infrastructure_destroyed',
             telemetry: { projectName: actualProjectName, error_code: error.code || 'RDS_DESTROY_PREFLIGHT_FAILED' },
+            hint: 'Check your AWS credentials and region, then try again.',
         });
     }
 

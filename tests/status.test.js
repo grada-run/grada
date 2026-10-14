@@ -242,6 +242,78 @@ describe('Command: status (mocked ECS + CloudWatch)', () => {
         }
     });
 
+    it('emits a JSON error envelope on stdout when the ECS probe fails under --json', async () => {
+        const ecsClient = { send: vi.fn().mockRejectedValue(Object.assign(new Error('getaddrinfo ENOTFOUND ecs.us-east-2.amazonaws.com'), { code: 'ENOTFOUND' })) };
+        const cloudWatchClient = mockCloudWatchClient([]);
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => { output.push(args.join(' ')); });
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', json: true, ecsClient, cloudWatchClient });
+            const envelope = JSON.parse(output.join('\n'));
+            expect(envelope).toMatchObject({ ok: false, exitCode: 1, reason: null, region: 'us-east-2', service: 'myapp-service' });
+            expect(envelope.error).toContain('getaddrinfo ENOTFOUND');
+            expect(envelope.error).not.toContain('✖');
+            expect(result).toEqual(envelope);
+            expect(errorSpy).not.toHaveBeenCalled();
+            expect(exitSpy).not.toHaveBeenCalled();
+        } finally {
+            consoleSpy.mockRestore();
+            errorSpy.mockRestore();
+        }
+    });
+
+    it('prints the missing-service object as JSON under --json', async () => {
+        const ecsClient = { send: vi.fn().mockResolvedValue({ services: [] }) };
+        const cloudWatchClient = mockCloudWatchClient([]);
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => { output.push(args.join(' ')); });
+        try {
+            const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', json: true, ecsClient, cloudWatchClient });
+            const printed = JSON.parse(output.join('\n'));
+            expect(printed).toMatchObject({ healthy: false, missing: true, service: null });
+            expect(result).toEqual(printed);
+            expect(exitSpy).not.toHaveBeenCalled();
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('formats expired credentials as a JSON envelope under --json', async () => {
+        const error = new Error('The security token included in the request is expired');
+        error.name = 'ExpiredTokenException';
+        const ecsClient = { send: vi.fn().mockRejectedValue(error) };
+        const cloudWatchClient = mockCloudWatchClient([]);
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => { output.push(args.join(' ')); });
+        try {
+            const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', json: true, ecsClient, cloudWatchClient, spawnSyncImpl: () => ({ status: 0 }) });
+            const envelope = JSON.parse(output.join('\n'));
+            expect(envelope).toMatchObject({ ok: false, exitCode: 1, reason: null });
+            expect(envelope.error).toContain('expired');
+            expect(result).toEqual(envelope);
+            expect(exitSpy).not.toHaveBeenCalled();
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('prefers the JSON envelope over watch-mode prose when both flags combine', async () => {
+        const ecsClient = { send: vi.fn().mockRejectedValue(new Error('boom')) };
+        const cloudWatchClient = mockCloudWatchClient([]);
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => { output.push(args.join(' ')); });
+        try {
+            const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', json: true, watchMode: true, ecsClient, cloudWatchClient });
+            const envelope = JSON.parse(output.join('\n'));
+            expect(envelope.ok).toBe(false);
+            expect(result).toEqual(envelope);
+            expect(output.join('\n')).not.toContain('retrying');
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
     it('is wired into bin/cli.js with diagnose hidden from help', () => {
         const cliPath = path.resolve(__dirname, '../bin/cli.js');
         const content = fs.readFileSync(cliPath, 'utf8');
@@ -504,6 +576,41 @@ describe('status: lambda target (mocked AWS CLI)', () => {
         expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"computeTarget": "lambda"'));
     });
 
+    it('emits a JSON error envelope when get-function fails under --json', async () => {
+        const spawnSyncImpl = vi.fn(() => ({ status: 1, stdout: '', stderr: 'An error occurred (AccessDeniedException) when calling the GetFunction operation' }));
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', json: true, spawnSyncImpl });
+            const envelope = JSON.parse(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n'));
+            expect(envelope).toMatchObject({ ok: false, exitCode: 1, reason: null, functionName: 'myapp-fn', region: 'us-east-2' });
+            expect(envelope.error).toContain('AccessDeniedException');
+            expect(envelope.error).not.toContain('✖');
+            expect(result).toEqual(envelope);
+            expect(errorSpy).not.toHaveBeenCalled();
+            expect(exitSpy).not.toHaveBeenCalled();
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
+    it('emits a JSON error envelope with reason when the AWS CLI is missing under --json', async () => {
+        const spawnSyncImpl = vi.fn(() => ({ error: { code: 'ENOENT' } }));
+        const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', json: true, spawnSyncImpl });
+        const envelope = JSON.parse(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n'));
+        expect(envelope).toMatchObject({ ok: false, exitCode: 1, reason: 'aws-cli-missing', functionName: 'myapp-fn', region: 'us-east-2' });
+        expect(envelope.error).toContain('AWS CLI is required');
+        expect(result).toEqual(envelope);
+    });
+
+    it('prints the missing-function object as JSON under --json', async () => {
+        const spawnSyncImpl = vi.fn(() => ({ status: 1, stdout: '', stderr: 'ResourceNotFoundException: Function not found' }));
+        const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', json: true, spawnSyncImpl });
+        const printed = JSON.parse(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n'));
+        expect(printed).toMatchObject({ healthy: false, missing: true, function: null });
+        expect(result).toEqual(printed);
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
     it('resolves the function name with the rendered resource suffix', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-suffix-'));
         try {
@@ -625,6 +732,33 @@ describe('status: static target (mocked CloudFront)', () => {
         expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"computeTarget": "static"'));
     });
 
+    it('emits a JSON error envelope when the distribution lookup fails under --json', async () => {
+        const cloudFrontClient = { send: vi.fn().mockRejectedValue(Object.assign(new Error('getaddrinfo ENOTFOUND cloudfront.amazonaws.com'), { code: 'ENOTFOUND' })) };
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const result = await runStaticStatus({ projectName: 'myapp', region: 'us-east-2', json: true, cloudFrontClient });
+            const envelope = JSON.parse(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n'));
+            expect(envelope).toMatchObject({ ok: false, exitCode: 1, reason: null, region: 'us-east-2' });
+            expect(envelope.error).toContain('ENOTFOUND');
+            expect(result).toEqual(envelope);
+            expect(errorSpy).not.toHaveBeenCalled();
+            expect(exitSpy).not.toHaveBeenCalled();
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
+    it('prints the missing-distribution object as JSON under --json', async () => {
+        const result = await runStaticStatus({
+            projectName: 'myapp', region: 'us-east-2', json: true,
+            cloudFrontClient: mockCfClient([]),
+        });
+        const printed = JSON.parse(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n'));
+        expect(printed).toMatchObject({ healthy: false, missing: true, distribution: null });
+        expect(result).toEqual(printed);
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
     it('treats InProgress as degraded without diagnosing', async () => {
         const result = await runStaticStatus({
             projectName: 'myapp', region: 'us-east-2',
@@ -663,6 +797,56 @@ describe('status: static target (mocked CloudFront)', () => {
             const result = await runStatus({ cwd: dir, region: 'us-east-2', cloudFrontClient: mockCfClient([DEPLOYED]) });
             expect(result.healthy).toBe(true);
             expect(result.computeTarget).toBe('static');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('status: --json machine contract', () => {
+    let exitSpy;
+    let consoleSpy;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
+    function ejectedTree() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-ejected-'));
+        fs.writeFileSync(path.join(dir, '.grada-ejected'), JSON.stringify({ ejectedAt: '2026-01-01T00:00:00Z' }));
+        return dir;
+    }
+
+    it('skips the ejected-tree warning under --json so stdout stays pure JSON', async () => {
+        const dir = ejectedTree();
+        try {
+            const result = await runStatus({
+                projectName: 'myapp', region: 'us-east-2', json: true, cwd: dir,
+                ecsClient: mockEcsClient(healthyService), cloudWatchClient: mockCloudWatchClient([]),
+            });
+            const printed = JSON.parse(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n'));
+            expect(result.healthy).toBe(true);
+            expect(printed.healthy).toBe(true);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('still warns on ejected trees without --json', async () => {
+        const dir = ejectedTree();
+        try {
+            await runStatus({
+                projectName: 'myapp', region: 'us-east-2', cwd: dir,
+                ecsClient: mockEcsClient(healthyService), cloudWatchClient: mockCloudWatchClient([]),
+            });
+            expect(consoleSpy.mock.calls.map(([line]) => String(line)).join('\n')).toContain('ejected');
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }

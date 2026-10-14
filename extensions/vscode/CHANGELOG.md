@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.40.6
+
+- Version alignment with CLI releases (no functional changes).
+
 ## 0.40.5
 
 - Version alignment with CLI releases (no functional changes).

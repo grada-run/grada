@@ -58,6 +58,10 @@ describe('stripAnsi', () => {
     it('removes color escape sequences', () => {
         expect(stripAnsi('\x1B[31m✖ boom\x1B[0m plain')).toBe('✖ boom plain');
     });
+
+    it('strips cursor-control sequences, not just SGR colors', () => {
+        expect(stripAnsi('\x1B[?25l\x1B[1G\x1B[Jworking\x1B[1D\x1B[0K\x1B[?25h')).toBe('working');
+    });
 });
 
 describe('withStdioGuards', () => {
@@ -205,6 +209,39 @@ describe('tool handlers', () => {
         expect(result.content[0].text).toContain('already exists');
     });
 
+    it('stack_status maps soft ok:false failures to error results', async () => {
+        vi.mocked(runStatus).mockImplementation(async () => {
+            console.log('✖ boom');
+            return { ok: false, reason: 'status-probe-failed', exitCode: 1 };
+        });
+        const result = await handleStackStatus({});
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('grada status failed (status-probe-failed).');
+        expect(result.content[0].text).toContain('boom');
+    });
+
+    it('fetch_logs maps soft ok:false failures to error results', async () => {
+        vi.mocked(runLogs).mockImplementation(async () => {
+            console.log('✖ boom');
+            return { ok: false, reason: 'log-lookup-failed', exitCode: 1, logs: [] };
+        });
+        const result = await handleFetchLogs({});
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('grada logs failed (log-lookup-failed).');
+        expect(result.content[0].text).toContain('boom');
+    });
+
+    it('audit_secrets maps soft ok:false failures to error results', async () => {
+        vi.mocked(auditSecrets).mockImplementation(async () => {
+            console.log('✖ boom');
+            return { ok: false, reason: 'audit-failed', exitCode: 1 };
+        });
+        const result = await handleAuditSecrets({});
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('grada secrets audit failed (audit-failed).');
+        expect(result.content[0].text).toContain('boom');
+    });
+
     it('converts intercepted exits into error results with the exit code and output', async () => {
         vi.mocked(runStatus).mockImplementation(async () => {
             console.log('✖ Could not determine the project.');
@@ -269,6 +306,9 @@ describe('analyze_stack', () => {
 
     it('reports framework, compute target, init state, and installed addons', async () => {
         const dir = makeProject();
+        // An initialized tree carries `.terraform/`; main.tf alone is a
+        // fresh scaffold and must read false (pinned below).
+        fs.mkdirSync(path.join(dir, 'terraform', '.terraform'));
         try {
             const result = await handleAnalyzeStack({ cwd: dir });
             expect(JSON.parse(result.content[0].text)).toEqual({
@@ -278,6 +318,16 @@ describe('analyze_stack', () => {
                 terraformInitialized: true,
                 installedAddons: ['storage:s3'],
             });
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('reports terraformInitialized false for a scaffold without .terraform', async () => {
+        const dir = makeProject();
+        try {
+            const result = await handleAnalyzeStack({ cwd: dir });
+            expect(JSON.parse(result.content[0].text)).toMatchObject({ terraformInitialized: false });
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }

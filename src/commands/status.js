@@ -97,6 +97,27 @@ function printLambdaDashboard({ functionName, configuration, health }) {
     console.log('');
 }
 
+// --json failure envelope (status-local by design: teaching failCommand
+// a json mode would reshape every command's programmatic results).
+// --json emits exactly one JSON document on stdout, always — stderr
+// stays silent too, since `error` already carries the message. The
+// stamped exitCode preserves terminal exit codes via runCommand (json
+// implies noExit, so nothing here exits directly); `ok: false`
+// discriminates "couldn't check" from success/missing objects, which
+// never carry `ok`. `error` is glyph-free: jq consumers must not strip
+// terminal chrome.
+function statusJsonError({ message, reason = null, extra = {} }) {
+    const envelope = {
+        ok: false,
+        exitCode: 1,
+        error: String(message ?? '').replace(/^\s*✖\s*/, '').trim(),
+        reason,
+        ...extra,
+    };
+    console.log(JSON.stringify(envelope, null, 2));
+    return envelope;
+}
+
 // Lambda health via the AWS CLI (`get-function`), mirroring the ECS status
 // flow above without adding an @aws-sdk/client-lambda dependency.
 export async function runLambdaStatus(input = {}) {
@@ -126,9 +147,11 @@ export async function runLambdaStatus(input = {}) {
     if (res?.error?.code === 'ENOENT') {
         if (s) s.stop(color.red('❌ Status check failed.'));
         await trackFailure('status_run', { projectName, error_code: 'AWS_CLI_MISSING' });
+        const message = '✖ The AWS CLI is required for Lambda status checks.';
+        if (asJson) return statusJsonError({ message, reason: 'aws-cli-missing', extra: { functionName, region } });
         return failCommand({
             noExit,
-            message: '✖ The AWS CLI is required for Lambda status checks.',
+            message,
             hint: 'Install it from https://aws.amazon.com/cli/, then try again.',
             reason: 'aws-cli-missing',
             resultExtra: { functionName, region },
@@ -139,22 +162,31 @@ export async function runLambdaStatus(input = {}) {
         const detail = String(res?.stderr || res?.stdout || '').trim();
         if (/ResourceNotFound/i.test(detail)) {
             if (s) s.stop(color.yellow('Function not found.'));
-            console.log(`\n  The Lambda function ${color.cyan(functionName)} does not exist.`);
-            console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
+            const missing = { healthy: false, missing: true, function: null, signals: null, region, computeTarget: 'lambda' };
 
             await trackSuccess('status_run', { projectName, healthy: false, missing: true });
 
-            if (asJson) return { healthy: false, missing: true, function: null, signals: null, region, computeTarget: 'lambda' };
-            if (options.watchMode) return { healthy: false, missing: true, function: null, signals: null, region, computeTarget: 'lambda', watchMode: true };
-            if (noExit) return { healthy: false, missing: true, function: null, signals: null, region, computeTarget: 'lambda' };
+            // Missing is a state, not an error: print the same object
+            // that's returned (single source), exit 0.
+            if (asJson) {
+                console.log(JSON.stringify(missing, null, 2));
+                return missing;
+            }
+            console.log(`\n  The Lambda function ${color.cyan(functionName)} does not exist.`);
+            console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
+
+            if (options.watchMode) return { ...missing, watchMode: true };
+            if (noExit) return missing;
             process.exit(0);
             return;
         }
         if (s) s.stop(color.red('❌ Status check failed.'));
         await trackFailure('status_run', { projectName, error_code: 'GET_FUNCTION_FAILED' });
+        const message = `✖ ${detail || 'aws lambda get-function failed.'}`;
+        if (asJson) return statusJsonError({ message, extra: { functionName, region } });
         return failCommand({
             noExit,
-            message: `✖ ${detail || 'aws lambda get-function failed.'}`,
+            message,
             hint: 'Check your AWS credentials and region, then try again.',
             resultExtra: { functionName, region },
         });
@@ -166,9 +198,11 @@ export async function runLambdaStatus(input = {}) {
     } catch {
         if (s) s.stop(color.red('❌ Status check failed.'));
         await trackFailure('status_run', { projectName, error_code: 'BAD_RESPONSE' });
+        const message = '✖ Could not parse the Lambda get-function response.';
+        if (asJson) return statusJsonError({ message, extra: { functionName, region } });
         return failCommand({
             noExit,
-            message: '✖ Could not parse the Lambda get-function response.',
+            message,
             hint: 'Check your AWS CLI version, then try again.',
             resultExtra: { functionName, region },
         });
@@ -240,6 +274,18 @@ export async function runStaticStatus(input = {}) {
         const items = resp.DistributionList?.Items || [];
         distribution = items.find((item) => item.Comment === comment) || null;
     } catch (error) {
+        const message = `✖ ${error?.message || error}`;
+        // --json short-circuits every human branch below (auth guidance,
+        // watch prose): the envelope is the whole output. Telemetry is
+        // mirrored here so the shared call below stays untouched.
+        if (asJson) {
+            await trackFailure('status_run', {
+                projectName,
+                error_code: error?.name || 'UNKNOWN',
+                error_message: error?.message,
+            });
+            return statusJsonError({ message, extra: { region } });
+        }
         if (handleAuthErrorBranch(error, s, options)) {
             return { healthy: false, distribution: null, signals: null, region, computeTarget: 'static' };
         }
@@ -255,7 +301,7 @@ export async function runStaticStatus(input = {}) {
         });
         return failCommand({
             noExit,
-            message: `✖ ${error?.message || error}`,
+            message,
             hint: 'Check your AWS credentials and region, then try again.',
             resultExtra: { region },
         });
@@ -263,14 +309,21 @@ export async function runStaticStatus(input = {}) {
 
     if (!distribution) {
         if (s) s.stop(color.yellow('Distribution not found.'));
-        console.log(`\n  No CloudFront distribution found for ${color.cyan(comment)}.`);
-        console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
+        const missing = { healthy: false, missing: true, distribution: null, signals: null, region, computeTarget: 'static' };
 
         await trackSuccess('status_run', { projectName, healthy: false, missing: true });
 
-        if (asJson) return { healthy: false, missing: true, distribution: null, signals: null, region, computeTarget: 'static' };
-        if (options.watchMode) return { healthy: false, missing: true, distribution: null, signals: null, region, computeTarget: 'static', watchMode: true };
-        if (noExit) return { healthy: false, missing: true, distribution: null, signals: null, region, computeTarget: 'static' };
+        // Missing is a state, not an error: print the same object
+        // that's returned (single source), exit 0.
+        if (asJson) {
+            console.log(JSON.stringify(missing, null, 2));
+            return missing;
+        }
+        console.log(`\n  No CloudFront distribution found for ${color.cyan(comment)}.`);
+        console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
+
+        if (options.watchMode) return { ...missing, watchMode: true };
+        if (noExit) return missing;
         process.exit(0);
         return;
     }
@@ -372,6 +425,7 @@ export async function runStatus(input = {}) {
 async function runStatusMain(input = {}) {
     const options = normalizeOptions(input);
     const noExit = isProgrammaticCall(options);
+    const asJson = Boolean(options.json);
     let cwd;
     let region;
     let projectName;
@@ -382,8 +436,9 @@ async function runStatusMain(input = {}) {
     } catch {
         return failProjectNotInitialized({ event: 'status_run', noExit });
     }
-    // Read-only status warns (never refuses) on ejected trees.
-    await requireManagedTree({ cwd, command: 'status', options, mode: 'warn', noExit });
+    // Read-only status warns (never refuses) on ejected trees — except
+    // under --json, where any prose would corrupt the single document.
+    if (!asJson) await requireManagedTree({ cwd, command: 'status', options, mode: 'warn', noExit });
     const computeTarget = readTerraformComputeTarget(cwd);
     if (computeTarget === 'lambda') {
         return runLambdaStatus({ ...options, cwd, region, projectName });
@@ -395,7 +450,6 @@ async function runStatusMain(input = {}) {
     const cluster = options.cluster || process.env.ECS_CLUSTER || `${projectName}${resourceSuffix}-cluster`;
     const serviceName = options.service || process.env.ECS_SERVICE || `${projectName}${resourceSuffix}-service`;
     const logGroup = options.logGroup || process.env.ECS_LOG_GROUP || `/ecs/${projectName}${resourceSuffix}`;
-    const asJson = Boolean(options.json);
 
     // --watch repaints the human dashboard; --json stays a single shot.
     if (Boolean(options.watch) && !asJson) {
@@ -419,14 +473,21 @@ async function runStatusMain(input = {}) {
 
         if (!serviceDesc || serviceDesc.status === 'INACTIVE') {
             if (s) s.stop(color.yellow('Service not found.'));
-            console.log(`\n  The ECS service ${color.cyan(serviceName)} does not exist or is inactive.`);
-            console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
+            const missing = { healthy: false, missing: true, service: null, alarms: [], signals: null, region };
 
             await trackSuccess('status_run', { projectName, healthy: false, missing: true });
 
-            if (asJson) return { healthy: false, missing: true, service: null, alarms: [], signals: null, region };
-            if (options.watchMode) return { healthy: false, missing: true, service: null, alarms: [], signals: null, region, watchMode: true };
-            if (noExit) return { healthy: false, missing: true, service: null, alarms: [], signals: null, region };
+            // Missing is a state, not an error: print the same object
+            // that's returned (single source), exit 0.
+            if (asJson) {
+                console.log(JSON.stringify(missing, null, 2));
+                return missing;
+            }
+            console.log(`\n  The ECS service ${color.cyan(serviceName)} does not exist or is inactive.`);
+            console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
+
+            if (options.watchMode) return { ...missing, watchMode: true };
+            if (noExit) return missing;
             process.exit(0);
             return;
         }
@@ -498,6 +559,10 @@ async function runStatusMain(input = {}) {
             error_code: error?.name || 'UNKNOWN',
             error_message: error?.message,
         });
+        const message = `✖ ${error?.message || error}`;
+        // --json short-circuits every human branch below (auth guidance,
+        // watch prose): the envelope is the whole output.
+        if (asJson) return statusJsonError({ message, extra: { service: serviceName, region } });
         if (handleAuthErrorBranch(error, s, options)) {
             return { healthy: false, service: null, alarms: [], signals: null, region };
         }
@@ -509,7 +574,7 @@ async function runStatusMain(input = {}) {
         }
         return failCommand({
             noExit,
-            message: `✖ ${error?.message || error}`,
+            message,
             hint: 'Check your AWS credentials and region, then try again.',
         });
     }
