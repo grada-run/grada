@@ -3,13 +3,18 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath } from '../src/core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath, resolveDistinctId, resetTelemetrySaltCache } from '../src/core/telemetry.js';
 
 // This file tests the real telemetry module: opt out of the suite-wide
 // mock registered in tests/setup.js.
 vi.unmock('../src/core/telemetry.js');
 
 const SHA256_UNKNOWN_PREFIX = crypto.createHash('sha256').update('unknown').digest('hex').substring(0, 16);
+
+// Fixed salt for deterministic salted-hash expectations: production
+// salts are random per installation, so tests pin the scheme (HMAC
+// shape, stability, legacy divergence), never a specific value.
+const TEST_TELEMETRY_SALT = 'grada-test-salt-0001';
 
 // Hermetic telemetry env for send-path tests: our own runner (VITEST) now
 // suppresses emission, and the identity/config files must never resolve to
@@ -26,6 +31,7 @@ function isolateTelemetryEnv() {
         GRADA_CONFIG_PATH: process.env.GRADA_CONFIG_PATH,
         GRADA_TELEMETRY_ID_PATH: process.env.GRADA_TELEMETRY_ID_PATH,
         DEPLOY_STACK_TELEMETRY_ID_PATH: process.env.DEPLOY_STACK_TELEMETRY_ID_PATH,
+        GRADA_TELEMETRY_SALT_PATH: process.env.GRADA_TELEMETRY_SALT_PATH,
     };
     delete process.env.VITEST;
     delete process.env.NODE_ENV;
@@ -36,7 +42,10 @@ function isolateTelemetryEnv() {
     telemetryScratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telemetry-env-'));
     process.env.GRADA_CONFIG_PATH = path.join(telemetryScratchDir, 'config.json');
     process.env.GRADA_TELEMETRY_ID_PATH = path.join(telemetryScratchDir, 'telemetry-id');
+    process.env.GRADA_TELEMETRY_SALT_PATH = path.join(telemetryScratchDir, 'telemetry-salt');
+    fs.writeFileSync(process.env.GRADA_TELEMETRY_SALT_PATH, `${TEST_TELEMETRY_SALT}\n`, 'utf-8');
     resetTelemetryIdentityCache();
+    resetTelemetrySaltCache();
     resetTelemetryPreferenceCache();
 }
 
@@ -47,6 +56,7 @@ function restoreTelemetryEnv() {
         else process.env[key] = value;
     }
     resetTelemetryIdentityCache();
+    resetTelemetrySaltCache();
     resetTelemetryPreferenceCache();
     if (telemetryScratchDir) fs.rmSync(telemetryScratchDir, { recursive: true, force: true });
     telemetryScratchDir = null;
@@ -138,7 +148,7 @@ describe('trackEvent capture', () => {
         expect(() => trackEvent('test', { projectName: 42 })).not.toThrow();
         expect(fetchMock).toHaveBeenCalledTimes(1);
         const payload = lastPayload(fetchMock);
-        const expectedId = crypto.createHash('sha256').update('42').digest('hex').substring(0, 16);
+        const expectedId = crypto.createHmac('sha256', TEST_TELEMETRY_SALT).update('42').digest('hex').substring(0, 16);
         expect(payload.properties.project_id).toBe(expectedId);
         expect(payload.properties).not.toHaveProperty('projectName');
         expect(payload.distinct_id).toMatch(/^[0-9a-f]{16}$/);
@@ -155,11 +165,82 @@ describe('trackEvent capture', () => {
         expect(second.distinct_id).toBe(first.distinct_id);
         expect(first.distinct_id).not.toBe(SHA256_UNKNOWN_PREFIX);
         expect(first.properties.project_id).toBe(
-            crypto.createHash('sha256').update('myapp').digest('hex').substring(0, 16)
+            crypto.createHmac('sha256', TEST_TELEMETRY_SALT).update('myapp').digest('hex').substring(0, 16)
         );
         expect(second.properties.project_id).toBe(
-            crypto.createHash('sha256').update(path.basename(process.cwd())).digest('hex').substring(0, 16)
+            crypto.createHmac('sha256', TEST_TELEMETRY_SALT).update(path.basename(process.cwd())).digest('hex').substring(0, 16)
         );
+    });
+
+    it('salts project_id so legacy unsalted hashes no longer appear', () => {
+        const fetchMock = mockFetch();
+        trackEvent('salted_run', { projectName: 'test' });
+        const projectId = lastPayload(fetchMock).properties.project_id;
+        // The legacy scheme hashed the bare name: sha256('test')[:16] is
+        // the value a dictionary attack recovers from old exports. The
+        // salted scheme must never emit it again.
+        const legacyId = crypto.createHash('sha256').update('test').digest('hex').substring(0, 16);
+        expect(legacyId).toBe('9f86d081884c7d65');
+        expect(projectId).toMatch(/^[0-9a-f]{16}$/);
+        expect(projectId).not.toBe(legacyId);
+    });
+
+    it('keeps salted project_id stable across cache resets', () => {
+        const fetchMock = mockFetch();
+        trackEvent('first_run', { projectName: 'myapp' });
+        const firstId = lastPayload(fetchMock).properties.project_id;
+        resetTelemetrySaltCache();
+        trackEvent('second_run', { projectName: 'myapp' });
+        expect(lastPayload(fetchMock).properties.project_id).toBe(firstId);
+    });
+
+    it('creates the salt file on first use when missing', () => {
+        fs.rmSync(process.env.GRADA_TELEMETRY_SALT_PATH);
+        resetTelemetrySaltCache();
+        const fetchMock = mockFetch();
+        trackEvent('first_run', { projectName: 'myapp' });
+        expect(fs.existsSync(process.env.GRADA_TELEMETRY_SALT_PATH)).toBe(true);
+        expect(lastPayload(fetchMock).properties.project_id).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it('generates a unique salt per installation', () => {
+        const firstPath = path.join(telemetryScratchDir, 'salt-a');
+        const secondPath = path.join(telemetryScratchDir, 'salt-b');
+        const fetchMock = mockFetch();
+        process.env.GRADA_TELEMETRY_SALT_PATH = firstPath;
+        resetTelemetrySaltCache();
+        trackEvent('first_install', { projectName: 'myapp' });
+        process.env.GRADA_TELEMETRY_SALT_PATH = secondPath;
+        resetTelemetrySaltCache();
+        trackEvent('second_install', { projectName: 'myapp' });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fs.readFileSync(firstPath, 'utf-8').trim()).not.toBe(fs.readFileSync(secondPath, 'utf-8').trim());
+    });
+
+    it('salts the CI fingerprint branch like project_id', () => {
+        const savedIdPath = process.env.GRADA_TELEMETRY_ID_PATH;
+        delete process.env.GRADA_TELEMETRY_ID_PATH;
+        resetTelemetryIdentityCache();
+        try {
+            const fingerprint = resolveDistinctId({ ciProvider: 'github_actions', testEnv: false });
+            const joinedInputs = [
+                os.hostname(),
+                os.platform(),
+                os.arch(),
+                process.env.GITHUB_REPOSITORY || '',
+                process.env.GITHUB_RUN_ID || '',
+                process.env.GITLAB_PROJECT_PATH || '',
+            ].join(':');
+            expect(fingerprint).toBe(
+                crypto.createHmac('sha256', TEST_TELEMETRY_SALT).update(joinedInputs).digest('hex').substring(0, 16)
+            );
+            expect(fingerprint).not.toBe(
+                crypto.createHash('sha256').update(joinedInputs).digest('hex').substring(0, 16)
+            );
+        } finally {
+            process.env.GRADA_TELEMETRY_ID_PATH = savedIdPath;
+            resetTelemetryIdentityCache();
+        }
     });
 
     it('persists file identity across cache resets, even when CI=true', () => {

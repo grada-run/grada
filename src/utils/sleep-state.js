@@ -78,15 +78,20 @@ export function legacySleepStatePath(cwd = process.cwd()) {
 }
 
 // Quarantines a corrupt ledger file aside (`<name>.corrupt.<ts>`) instead
-// of reading it as `{}` and discarding the bytes on the next write.
+// of reading it as `{}` and discarding the bytes on the next write. Prints
+// a one-line notice naming the backup: a silent quarantine left successful
+// runs never telling the user their ledger was dropped. Exactly-once per
+// corruption — after the rename, later reads find no file and stay quiet.
 // Telemetry is best-effort: reads must never throw.
 function quarantineLedgerFile(filePath) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = `${filePath}.corrupt.${stamp}`;
     try {
-        fsSync.renameSync(filePath, `${filePath}.corrupt.${stamp}`);
+        fsSync.renameSync(filePath, backupPath);
     } catch {
         return;
     }
+    console.log(color.yellow(`⚠ Sleep ledger was corrupt — quarantined to ${backupPath}, starting fresh.`));
     try {
         trackEvent('sleep_ledger_quarantined', {
             projectName: path.basename(path.resolve(filePath, '..', '..')),

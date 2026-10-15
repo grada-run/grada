@@ -1,3 +1,0 @@
-# Keep the published grada-run tarball free of marketplace scaffolding
-# (notably Rust build output). The CLI itself needs none of this.
-extensions/

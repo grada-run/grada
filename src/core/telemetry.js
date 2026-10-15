@@ -192,7 +192,7 @@ export function migrateLegacyTelemetryId(newPath, legacyPath) {
 // Cwd is deliberately excluded so commands from different directories on
 // the same runner share one Person within a run.
 function fingerprintDistinctId() {
-    return sha16([
+    return saltedHash([
         os.hostname(),
         os.platform(),
         os.arch(),
@@ -238,6 +238,61 @@ export function resolveDistinctId({ ciProvider = detectCiProvider(), testEnv = i
     }
     cachedDistinctId = resolved;
     return resolved;
+}
+
+export function defaultTelemetrySaltPath() {
+    return path.join(os.homedir(), '.grada', 'telemetry-salt');
+}
+
+let cachedTelemetrySalt = null;
+let processEphemeralSalt = null;
+
+export function resetTelemetrySaltCache() {
+    cachedTelemetrySalt = null;
+}
+
+// Per-installation salt for the keyed identity hashes below. Get-or-create
+// like the persistent distinct ID: GRADA_TELEMETRY_SALT_PATH overrides the
+// default path for tests and hermetic environments. When the filesystem is
+// unusable the salt falls back to a process-ephemeral random value —
+// stable within this process, distinct across runs — so telemetry keeps
+// flowing and an unsalted hash is never emitted. Never throws.
+function resolveTelemetrySalt() {
+    if (cachedTelemetrySalt) return cachedTelemetrySalt;
+    const overridePath = process.env.GRADA_TELEMETRY_SALT_PATH;
+    const saltPath = (typeof overridePath === 'string' && overridePath.trim() !== '')
+        ? overridePath
+        : defaultTelemetrySaltPath();
+    let salt = '';
+    try {
+        try {
+            salt = fs.readFileSync(saltPath, 'utf-8').trim();
+        } catch {
+            salt = '';
+        }
+        if (!salt) {
+            salt = crypto.randomBytes(32).toString('hex');
+            fs.mkdirSync(path.dirname(saltPath), { recursive: true });
+            fs.writeFileSync(saltPath, `${salt}\n`, 'utf-8');
+        }
+    } catch {
+        salt = '';
+    }
+    if (!salt) {
+        if (!processEphemeralSalt) processEphemeralSalt = crypto.randomBytes(32).toString('hex');
+        salt = processEphemeralSalt;
+    }
+    cachedTelemetrySalt = salt;
+    return salt;
+}
+
+// Keyed identity hash: HMAC-SHA256 under the per-installation salt,
+// truncated to 16 hex chars like the legacy scheme so the PostHog column
+// shape is unchanged. Replaces raw sha16 everywhere the input is
+// low-entropy (project names, machine fingerprints) — an unsalted
+// truncated hash of a guessable value is reversible by dictionary lookup.
+function saltedHash(raw) {
+    return crypto.createHmac('sha256', resolveTelemetrySalt()).update(String(raw)).digest('hex').substring(0, 16);
 }
 
 export function defaultConfigPath() {
@@ -367,7 +422,7 @@ export function trackEvent(eventName, properties) {
     if (rawProjectName === undefined || rawProjectName === null || rawProjectName === '') {
         rawProjectName = path.basename(process.cwd()) || 'unknown';
     }
-    const projectId = sha16(rawProjectName);
+    const projectId = saltedHash(rawProjectName);
 
     // 7. Strip the raw name out of the payload
     delete eventProps.projectName;

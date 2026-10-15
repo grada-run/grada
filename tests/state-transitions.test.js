@@ -2129,6 +2129,28 @@ describe('S34: corrupt ledger quarantine', () => {
         const leftovers = fs.readdirSync(path.join(dir, '.grada'));
         expect(leftovers.some((e) => e.startsWith('sleep-state.json.corrupt.'))).toBe(true);
     });
+
+    it('prints a one-line notice naming the quarantine file', async () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, '.grada'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.grada', 'sleep-state.json'), '{not json!!!');
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            readSleepState(dir);
+            const [backup] = fs.readdirSync(path.join(dir, '.grada'))
+                .filter((e) => e.startsWith('sleep-state.json.corrupt.'));
+            expect(backup).toBeDefined();
+            // Assert before the finally restores the spy: mockRestore
+            // clears the recorded calls along with the implementation.
+            const notice = logSpy.mock.calls
+                .map((call) => stripVTControlCharacters(String(call[0] ?? '')))
+                .find((line) => line.includes(backup));
+            expect(notice).toBeDefined();
+            expect(notice).toContain('quarantined');
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
 });
 
 describe('S35: wake clears sleep auto-vars first', () => {

@@ -10,9 +10,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(HERE, '..', '..');
 export const CLI = path.join(ROOT, 'bin', 'cli.js');
 
-// Repo-local workspace root so CI can upload it as an artifact on failure.
-// Overridable via E2E_TMP_ROOT for local debugging.
-export const E2E_TMP_ROOT = process.env.E2E_TMP_ROOT || path.join(HERE, '.tmp');
+// OS-temp workspace root so runs never litter the checkout with stale
+// workspaces. CI pins E2E_TMP_ROOT back to tests/e2e/.tmp/ so failure
+// artifacts keep uploading from the known path.
+export const E2E_TMP_ROOT = process.env.E2E_TMP_ROOT || path.join(os.tmpdir(), 'grada-e2e');
 
 // Shared provider cache across runs (mirrors scripts/test-iac.js),
 // namespaced per Vitest worker. Parallel workers must never share one
