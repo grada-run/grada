@@ -788,6 +788,39 @@ describe('installMcpConfig', () => {
             }
         }
     );
+
+    it('resolves no install target without a home directory', () => {
+        expect(mcpInstallTarget('vscode', null)).toBeNull();
+    });
+
+    it.each([
+        ['default home resolution', {}],
+        ['explicit null home', { homeDir: null }],
+    ])('fails loud with a named error without HOME (%s)', (_, options) => {
+        const homeSpy = vi.spyOn(os, 'homedir').mockImplementation(() => {
+            throw new Error('uv_os_get_passwd returned ENOENT');
+        });
+        try {
+            const result = installMcpConfig('vscode', options);
+            expect(result).toMatchObject({
+                ok: false,
+                reason: 'home-undeterminable',
+                errorCode: 'MCP_INSTALL_HOME_UNDETERMINABLE',
+                editor: 'vscode',
+            });
+            expect(result.message).toContain('home directory');
+        } finally {
+            homeSpy.mockRestore();
+        }
+    });
+
+    it('reports usage errors before HOME errors', () => {
+        expect(installMcpConfig('emacs', { homeDir: null })).toMatchObject({
+            ok: false,
+            reason: 'unsupported-editor',
+            errorCode: 'MCP_INSTALL_UNSUPPORTED_EDITOR',
+        });
+    });
 });
 
 describe('runMcp --install', () => {

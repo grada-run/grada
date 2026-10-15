@@ -1,6 +1,6 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
+import { safeHomedir } from '../core/homedir.js';
 import { fileURLToPath } from 'url';
 import { log } from '@clack/prompts';
 import {
@@ -351,16 +351,24 @@ function resolveCacheEnvPath() {
     return process.env.GRADA_BEDROCK_CACHE_PATH || process.env.DEPLOY_STACK_BEDROCK_CACHE_PATH;
 }
 
+// Home-rooted cache candidate: null when HOME is undeterminable (the
+// loader drops null candidates, so homeless runs fall through to the
+// bundled catalog instead of throwing at import time).
+function homeCachePath(...segments) {
+    const home = safeHomedir();
+    return home === null ? null : path.join(home, ...segments);
+}
+
 function resolveCachePath(options = {}) {
     return (
         options.cachePath ||
         resolveCacheEnvPath() ||
-        path.join(os.homedir(), '.grada', 'bedrock-models-cache.json')
+        homeCachePath('.grada', 'bedrock-models-cache.json')
     );
 }
 
 function legacyCachePath() {
-    return path.join(os.homedir(), '.deploy-stack', 'bedrock-models-cache.json');
+    return homeCachePath('.deploy-stack', 'bedrock-models-cache.json');
 }
 
 export function loadBedrockCatalog(options = {}) {
@@ -369,11 +377,11 @@ export function loadBedrockCatalog(options = {}) {
     const testEnv = Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
     if (testEnv && !explicitCachePath) return bundled;
     // An explicit path wins outright; otherwise the new default path is
-    // tried before the legacy one. Unusable candidates fall through to
-    // the bundled catalog.
+    // tried before the legacy one. Null candidates (undeterminable HOME)
+    // and unusable files fall through to the bundled catalog.
     const candidates = explicitCachePath
         ? [explicitCachePath]
-        : [resolveCachePath(options), legacyCachePath()];
+        : [resolveCachePath(options), legacyCachePath()].filter((candidate) => candidate !== null);
     for (const candidate of candidates) {
         try {
             const cached = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
@@ -455,6 +463,10 @@ export async function refreshBedrockCatalog(options = {}) {
     const bundled = loadBundledCatalog();
     const region = options.region || process.env.AWS_REGION || 'us-east-2';
     const cachePath = resolveCachePath(options);
+    if (cachePath === null) {
+        log.warn('Bedrock catalog refresh skipped: the home directory is undeterminable, so there is nowhere to write the cache. Using the bundled catalog.');
+        return bundled;
+    }
     const pruneMissing = options.pruneMissing === true;
     try {
         const client = options.bedrockClient || new BedrockClient({ region });

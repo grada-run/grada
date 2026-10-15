@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath, resolveDistinctId, resetTelemetrySaltCache } from '../src/core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath, resolveDistinctId, resetTelemetrySaltCache, defaultTelemetryIdPath, defaultTelemetrySaltPath } from '../src/core/telemetry.js';
 
 // This file tests the real telemetry module: opt out of the suite-wide
 // mock registered in tests/setup.js.
@@ -240,6 +240,102 @@ describe('trackEvent capture', () => {
         } finally {
             process.env.GRADA_TELEMETRY_ID_PATH = savedIdPath;
             resetTelemetryIdentityCache();
+        }
+    });
+
+    function throwHomedir() {
+        return vi.spyOn(os, 'homedir').mockImplementation(() => {
+            throw new Error('uv_os_get_passwd returned ENOENT');
+        });
+    }
+
+    it('resolves HOME-rooted paths to null when HOME is undeterminable', () => {
+        const savedConfigPath = process.env.GRADA_CONFIG_PATH;
+        delete process.env.GRADA_CONFIG_PATH;
+        const homeSpy = throwHomedir();
+        try {
+            expect(defaultTelemetryIdPath()).toBeNull();
+            expect(defaultTelemetrySaltPath()).toBeNull();
+            expect(resolveConfigPath()).toBeNull();
+        } finally {
+            homeSpy.mockRestore();
+            process.env.GRADA_CONFIG_PATH = savedConfigPath;
+        }
+    });
+
+    it('falls back to the fingerprint branch without HOME or an ID override', () => {
+        const savedIdPath = process.env.GRADA_TELEMETRY_ID_PATH;
+        delete process.env.GRADA_TELEMETRY_ID_PATH;
+        const homeSpy = throwHomedir();
+        try {
+            const first = resolveDistinctId({ ciProvider: 'none', testEnv: false });
+            expect(first).toMatch(/^[0-9a-f]{16}$/);
+            resetTelemetryIdentityCache();
+            expect(resolveDistinctId({ ciProvider: 'none', testEnv: false })).toBe(first);
+        } finally {
+            homeSpy.mockRestore();
+            process.env.GRADA_TELEMETRY_ID_PATH = savedIdPath;
+            resetTelemetryIdentityCache();
+        }
+    });
+
+    it('keeps the ID override working without HOME', () => {
+        const homeSpy = throwHomedir();
+        try {
+            const fetchMock = mockFetch();
+            trackEvent('override_run', { projectName: 'myapp' });
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            // The isolated env pins GRADA_TELEMETRY_ID_PATH at a scratch
+            // file, and overrides never consult the home directory.
+            expect(fs.existsSync(process.env.GRADA_TELEMETRY_ID_PATH)).toBe(true);
+            expect(lastPayload(fetchMock).distinct_id).toMatch(/^[0-9a-f]{16}$/);
+        } finally {
+            homeSpy.mockRestore();
+        }
+    });
+
+    it('degrades to an ephemeral salt without HOME or a salt override', () => {
+        const savedSaltPath = process.env.GRADA_TELEMETRY_SALT_PATH;
+        delete process.env.GRADA_TELEMETRY_SALT_PATH;
+        const homeSpy = throwHomedir();
+        try {
+            const fetchMock = mockFetch();
+            trackEvent('first_run', { projectName: 'myapp' });
+            const firstId = lastPayload(fetchMock).properties.project_id;
+            expect(firstId).toMatch(/^[0-9a-f]{16}$/);
+            resetTelemetrySaltCache();
+            trackEvent('second_run', { projectName: 'myapp' });
+            // Process-ephemeral: stable within the process even across
+            // cache resets, with no file written anywhere.
+            expect(lastPayload(fetchMock).properties.project_id).toBe(firstId);
+        } finally {
+            homeSpy.mockRestore();
+            process.env.GRADA_TELEMETRY_SALT_PATH = savedSaltPath;
+            resetTelemetrySaltCache();
+        }
+    });
+
+    it('reads a missing telemetry preference without HOME', () => {
+        const savedConfigPath = process.env.GRADA_CONFIG_PATH;
+        delete process.env.GRADA_CONFIG_PATH;
+        const homeSpy = throwHomedir();
+        try {
+            expect(readTelemetryPreference()).toBeNull();
+        } finally {
+            homeSpy.mockRestore();
+            process.env.GRADA_CONFIG_PATH = savedConfigPath;
+        }
+    });
+
+    it('refuses to persist the telemetry preference without HOME', () => {
+        const savedConfigPath = process.env.GRADA_CONFIG_PATH;
+        delete process.env.GRADA_CONFIG_PATH;
+        const homeSpy = throwHomedir();
+        try {
+            expect(() => writeTelemetryPreference(false)).toThrow(/home directory/i);
+        } finally {
+            homeSpy.mockRestore();
+            process.env.GRADA_CONFIG_PATH = savedConfigPath;
         }
     });
 

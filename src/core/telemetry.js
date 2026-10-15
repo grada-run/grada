@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { safeHomedir } from './homedir.js';
 
 const TELEMETRY_ENDPOINT = 'https://eu.i.posthog.com/capture/';
 const POSTHOG_API_KEY = 'phc_o2wgA3jVT9rVDiGSDzFAR42zZeiVGhhCY53HXVHUcYGT';
@@ -164,11 +165,13 @@ export function isRunningUnderVitest(env = process.env) {
 }
 
 export function defaultTelemetryIdPath() {
-    return path.join(os.homedir(), '.grada', 'telemetry-id');
+    const home = safeHomedir();
+    return home === null ? null : path.join(home, '.grada', 'telemetry-id');
 }
 
 export function legacyTelemetryIdPath() {
-    return path.join(os.homedir(), '.deploy-stack', 'telemetry-id');
+    const home = safeHomedir();
+    return home === null ? null : path.join(home, '.deploy-stack', 'telemetry-id');
 }
 
 // Migrates a legacy telemetry identity forward: when the new path is
@@ -176,6 +179,7 @@ export function legacyTelemetryIdPath() {
 // new file so the stable distinct ID survives the rebrand. Returns true
 // when a migration happened. Never throws.
 export function migrateLegacyTelemetryId(newPath, legacyPath) {
+    if (!newPath || !legacyPath) return false;
     try {
         if (fs.existsSync(newPath)) return false;
         const raw = fs.readFileSync(legacyPath, 'utf-8').trim();
@@ -233,15 +237,22 @@ export function resolveDistinctId({ ciProvider = detectCiProvider(), testEnv = i
         resolved = fingerprintDistinctId();
     } else {
         const idPath = defaultTelemetryIdPath();
-        migrateLegacyTelemetryId(idPath, legacyTelemetryIdPath());
-        resolved = persistentDistinctId(idPath);
+        if (idPath === null) {
+            // Nowhere to persist an identity: behave like an ephemeral
+            // runner rather than throwing past trackEvent's callers.
+            resolved = fingerprintDistinctId();
+        } else {
+            migrateLegacyTelemetryId(idPath, legacyTelemetryIdPath());
+            resolved = persistentDistinctId(idPath);
+        }
     }
     cachedDistinctId = resolved;
     return resolved;
 }
 
 export function defaultTelemetrySaltPath() {
-    return path.join(os.homedir(), '.grada', 'telemetry-salt');
+    const home = safeHomedir();
+    return home === null ? null : path.join(home, '.grada', 'telemetry-salt');
 }
 
 let cachedTelemetrySalt = null;
@@ -253,10 +264,11 @@ export function resetTelemetrySaltCache() {
 
 // Per-installation salt for the keyed identity hashes below. Get-or-create
 // like the persistent distinct ID: GRADA_TELEMETRY_SALT_PATH overrides the
-// default path for tests and hermetic environments. When the filesystem is
-// unusable the salt falls back to a process-ephemeral random value —
-// stable within this process, distinct across runs — so telemetry keeps
-// flowing and an unsalted hash is never emitted. Never throws.
+// default path for tests and hermetic environments. A null path
+// (undeterminable HOME) and any filesystem failure both fall back to the
+// process-ephemeral random value below — stable within this process,
+// distinct across runs — so telemetry keeps flowing and an unsalted hash
+// is never emitted. Never throws.
 function resolveTelemetrySalt() {
     if (cachedTelemetrySalt) return cachedTelemetrySalt;
     const overridePath = process.env.GRADA_TELEMETRY_SALT_PATH;
@@ -264,19 +276,21 @@ function resolveTelemetrySalt() {
         ? overridePath
         : defaultTelemetrySaltPath();
     let salt = '';
-    try {
+    if (saltPath !== null) {
         try {
-            salt = fs.readFileSync(saltPath, 'utf-8').trim();
+            try {
+                salt = fs.readFileSync(saltPath, 'utf-8').trim();
+            } catch {
+                salt = '';
+            }
+            if (!salt) {
+                salt = crypto.randomBytes(32).toString('hex');
+                fs.mkdirSync(path.dirname(saltPath), { recursive: true });
+                fs.writeFileSync(saltPath, `${salt}\n`, 'utf-8');
+            }
         } catch {
             salt = '';
         }
-        if (!salt) {
-            salt = crypto.randomBytes(32).toString('hex');
-            fs.mkdirSync(path.dirname(saltPath), { recursive: true });
-            fs.writeFileSync(saltPath, `${salt}\n`, 'utf-8');
-        }
-    } catch {
-        salt = '';
     }
     if (!salt) {
         if (!processEphemeralSalt) processEphemeralSalt = crypto.randomBytes(32).toString('hex');
@@ -296,7 +310,8 @@ function saltedHash(raw) {
 }
 
 export function defaultConfigPath() {
-    return path.join(os.homedir(), '.grada', 'config.json');
+    const home = safeHomedir();
+    return home === null ? null : path.join(home, '.grada', 'config.json');
 }
 
 export function resolveConfigPath(env = process.env) {
@@ -313,7 +328,9 @@ let cachedTelemetryPreference;
 // hard switch stays DO_NOT_TRACK) so telemetry can never fail a command.
 export function readTelemetryPreference({ configPath, readFile = fs.readFileSync } = {}) {
     try {
-        const parsed = JSON.parse(readFile(configPath ?? resolveConfigPath(), 'utf-8'));
+        const target = configPath ?? resolveConfigPath();
+        if (target === null) return null;
+        const parsed = JSON.parse(readFile(target, 'utf-8'));
         if (parsed && typeof parsed === 'object' && typeof parsed.telemetry === 'boolean') {
             return parsed.telemetry;
         }
@@ -339,6 +356,9 @@ function telemetryPreference() {
 // it — unlike the sending path, an explicit user action must fail loudly.
 export function writeTelemetryPreference(enabled, { configPath } = {}) {
     const target = configPath ?? resolveConfigPath();
+    if (target === null) {
+        throw new Error('Cannot save the telemetry preference: the home directory is undeterminable (HOME is unset and no passwd entry exists).');
+    }
     let current = {};
     try {
         const parsed = JSON.parse(fs.readFileSync(target, 'utf-8'));

@@ -39,6 +39,7 @@ Manual config for any other MCP client (Claude Code plugins, Cline, Continue):
 ## Automation & edge cases
 
 - Tool calls capture command output and convert internal failures into structured error results, so the server survives errors instead of crashing the JSON-RPC stream.
+- `--install` writes under your home directory; when HOME is undeterminable (unset `HOME` plus no passwd entry, as in minimal containers) it fails with a named `MCP_INSTALL_HOME_UNDETERMINABLE` error instead of crashing. Every other command runs fine without a HOME.
 
 ## See also
 

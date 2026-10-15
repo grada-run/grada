@@ -8,6 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { getCliVersion, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { safeHomedir } from '../core/homedir.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { failCommand } from '../utils/command.js';
 import { runStatus } from './status.js';
@@ -451,7 +452,10 @@ export const MCP_INSTALL_EDITORS = ['windsurf', 'zed', 'cursor', 'vscode', 'clau
 
 export const MCP_SERVER_CONFIG = { command: 'npx', args: ['grada-run', 'mcp'] };
 
-export function mcpInstallTarget(editor, homeDir = os.homedir(), platform = os.platform()) {
+export function mcpInstallTarget(editor, homeDir = safeHomedir(), platform = os.platform()) {
+    // No home, no target: null reads as "unresolvable" like an unknown
+    // editor, and installMcpConfig below names the cause precisely.
+    if (homeDir === null || homeDir === undefined) return null;
     switch (editor) {
         case 'windsurf':
             return { path: path.join(homeDir, '.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers' };
@@ -499,10 +503,21 @@ function isSameServerConfig(entry) {
 // preserving every existing key and server. `homeDir` is injectable so
 // tests never touch the real home directory. Never throws and never
 // exits: all outcomes are structured `{ ok, ... }` results.
-export function installMcpConfig(editor, { homeDir = os.homedir(), platform = os.platform() } = {}) {
+export function installMcpConfig(editor, { homeDir = safeHomedir(), platform = os.platform() } = {}) {
     const normalized = typeof editor === 'string' ? editor.trim().toLowerCase() : '';
     const target = normalized ? mcpInstallTarget(normalized, homeDir, platform) : null;
     if (!target) {
+        // A supported editor that resolves to no target means HOME is
+        // undeterminable (usage errors keep their own result below).
+        if (normalized && MCP_INSTALL_EDITORS.includes(normalized)) {
+            return {
+                ok: false,
+                reason: 'home-undeterminable',
+                errorCode: 'MCP_INSTALL_HOME_UNDETERMINABLE',
+                editor: normalized,
+                message: '\n✖ Could not determine your home directory (HOME is unset and no passwd entry exists). Set HOME and retry.',
+            };
+        }
         return {
             ok: false,
             reason: normalized ? 'unsupported-editor' : 'missing-editor',
