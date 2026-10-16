@@ -192,6 +192,21 @@ describe('runDoctor', () => {
         }
     });
 
+    it('returns the aggregate verdict with all failed check IDs', async () => {
+        mockBinaries({ terraform: false, aws: true, docker: false, git: true });
+        const { restore } = captureLog();
+        try {
+            await expect(runDoctor()).resolves.toEqual({
+                ok: false,
+                exitCode: 1,
+                reason: 'doctor-checks-failed',
+                failedChecks: ['terraform', 'docker'],
+            });
+        } finally {
+            restore();
+        }
+    });
+
     it('names the single missing binary in error_code and reason', async () => {
         mockBinaries({ terraform: false, aws: true, docker: true, git: true });
         const { restore } = captureLog();
@@ -403,7 +418,12 @@ describe('runDoctor', () => {
         vi.mocked(checkAwsCredentials).mockImplementation(fail);
         const { restore } = captureLog();
         try {
-            await expect(runDoctor()).resolves.toBeUndefined();
+            await expect(runDoctor()).resolves.toEqual({
+                ok: false,
+                exitCode: 1,
+                reason: 'aws-cli-unconfigured',
+                failedChecks: ['aws_auth'],
+            });
             expect(trackEvent).toHaveBeenCalledWith(
                 'doctor_run',
                 expect.objectContaining({
@@ -471,7 +491,12 @@ describe('runDoctor', () => {
         });
         const { restore } = captureLog();
         try {
-            await expect(runDoctor()).resolves.toBeUndefined();
+            await expect(runDoctor()).resolves.toEqual({
+                ok: false,
+                exitCode: 1,
+                reason: 'missing-docker',
+                failedChecks: ['docker'],
+            });
             expect(trackEvent).toHaveBeenCalledWith(
                 'doctor_run',
                 expect.objectContaining({

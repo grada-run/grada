@@ -17,7 +17,10 @@ export const ISSUES_URL = 'https://github.com/grada-run/grada/issues';
 // shape) prints guidance without a stack; everything else prints a
 // one-liner, the stack (or String(reason) when there is none), and
 // the report pointer. JSON mode puts the envelope on stdout and the
-// human text on stderr so parsers stay safe.
+// human text on stderr so parsers stay safe. Standing requirement:
+// never start a spinner on a --json/MCP path — the handler exits 1,
+// and clack's exit listener prints "Canceled" to stdout for any
+// spinner still active.
 
 function firstLine(text) {
     return String(text).split('\n')[0];
@@ -53,7 +56,7 @@ export function formatLastResortOutput({ kind, reason, isJson }) {
     if (kind === 'unhandledRejection' && isSmithyHomelessRejection(reason)) {
         oneLiner = HOMELESS_GUIDANCE;
         stderrText = `✖ ${HOMELESS_GUIDANCE}\n`
-            + '  Set the HOME environment variable, or provide credentials via AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.\n';
+            + '  Set the HOME environment variable to any directory (it is only used to locate optional config files), then configure credentials.\n';
     } else if (kind === 'uncaughtException') {
         oneLiner = `Grada crashed unexpectedly: ${first}`;
         stderrText = `✖ ${oneLiner}\n${detail}\n  Please report this: ${ISSUES_URL}\n`;
@@ -101,7 +104,17 @@ export function createLastResortHandlers({
                 // fall through to the exit below no matter what.
             }
         }
-        exitFn(1);
+        try {
+            exitFn(1);
+        } catch (error) {
+            // MCP tool calls stub process.exit to throw InterceptedExit
+            // (duck-typed by name: this module must stay dependency-free):
+            // the tool's own error path carries the failure, so the
+            // backstop's job ends with the printed report. Anything else
+            // propagates — swallowing an unknown exit failure could let
+            // the loop drain to a silent exit 0.
+            if (error?.name !== 'InterceptedExit') throw error;
+        }
     };
     return {
         unhandledRejection: handle('unhandledRejection'),

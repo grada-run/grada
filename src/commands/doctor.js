@@ -423,4 +423,18 @@ async function runDoctorMain(input = {}) {
     } catch {
         // The checks already printed; losing one event beats crashing.
     }
+
+    // Red verdicts fail the command: runCommand maps {ok:false, exitCode}
+    // to the process exit, so `doctor && apply` gates correctly. The
+    // reason mirrors the telemetry failure props; failedChecks names the
+    // red cells for programmatic callers. Green (and warn-grade) runs
+    // intentionally return undefined, as before.
+    if (!success) {
+        return {
+            ok: false,
+            exitCode: 1,
+            reason: failureProps.reason,
+            failedChecks,
+        };
+    }
 }

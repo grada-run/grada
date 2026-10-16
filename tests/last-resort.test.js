@@ -50,6 +50,11 @@ describe('formatLastResortOutput', () => {
         expect(stdoutText).toBeNull();
         expect(stderrText).toContain('AWS credentials unavailable');
         expect(stderrText).toContain('HOME');
+        // Env credentials do NOT avoid the crash (smithy loads shared
+        // config regardless of credential source), so the guidance must
+        // not offer them — any HOME value is the only remedy.
+        expect(stderrText).toContain('any directory');
+        expect(stderrText).not.toContain('AWS_ACCESS_KEY_ID');
         expect(stderrText).not.toContain(error.stack.split('\n')[1]);
         expect(stderrText).not.toContain('github.com');
     });
@@ -134,6 +139,27 @@ describe('createLastResortHandlers', () => {
         expect(writes.out).toHaveLength(0);
         expect(writes.err).toHaveLength(0);
         expect(getExitCode()).toBeNull();
+    });
+
+    it.each(['unhandledRejection', 'uncaughtException'])(
+        'returns quietly when the exit is intercepted (%s)',
+        (kind) => {
+            const { writes, getExitCode, deps } = stubbedDeps({
+                exitFn: () => {
+                    throw Object.assign(new Error('process.exit(1) intercepted during MCP tool call'), { name: 'InterceptedExit' });
+                },
+            });
+            expect(() => createLastResortHandlers(deps)[kind](new Error('kaboom'))).not.toThrow();
+            expect(writes.err).toHaveLength(1);
+            expect(getExitCode()).toBeNull();
+        }
+    );
+
+    it('rethrows non-interception exit failures', () => {
+        const { deps } = stubbedDeps({
+            exitFn: () => { throw new Error('exit exploded'); },
+        });
+        expect(() => createLastResortHandlers(deps).unhandledRejection(new Error('kaboom'))).toThrow('exit exploded');
     });
 
     it('still exits 1 when the writers throw', () => {

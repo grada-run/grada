@@ -30,6 +30,7 @@ npx grada-run doctor --deep
 - In CI, failed Terraform/AWS CLI checks append CI-specific hints (e.g. `hashicorp/setup-terraform`).
 - A missing AWS CLI downgrades to a warning when live SDK credentials resolve (common with enterprise SSO wrappers) — the run stays green, but SSM tunnels stay unavailable until the CLI is installed.
 - The credential probe has a 15-second ceiling, and no check can crash `doctor` before results print.
+- Exit code mirrors the verdict: 0 when every check passes (warnings and skips included), 1 when any check fails — so `doctor && apply` gates correctly in scripts.
 
 ## See also
 
