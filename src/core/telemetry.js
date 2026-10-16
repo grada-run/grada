@@ -357,7 +357,7 @@ function telemetryPreference() {
 export function writeTelemetryPreference(enabled, { configPath } = {}) {
     const target = configPath ?? resolveConfigPath();
     if (target === null) {
-        throw new Error('Cannot save the telemetry preference: the home directory is undeterminable (HOME is unset and no passwd entry exists).');
+        throw new Error('the home directory is undeterminable (HOME is unset and no passwd entry exists).');
     }
     let current = {};
     try {

@@ -113,6 +113,22 @@ describe('runTelemetry', () => {
         expect(fetch).not.toHaveBeenCalled();
     });
 
+    it('names the cause once when HOME is undeterminable', async () => {
+        delete process.env.GRADA_CONFIG_PATH;
+        const homeSpy = vi.spyOn(os, 'homedir').mockImplementation(() => {
+            throw new Error('uv_os_get_passwd returned ENOENT');
+        });
+        try {
+            const result = await runTelemetry({ subcommand: 'off', isHeadless: true });
+            expect(result).toEqual({ ok: false, exitCode: 1, reason: 'telemetry-config-write-failed' });
+            // Command frame plus inner error must not repeat each other.
+            const mentions = loggedText().match(/telemetry preference/g) || [];
+            expect(mentions).toHaveLength(1);
+        } finally {
+            homeSpy.mockRestore();
+        }
+    });
+
     it('reports unwritable config paths instead of throwing', async () => {
         const blocker = path.join(dir, 'blocker');
         fs.writeFileSync(blocker, 'not-a-dir');

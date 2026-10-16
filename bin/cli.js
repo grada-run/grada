@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import '../src/core/last-resort.js';
 import path from 'path';
 import { mainStack } from '../src/commands/init.js';
 import { destroyStack, parseDestroyArgs } from '../src/commands/destroy.js';
