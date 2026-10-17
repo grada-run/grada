@@ -92,12 +92,34 @@ export async function resolveSecretsRegion(options = {}) {
     return 'us-east-2';
 }
 
-function escapeEnvValue(value) {
-    return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+// Quote one value so `dotenv.parse` reads it back byte-identical. Plain
+// values keep the legacy double-quote style; values holding a double
+// quote switch to a literal style (single or backtick) because dotenv
+// keeps `\"` verbatim instead of unescaping it. Returns null when no
+// style round-trips — the caller must refuse to write rather than
+// corrupt the file.
+export function quoteEnvValue(value) {
+    const text = String(value ?? '');
+    const hasSingle = text.includes("'");
+    const hasDouble = text.includes('"');
+    const hasBacktick = text.includes('`');
+    if (hasDouble) {
+        if (hasSingle && hasBacktick) return null;
+        if (hasSingle) return `\`${text}\``;
+        return `'${text}'`;
+    }
+    if (hasSingle) {
+        // Literal backslash-n/r sequences are indistinguishable from escaped
+        // newlines inside double quotes, so they force the literal styles.
+        if (/\\[nr]/.test(text)) return hasBacktick ? null : `\`${text}\``;
+        return `"${text.replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
+    }
+    if (text.includes('\\')) return `'${text}'`;
+    return `"${text.replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
 }
 
 function serializeEnv(orderedKeys, values) {
-    return orderedKeys.map((key) => `${key}="${escapeEnvValue(values[key])}"`).join('\n') + '\n';
+    return orderedKeys.map((key) => `${key}=${quoteEnvValue(values[key])}`).join('\n') + '\n';
 }
 
 function normalizeSecretsArgs(projectName, options) {
@@ -117,10 +139,12 @@ function resolvePullAuditArgs(projectName, options) {
 }
 
 export function diffSecretsEnvs(localSecrets = {}, remoteSecrets = {}) {
-    const missingLocally = Object.keys(remoteSecrets).filter((k) => !(k in localSecrets));
-    const untrackedLocally = Object.keys(localSecrets).filter((k) => !(k in remoteSecrets));
+    // Own-property checks: `in` matches inherited names (toString,
+    // __proto__), which would misclassify real vault keys.
+    const missingLocally = Object.keys(remoteSecrets).filter((k) => !Object.hasOwn(localSecrets, k));
+    const untrackedLocally = Object.keys(localSecrets).filter((k) => !Object.hasOwn(remoteSecrets, k));
     const mismatched = Object.keys(remoteSecrets).filter(
-        (k) => k in localSecrets && String(localSecrets[k]) !== String(remoteSecrets[k])
+        (k) => Object.hasOwn(localSecrets, k) && String(localSecrets[k]) !== String(remoteSecrets[k])
     );
     return { missingLocally, mismatched, untrackedLocally };
 }
@@ -298,6 +322,19 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                 });
                 return { keysChanged: false, restarted: false };
             }
+            // Automated runs cannot answer prompts: skip the restart (fresh
+            // deploys pick up the values) instead of hanging on confirm.
+            if (opts.isHeadless || process.env.CI) {
+                console.log(color.dim('Headless environment detected: skipping the ECS restart prompt — new values apply on the next deployment or restart.'));
+                console.log(color.blue(`\n📘 Learn how secrets reach your app: ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/secrets-management.md')}`));
+                await trackSuccess('secrets_pushed', {
+                    projectName: resolvedProjectName,
+                    secret_count: Object.keys(parsedSecrets).length,
+                    keys_changed: false,
+                    ecs_restart: false
+                });
+                return { keysChanged: false, restarted: false };
+            }
             const shouldRestart = await confirm({
                 message: 'Keys are unchanged. Trigger a rolling ECS restart to apply new values immediately?',
                 initialValue: false,
@@ -436,17 +473,31 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             }
         }
 
-        const merged = { ...localSecrets };
+        // Null-prototype map: a `__proto__` vault key lands as an own data
+        // property instead of mutating the merge target's prototype.
+        const merged = Object.assign(Object.create(null), localSecrets);
         for (const [key, value] of Object.entries(remoteSecrets)) {
-            if (!(key in merged) || overwrite) {
+            if (!Object.hasOwn(merged, key) || overwrite) {
                 merged[key] = String(value);
             }
         }
 
         const orderedKeys = [
             ...Object.keys(localSecrets),
-            ...remoteKeys.filter((k) => !(k in localSecrets)),
+            ...remoteKeys.filter((k) => !Object.hasOwn(localSecrets, k)),
         ];
+        const unrepresentable = orderedKeys.filter((key) =>
+            key === '__proto__' || quoteEnvValue(merged[key]) === null
+        );
+        if (unrepresentable.length > 0) {
+            const abort = new Error(
+                `Refusing to write ${resolvedFilePath}: ${unrepresentable.length} entr${unrepresentable.length === 1 ? 'y' : 'ies'} ` +
+                `cannot round-trip through .env quoting (${unrepresentable.join(', ')}). ` +
+                'Rename or re-encode them in the vault and retry.'
+            );
+            abort.code = 'SECRETS_PULL_UNREPRESENTABLE_VALUE';
+            throw abort;
+        }
         await fs.writeFile(envPath, serializeEnv(orderedKeys, merged));
 
         outro(`Successfully synced ${remoteKeys.length} secrets to ${resolvedFilePath}`);

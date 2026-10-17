@@ -76,7 +76,7 @@ npx grada-run secrets audit   # diff local .env vs AWS, change nothing
 | Situation | Command |
 |---|---|
 | New variable name added/removed | `secrets push`, then commit `secret_keys.json` + `git push` (task definition must be rebuilt) |
-| Only a value changed (same keys) | `secrets push`, then accept the rolling ECS restart prompt — live in seconds, no redeploy |
+| Only a value changed (same keys) | `secrets push`, then accept the rolling ECS restart prompt — live in seconds, no redeploy (prompt auto-skipped in `--headless`/CI; values apply on next deploy) |
 | New machine / lost `.env` | `secrets pull` |
 | "Why doesn't my app see the new value?" | `secrets audit` first, then push or restart accordingly |
 

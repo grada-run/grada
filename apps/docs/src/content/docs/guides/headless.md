@@ -98,6 +98,7 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - `wake` fails with `ECS_WAKE_CRASH_LOOP` when restored tasks keep crashing, or `ECS_WAKE_PULL_FAILURE` when a task is stuck `PENDING` on an unpullable image (the message names the most recent failure in both cases), or `ECS_WAKE_TIMEOUT` when tasks never reach the desired count — every path applies the restore first, so inspect with `status` and fix the task before retrying.
 - `apply` fails with `PARTIAL_STATE` when the outputs map comes back empty (pass `--allow-partial-outputs` for trees that legitimately declare no outputs).
 - Re-running setup over a multi-entry or non-literal OIDC trust fails with `OIDC_TRUST_WIDENING_REFUSED` when no repo can be determined (pass `--github-repo owner/name` to scope it explicitly, or narrow `terraform/oidc.tf` by hand) — headless never widens such a trust to `repo:*` silently.
+- `secrets pull` fails with `SECRETS_PULL_UNREPRESENTABLE_VALUE` when a vault entry cannot round-trip through `.env` quoting (rename or re-encode the named keys in the vault and retry) — the local file is left untouched rather than corrupted.
 - Anything that escapes all of the above (an SDK-internal failure, a bug) is caught by a last-resort handler: exit 1 with a one-line report on stderr — or a parseable `{ok: false, exitCode: 1, error, reason}` envelope on stdout under `--json` — so even unanticipated failures stay machine-readable.
 
 ## Exit codes

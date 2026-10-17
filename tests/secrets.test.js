@@ -4,7 +4,8 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mockConfirm, mockOutro, mockSpinnerStart, mockSpinnerStop } from './helpers/clack.js';
 import fs from 'fs/promises';
 import path from 'path';
-import { pushSecrets, pullSecrets, auditSecrets, resolveSecretsRegion } from '../src/commands/secrets.js';
+import { pushSecrets, pullSecrets, auditSecrets, resolveSecretsRegion, quoteEnvValue, diffSecretsEnvs } from '../src/commands/secrets.js';
+import dotenv from 'dotenv';
 import { trackEvent } from '../src/core/telemetry.js';
 
 // 1. Use vi.hoisted() so these variables are available when vi.mock() runs at the top of the file
@@ -253,6 +254,23 @@ describe('Secrets Push Command', () => {
         }));
         expect(mockEcsSend).not.toHaveBeenCalled();
         expect(result).toEqual(expect.objectContaining({ keysChanged: false }));
+    });
+
+    it('skips the ECS restart prompt in headless mode without hanging', async () => {
+        await fs.writeFile('.env', 'API_KEY=newvalue');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
+        mockSend.mockResolvedValueOnce({});
+
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(mockConfirm).not.toHaveBeenCalled();
+        expect(mockEcsSend).not.toHaveBeenCalled();
+        expect(result).toEqual(expect.objectContaining({ keysChanged: false, restarted: false }));
+        expect(trackEvent).toHaveBeenCalledWith('secrets_pushed', expect.objectContaining({
+            keys_changed: false,
+            ecs_restart: false,
+            success: true,
+        }));
     });
 
     it('treats a new vault (ResourceNotFoundException on fetch) as keys changed', async () => {
@@ -738,5 +756,127 @@ describe('Secrets Push on --target lambda projects', () => {
             ecs_restart: false,
             success: true,
         }));
+    });
+});
+
+describe('Secrets Pull quoting', () => {
+    it.each([
+        // [value, expected output] — plain values keep the legacy double-quote style byte-identical
+        ['abc', '"abc"'],
+        ['', '""'],
+        ["it's", '"it\'s"'],
+        ['say "hi"', "'say \"hi\"'"],
+        ['a`b', '"a`b"'],
+        ['x\'y`z', '"x\'y`z"'],
+        ['it\'s "quoted"', '`it\'s "quoted"`'],
+        ['C:\\new\\dir', "'C:\\new\\dir'"],
+        ['line1\nline2', '"line1\\nline2"'],
+        ["it's\nmultiline", '"it\'s\\nmultiline"'],
+        ['tab\there', '"tab\there"'],
+        ['a#b', '"a#b"'],
+        ['trailing\\', "'trailing\\'"],
+        ['it\'s \\d regex', '"it\'s \\d regex"'],
+        // unrepresentable under dotenv quoting: every style breaks
+        ['a\'b"c`d', null],
+        ['it\'s `code` \\notes', null],
+    ])('quotes %p as %p', (value, expected) => {
+        expect(quoteEnvValue(value)).toBe(expected);
+    });
+
+    it('falls back to backticks for apostrophes paired with literal backslash-n', () => {
+        expect(quoteEnvValue('it\'s \\notes')).toBe('`it\'s \\notes`');
+    });
+});
+
+describe('Secrets prototype-key handling', () => {
+    it('treats inherited names as genuinely missing, untracked, or matching', () => {
+        expect(diffSecretsEnvs({}, JSON.parse('{"__proto__":1}')).missingLocally).toEqual(['__proto__']);
+        expect(diffSecretsEnvs(JSON.parse('{"toString":"x"}'), {}).untrackedLocally).toEqual(['toString']);
+        expect(diffSecretsEnvs({ A: '1' }, JSON.parse('{"A":"1","toString":"x"}')).mismatched).toEqual([]);
+    });
+});
+
+describe('Secrets Pull round-trip', () => {
+    const originalCwd = process.cwd();
+    const testDir = path.join(originalCwd, 'tests', '.tmp-secrets-roundtrip');
+
+    beforeEach(async () => {
+        await fs.mkdir(path.join(testDir, 'terraform'), { recursive: true });
+        process.chdir(testDir);
+        mockConfirm.mockReset();
+    });
+
+    afterEach(async () => {
+        process.chdir(originalCwd);
+        await fs.rm(testDir, { recursive: true, force: true });
+        vi.clearAllMocks();
+        mockSend.mockReset();
+        mockSend.mockResolvedValue({});
+    });
+
+    it('writes adversarial values that parse back identically', async () => {
+        const remote = {
+            PLAIN: 'abc',
+            APOSTROPHE: "it's",
+            QUOTED: 'say "hi"',
+            BACKTICK: 'a`b',
+            MIXED_BT: 'x\'y`z',
+            MIXED_Q: 'it\'s "quoted"',
+            WINPATH: 'C:\\new\\dir',
+            MULTILINE: 'line1\nline2',
+            HASH: 'a#b',
+            REGEX: 'it\'s \\d regex',
+            TRAILING_BS: 'trailing\\',
+        };
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify(remote) });
+
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(result.synced).toBe(Object.keys(remote).length);
+        const content = await fs.readFile('.env', 'utf-8');
+        expect(dotenv.parse(content)).toEqual(remote);
+    });
+
+    it('keeps inherited names like toString in the synced file', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ toString: 'x' }) });
+
+        await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        const content = await fs.readFile('.env', 'utf-8');
+        expect(content).toContain('toString="x"');
+        expect(dotenv.parse(content)).toEqual({ toString: 'x' });
+    });
+
+    it('refuses to write when the vault holds a __proto__ key', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: '{"__proto__":"pwn"}' });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            await expect(fs.readFile('.env', 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+        } finally {
+            exitSpy.mockRestore();
+            logSpy.mockRestore();
+        }
+    });
+
+    it('refuses to write when a value cannot round-trip, naming the key', async () => {
+        await fs.writeFile('.env', 'KEEP=1\n');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEEP: '1', BROKEN: 'a\'b"c`d' }) });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(await fs.readFile('.env', 'utf-8')).toBe('KEEP=1\n');
+        } finally {
+            exitSpy.mockRestore();
+            logSpy.mockRestore();
+        }
     });
 });

@@ -23,7 +23,7 @@ The optional positional argument is the path of the env file to push (resolved r
 **Smart follow-up based on what changed:**
 
 - **Key names changed** (added/removed variables) — commit `terraform/secret_keys.json` and push to GitHub to trigger a deployment with the new variables. The ECS task definition is rebuilt from the updated key map.
-- **Only values changed** (same key set) — the CLI offers a rolling ECS restart (`forceNewDeployment`) so running tasks pick up the new values immediately, no redeploy required.
+- **Only values changed** (same key set) — the CLI offers a rolling ECS restart (`forceNewDeployment`) so running tasks pick up the new values immediately, no redeploy required. With `--headless` or `CI=true` the prompt is skipped automatically (values apply on the next deployment or restart) so pipelines never hang.
 - **Lambda target** — new values apply to fresh invocations automatically; no restart is offered or needed.
 
 Region resolution is shared across all three commands (see Prerequisites), so they work even when no region is configured. Exits non-zero on failure.
@@ -45,7 +45,7 @@ npx grada-run secrets pull .env
 - Local-only variables are kept — pull never deletes them.
 - If a key exists locally and remotely with different values, the CLI asks `Conflicting variables found. Overwrite local values with remote?` In `--headless` mode it overwrites automatically.
 
-Values are written in standard `KEY="value"` format. Exits non-zero on failure (e.g. no remote vault yet — run `secrets push` first).
+Values are written one per line with the quoting style (double, single, or backtick) chosen per value so the file parses back byte-identical — quotes, backslashes, and multiline values survive the round trip. Entries that cannot be represented in `.env` quoting abort the pull loudly, naming the offending keys, instead of writing a corrupted file. Exits non-zero on failure (e.g. no remote vault yet — run `secrets push` first).
 
 ## secrets audit
 
