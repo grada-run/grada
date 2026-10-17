@@ -59,14 +59,14 @@ describe.each([
 });
 
 describe('Alerts: headless defaults', () => {
-    it('scaffolds the manual email path with no flags and valid Terraform', async () => {
+    it('scaffolds the manual email path with explicit --headless and valid Terraform', async () => {
         await withTmpDir('alerts-manual', async (dir) => {
             const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env });
             expect(init.status).toBe(0);
 
-            // stdin is closed in e2e runs: no flags must scaffold without
-            // prompting, never hang.
-            const alerts = runCli(['alerts'], { cwd: dir, env, capture: true });
+            // stdin is closed in e2e runs: explicit --headless must
+            // scaffold the manual path without prompting, never hang.
+            const alerts = runCli(['alerts', '--headless'], { cwd: dir, env, capture: true });
             expect(alerts.status).toBe(0);
             expect(alerts.stdout).toContain('aws sns subscribe');
 
@@ -75,6 +75,19 @@ describe('Alerts: headless defaults', () => {
             expect(tf).not.toContain('aws_lambda_function" "forwarder"');
 
             validateTerraform(dir);
+        });
+    });
+
+    it('refuses bare runs in CI instead of silently scaffolding', async () => {
+        await withTmpDir('alerts-refuse', async (dir) => {
+            const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env });
+            expect(init.status).toBe(0);
+
+            const alerts = runCli(['alerts'], { cwd: dir, env, capture: true });
+            expect(alerts.status).toBe(1);
+            expect(alerts.output).toContain('needs a destination');
+            expect(alerts.output).toContain('--email');
+            expect(fs.existsSync(path.join(dir, 'terraform', 'alerts.tf'))).toBe(false);
         });
     });
 });
