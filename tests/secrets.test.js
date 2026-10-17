@@ -884,6 +884,7 @@ describe('Secrets Pull round-trip', () => {
             await pullSecrets('.env', 'my-project', { isHeadless: true });
 
             expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('__proto__'));
             await expect(fs.readFile('.env', 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
         } finally {
             exitSpy.mockRestore();
@@ -901,7 +902,25 @@ describe('Secrets Pull round-trip', () => {
             await pullSecrets('.env', 'my-project', { isHeadless: true });
 
             expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('BROKEN'));
             expect(await fs.readFile('.env', 'utf-8')).toBe('KEEP=1\n');
+        } finally {
+            exitSpy.mockRestore();
+            logSpy.mockRestore();
+        }
+    });
+
+    it('prints pre-fetch failures exactly once via the spinner stop', async () => {
+        mockSend.mockRejectedValueOnce(Object.assign(new Error('fetch exploded'), { name: 'SomeSdkError' }));
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('fetch exploded'));
+            expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('fetch exploded'));
         } finally {
             exitSpy.mockRestore();
             logSpy.mockRestore();

@@ -422,6 +422,7 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
 
     const s = spinner();
     s.start('Fetching secrets from AWS...');
+    let remoteFetched = false;
 
     try {
         const targetRegion = await resolveSecretsRegion(opts);
@@ -443,6 +444,7 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
         }
         const remoteKeys = Object.keys(remoteSecrets);
         s.stop('Remote secrets fetched.');
+        remoteFetched = true;
 
         const envPath = path.resolve(process.cwd(), resolvedFilePath);
         let localSecrets = {};
@@ -521,6 +523,10 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             console.log(`Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`);
         } else if (handleAuthErrorBranch(error, s, opts)) {
             return;
+        } else if (remoteFetched) {
+            // The spinner already stopped, so its stop is a no-op —
+            // route the message through the failure stamp instead.
+            return failCommand({ message: `❌ Failed to pull secrets: ${error.message}`, exitCode: 1 });
         } else {
             s.stop(`❌ Failed to pull secrets: ${error.message}`);
         }
