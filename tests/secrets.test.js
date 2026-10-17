@@ -59,11 +59,15 @@ vi.mock('@aws-sdk/client-ecs', () => ({
 describe('Secrets Push Command', () => {
     const originalCwd = process.cwd();
     const testDir = path.join(originalCwd, 'tests', '.tmp-secrets-env');
+    let savedCi;
 
     beforeEach(async () => {
         // Create a fake project directory and step into it
         await fs.mkdir(path.join(testDir, 'terraform'), { recursive: true });
         process.chdir(testDir);
+        // Interactive-path tests must not see CI=true from the runner env
+        savedCi = process.env.CI;
+        delete process.env.CI;
         mockConfirm.mockReset();
         mockConfirm.mockResolvedValue(false);
         mockEcsSend.mockReset();
@@ -74,6 +78,8 @@ describe('Secrets Push Command', () => {
         // Step back out, clean up the files, and reset mocks
         process.chdir(originalCwd);
         await fs.rm(testDir, { recursive: true, force: true });
+        if (savedCi === undefined) delete process.env.CI;
+        else process.env.CI = savedCi;
         vi.clearAllMocks();
         mockSend.mockReset();
         mockSend.mockResolvedValue({}); // Reset to default success state
@@ -271,6 +277,23 @@ describe('Secrets Push Command', () => {
             ecs_restart: false,
             success: true,
         }));
+    });
+
+    it('skips the ECS restart prompt when CI=true even without the headless flag', async () => {
+        await fs.writeFile('.env', 'API_KEY=newvalue');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
+        mockSend.mockResolvedValueOnce({});
+        process.env.CI = 'true';
+
+        try {
+            const result = await pushSecrets('.env', 'my-project');
+
+            expect(mockConfirm).not.toHaveBeenCalled();
+            expect(mockEcsSend).not.toHaveBeenCalled();
+            expect(result).toEqual(expect.objectContaining({ keysChanged: false, restarted: false }));
+        } finally {
+            delete process.env.CI;
+        }
     });
 
     it('treats a new vault (ResourceNotFoundException on fetch) as keys changed', async () => {
@@ -587,14 +610,17 @@ describe('Secrets Region Resolution', () => {
     const testDir = path.join(originalCwd, 'tests', '.tmp-secrets-region');
     let savedAwsRegion;
     let savedAwsDefaultRegion;
+    let savedCi;
 
     beforeEach(async () => {
         await fs.mkdir(path.join(testDir, 'terraform'), { recursive: true });
         process.chdir(testDir);
         savedAwsRegion = process.env.AWS_REGION;
         savedAwsDefaultRegion = process.env.AWS_DEFAULT_REGION;
+        savedCi = process.env.CI;
         delete process.env.AWS_REGION;
         delete process.env.AWS_DEFAULT_REGION;
+        delete process.env.CI;
         mockConfirm.mockReset();
         mockConfirm.mockResolvedValue(false);
     });
@@ -606,6 +632,8 @@ describe('Secrets Region Resolution', () => {
         else process.env.AWS_REGION = savedAwsRegion;
         if (savedAwsDefaultRegion === undefined) delete process.env.AWS_DEFAULT_REGION;
         else process.env.AWS_DEFAULT_REGION = savedAwsDefaultRegion;
+        if (savedCi === undefined) delete process.env.CI;
+        else process.env.CI = savedCi;
         vi.clearAllMocks();
         mockSend.mockReset();
         mockSend.mockResolvedValue({});
