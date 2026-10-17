@@ -11,6 +11,7 @@ Give your AI coding assistants up-to-date grada context after project settings c
 - Every generated file carries three proactive guardrails: run `terraform validate` after any `.tf` edit, prompt `grada secrets audit` (then `secrets push`) when `.env` keys change, and remind the user to run `grada apply` when a `package.json` build script or framework output directory changes.
 - Writes a full rule file for Cursor (`.cursor/rules/grada.mdc`), Roo (`.roo/rules/grada.md`), and Continue (`.prompts/grada.prompt`); injects a managed block into the existing config for Trae (`.trae/rules/project_rules.md`), Windsurf (`.windsurfrules`), Copilot (`.github/copilot-instructions.md`), Claude (`CLAUDE.md`), Goose (`.goosehints`), and Aider (`.aider.conf.yml`).
 - Exits without writing anything when no assistants are selected.
+- Requires an interactive terminal: without a TTY it refuses with `SYNC_AI_NON_INTERACTIVE` instead of silently succeeding with nothing written.
 
 ## Usage
 

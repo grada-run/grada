@@ -45,7 +45,7 @@ Both commands are idempotent: re-sleeping an asleep environment (or waking an aw
 
 ## Automation & edge cases
 
-- `wake` short-circuits doomed waits: two fresh task stops fail with `ECS_WAKE_CRASH_LOOP`, a `PENDING` task with a fatal pull reason (`CannotPullContainerError`, …) with `ECS_WAKE_PULL_FAILURE` — both name the failure, and timeouts do too when one exists. Full catalog: [Headless Mode](/grada/guides/headless/).
+- `wake` short-circuits doomed waits: two fresh task stops fail with `ECS_WAKE_CRASH_LOOP`, a `PENDING` task with a fatal pull reason (`CannotPullContainerError`, …) with `ECS_WAKE_PULL_FAILURE` — both name the failure, and timeouts do too when one exists. Non-interactive `sleep` without `--yes` fails with `SLEEP_NON_INTERACTIVE`. Full catalog: [Headless Mode](/grada/guides/headless/).
 - Every no-op reports a machine-readable `skipped` reason (`static-target`, `lambda-skip-db`, `lambda-no-database`, `already-awake`) and exits 0; with `--strict`, skips exit 2 instead (distinct from failure's 1) so scripts can tell "nothing to do" apart from success and error.
 - Terraform stays consistent via a managed `terraform/sleep.auto.tfvars` marker (`asleep = true`) that `wake` deletes before restoring — never edit it by hand. Replica counts live in gitignored `.grada/sleep-state.json`; if that file is ever corrupt, the CLI quarantines it aside (`sleep-state.json.corrupt.<timestamp>`) and prints a one-line notice naming the backup instead of silently starting fresh.
 - `sleep` refuses while an `add` scaffold is in progress (`--force` bypasses when your automation sequences commands itself).

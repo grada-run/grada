@@ -1,16 +1,18 @@
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { ECRClient, DescribeRepositoriesCommand, DescribeImagesCommand, BatchDeleteImageCommand } from '@aws-sdk/client-ecr';
 import { CloudWatchLogsClient, DescribeLogGroupsCommand, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { ECSClient, ListServicesCommand } from '@aws-sdk/client-ecs';
 import { EC2Client, DescribeAddressesCommand, ReleaseAddressCommand, DescribeVpcsCommand } from '@aws-sdk/client-ec2';
 import { SecretsManagerClient, ListSecretsCommand } from '@aws-sdk/client-secrets-manager';
 import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 
 export const CONFIRM_MESSAGE = 'Are you sure you want to permanently delete these orphaned resources? (y/N)';
@@ -58,20 +60,36 @@ export function hasExactProjectTag(tags, projectName) {
     );
 }
 
-function matchesProjectRepo(repositoryName, projectName) {
-    return typeof repositoryName === 'string' && repositoryName.startsWith(`${projectName}-`);
+function escapeRegExp(text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Standard target discovery: untagged ECR images in project-prefixed repos.
-// Both DescribeRepositories and DescribeImages are paginated.
-async function discoverUntaggedImages({ ecrClient, projectName }) {
+// Grada renders exactly one ECR repo per tree: `<project><suffix>-repo`
+// (previews push tags; they never mint repos). Anything else sharing
+// the prefix is foreign — never propose it.
+function projectRepoName(projectName, resourceSuffix = '') {
+    return `${projectName}${resourceSuffix}-repo`;
+}
+
+// Preview log groups carry the `-pr-<n>` workspace infix at a fixed
+// position (`<project>-pr-<n><suffix>`); anchor both ends so foreign
+// lookalikes (`myapp-evil-pr-2`) never match.
+function previewLogGroupPattern({ projectName, resourceSuffix = '', isLambda = false }) {
+    const base = `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
+    return isLambda ? new RegExp(`^/aws/lambda/${base}-fn$`) : new RegExp(`^/ecs/${base}$`);
+}
+
+// Standard target discovery: untagged ECR images in the project's own
+// repo. Both DescribeRepositories and DescribeImages are paginated.
+async function discoverUntaggedImages({ ecrClient, projectName, resourceSuffix = '' }) {
     const untaggedImages = [];
     const repositories = [];
+    const ownRepo = projectRepoName(projectName, resourceSuffix);
     let reposNextToken;
     do {
         const reposResp = await ecrClient.send(new DescribeRepositoriesCommand({ nextToken: reposNextToken }));
         for (const repo of reposResp.repositories || []) {
-            if (matchesProjectRepo(repo.repositoryName, projectName)) repositories.push(repo);
+            if (repo.repositoryName === ownRepo) repositories.push(repo);
         }
         reposNextToken = reposResp.nextToken;
     } while (reposNextToken);
@@ -96,26 +114,98 @@ async function discoverUntaggedImages({ ecrClient, projectName }) {
     return untaggedImages;
 }
 
+// Lambda function listing without a new SDK dependency, mirroring
+// diagnose's AWS CLI usage. Throws when the CLI is missing, fails, or
+// returns unparseable output — the caller treats that as unknown.
+function defaultListLambdaFunctionNames({ region, spawnSyncImpl } = {}) {
+    const runSync = spawnSyncImpl || spawnSync;
+    const res = runSync('aws', [
+        'lambda', 'list-functions',
+        '--query', 'Functions[].FunctionName',
+        '--output', 'json',
+        ...(region ? ['--region', region] : []),
+    ], { encoding: 'utf-8' });
+    if (res?.status !== 0 || res?.error) {
+        throw new Error(res?.error?.message || String(res?.stderr || 'aws lambda list-functions failed').trim());
+    }
+    const names = JSON.parse(String(res.stdout || '[]'));
+    if (!Array.isArray(names)) throw new Error('unexpected list-functions output');
+    return names;
+}
+
+// Log groups whose preview compute still exists: ECS services for Fargate
+// trees, Lambda functions for serverless ones. Never throws — any scan
+// failure resolves to `unknown` so discovery fails closed instead of
+// proposing live-preview groups.
+export async function discoverLivePreviewLogGroups({
+    ecsClient = null,
+    cluster = null,
+    projectName,
+    resourceSuffix = '',
+    isLambda = false,
+    listFunctionsImpl = defaultListLambdaFunctionNames,
+    spawnSyncImpl = null,
+    region = null,
+} = {}) {
+    const live = new Set();
+    try {
+        const base = `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
+        if (isLambda) {
+            const fnPattern = new RegExp(`^${base}-fn$`);
+            const names = await listFunctionsImpl({ region, spawnSyncImpl });
+            for (const name of names || []) {
+                if (typeof name === 'string' && fnPattern.test(name)) live.add(`/aws/lambda/${name}`);
+            }
+        } else {
+            if (!ecsClient || !cluster) return { groups: live, unknown: false };
+            const servicePattern = new RegExp(`^${base}-service$`);
+            let nextToken;
+            do {
+                const resp = await ecsClient.send(new ListServicesCommand({ cluster, nextToken, maxResults: 100 }));
+                for (const arn of resp.serviceArns || []) {
+                    const name = String(arn).split('/').pop();
+                    if (servicePattern.test(name)) live.add(`/ecs/${name.slice(0, -'-service'.length)}`);
+                }
+                nextToken = resp.nextToken;
+            } while (nextToken);
+        }
+    } catch {
+        return { groups: live, unknown: true };
+    }
+    return { groups: live, unknown: false };
+}
+
 // Standard target discovery: orphaned CloudWatch log groups for deleted
-// preview environments. The live service log group is `/ecs/<project>`
-// (Lambda: `/aws/lambda/<project>-fn`, no trailing dash after the project
-// name); preview leftovers carry a `-pr-*` suffix, so a prefix scan
-// isolates candidates.
-async function discoverOrphanedLogGroups({ logsClient, projectName, logGroupPrefix, excludeLogGroup }) {
+// preview environments. Candidates must match the anchored preview shape
+// (foreign lookalikes rejected), must not be the live group, and must
+// not belong to a still-running preview. When liveness is unknown the
+// scan fails closed and proposes nothing.
+async function discoverOrphanedLogGroups({
+    logsClient,
+    projectName,
+    logGroupPrefix,
+    excludeLogGroup,
+    resourceSuffix = '',
+    isLambda = false,
+    livePreviewGroups = null,
+    previewLivenessUnknown = false,
+}) {
+    if (previewLivenessUnknown) return [];
     const orphanedLogGroups = [];
     const groupPrefix = logGroupPrefix || `/ecs/${projectName}-`;
+    const previewPattern = previewLogGroupPattern({ projectName, resourceSuffix, isLambda });
+    const live = livePreviewGroups instanceof Set ? livePreviewGroups : new Set();
     let nextToken;
     do {
         const logsResp = await logsClient.send(
             new DescribeLogGroupsCommand({ logGroupNamePrefix: groupPrefix, nextToken })
         );
         for (const group of logsResp.logGroups || []) {
-            // The Lambda live group (`/aws/lambda/<project>-fn`) matches the
-            // preview prefix scan, so it is excluded explicitly — it must
-            // never be proposed for deletion.
-            if (group.logGroupName && group.logGroupName !== excludeLogGroup) {
-                orphanedLogGroups.push({ logGroupName: group.logGroupName, storedBytes: group.storedBytes });
-            }
+            const name = group.logGroupName;
+            if (!name || name === excludeLogGroup) continue;
+            if (!previewPattern.test(name)) continue;
+            if (live.has(name)) continue;
+            orphanedLogGroups.push({ logGroupName: name, storedBytes: group.storedBytes });
         }
         nextToken = logsResp.nextToken;
     } while (nextToken);
@@ -383,6 +473,7 @@ async function runGcMain(input = {}) {
     const ecrClient = resolveClient(options.ecrClient, ECRClient, { region });
     const logsClient = resolveClient(options.logsClient, CloudWatchLogsClient, { region });
     const ec2Client = resolveClient(options.ec2Client, EC2Client, { region });
+    const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
     const secretsClient = resolveClient(options.secretsClient, SecretsManagerClient, { region });
     const deep = options.deep === true || options.deep === 'true';
 
@@ -392,18 +483,35 @@ async function runGcMain(input = {}) {
     s.start('Scanning for orphaned resources (dry run)...');
 
     let discovered;
+    let previewLivenessUnknown = false;
     try {
         const isLambda = isComputeTarget(cwd, 'lambda');
+        const suffix = readResourceSuffix(cwd);
+        const liveness = await discoverLivePreviewLogGroups({
+            ecsClient,
+            cluster: resolveCluster(options, cwd),
+            projectName,
+            resourceSuffix: suffix,
+            isLambda,
+            spawnSyncImpl: options.spawnSyncImpl,
+            region,
+        });
+        previewLivenessUnknown = liveness.unknown;
         discovered = await discoverOrphanedResources({
             ecrClient,
             logsClient,
             ec2Client,
             projectName,
+            resourceSuffix: suffix,
+            isLambda,
             logGroupPrefix: isLambda ? `/aws/lambda/${projectName}-` : undefined,
             // Exact match: the live group carries the suffix on suffixed
             // trees, and proposing it for deletion would be catastrophic.
-            // Discovery prefixes above stay broad on purpose (superset).
-            excludeLogGroup: isLambda ? `/aws/lambda/${projectName}${readResourceSuffix(cwd)}-fn` : undefined,
+            excludeLogGroup: isLambda
+                ? `/aws/lambda/${projectName}${suffix}-fn`
+                : `/ecs/${projectName}${suffix}`,
+            livePreviewGroups: liveness.groups,
+            previewLivenessUnknown: liveness.unknown,
         });
     } catch (error) {
         s.stop(color.red('❌ Discovery failed.'));
@@ -416,6 +524,9 @@ async function runGcMain(input = {}) {
         });
     }
     s.stop('Discovery complete.');
+    if (previewLivenessUnknown) {
+        console.log(color.yellow('⚠ Preview liveness could not be verified — no preview log groups will be proposed. Check credentials (ECS) / AWS CLI (Lambda) and retry.'));
+    }
 
     console.log(color.bold(`\nDry run — orphaned resources for project ${color.cyan(projectName)}:`));
     printDiscovery(discovered);
@@ -472,6 +583,16 @@ async function runGcMain(input = {}) {
     // Safety: only a literal `true` from the interactive prompt proceeds.
     // Anything else (false, undefined, cancelled symbol) aborts deletion.
     // --yes (or any auto-approve flag) skips the prompt explicitly.
+    if (!shouldAutoApprove(options)) {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ gc needs confirmation before deleting orphaned resources.`,
+            hint: '  Re-run with --yes to delete non-interactively.\n',
+            event: 'gc_run',
+            telemetry: { projectName },
+            errorCode: 'GC_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
+    }
     const confirmed = shouldAutoApprove(options)
         ? true
         : await confirm({ message: color.yellow(CONFIRM_MESSAGE), initialValue: false });

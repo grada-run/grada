@@ -73,7 +73,7 @@ Requires a project initialized with `grada` (`terraform/main.tf` must exist).
 
 ## Automation & edge cases
 
-- Headless `add cron` refuses `npm`/`npx` commands with `NPM_CMD_STRIPPED_RUNNER` when the `Dockerfile` strips those binaries (warns interactively). Full catalog: [Headless Mode](/grada/guides/headless/).
+- Headless `add cron` refuses `npm`/`npx` commands with `NPM_CMD_STRIPPED_RUNNER` when the `Dockerfile` strips those binaries (warns interactively). Without a flag value, non-interactive runs fail with `ADD_NON_INTERACTIVE` instead of prompting (Bedrock: `--model`; SES: `--domain`; cron: `--schedule`/`--cmd`). Full catalog: [Headless Mode](/grada/guides/headless/).
 - Concurrent `add` runs serialize under a project lock — safe to run several in rapid succession or from a CI loop.
 - On an asleep environment, scaffolding proceeds with a warning (the files land, but `apply` stays gated until you [`wake`](/grada/cli/sleep/)).
 - On [ejected](/grada/cli/eject/) projects, new addon files render without managed headers to match the vanilla tree (billing docs and resources are unchanged), with a warning.

@@ -6,7 +6,7 @@ import { intro, outro, confirm, cancel, isCancel } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { resolveProjectName, resolveHeadless, resolveCwd } from '../utils/resolvers.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive } from '../utils/command.js';
 import { getTerraformOutputs } from '../utils/terraform.js';
 import {
     findResourceBlock,
@@ -266,25 +266,39 @@ export function patchCloudFrontDomain(cloudfrontTfContent, domain) {
     return head + block + tail;
 }
 
-// Removes `domain` from the `aliases` (dropping the attribute when no
-// aliases remain) and restores the default CloudFront certificate.
-// Idempotent; returns the content unchanged when the distribution or
-// the domain wiring is missing.
+// Alias domains currently wired on the CloudFront distribution (the
+// workspace-conditional true-branch list), or [] when unwired.
+export function getCloudFrontAliases(cloudfrontTfContent) {
+    const content = String(cloudfrontTfContent ?? '');
+    const resource = findResourceBlock(content, 'aws_cloudfront_distribution', 'cdn');
+    if (!resource) return [];
+    const block = content.slice(resource.openIdx, resource.closeIdx + 1);
+    const current = getAttributeValue(block, 'aliases');
+    if (current === null) return [];
+    return parseAliasesValue(current);
+}
+
+// Removes `domain` from the `aliases`, restoring the default CloudFront
+// certificate only when no aliases remain — remaining aliases require
+// an ACM certificate (CloudFront rejects the default cert with any
+// alias). Idempotent; returns the content unchanged when the
+// distribution is missing or the domain is not wired.
 export function unpatchCloudFrontDomain(cloudfrontTfContent, domain) {
     const content = String(cloudfrontTfContent ?? '');
     const resource = findResourceBlock(content, 'aws_cloudfront_distribution', 'cdn');
     if (!resource) return content;
+    const aliases = getCloudFrontAliases(content);
+    if (!aliases.includes(domain)) return content;
     const head = content.slice(0, resource.openIdx);
     const tail = content.slice(resource.closeIdx + 1);
     let block = content.slice(resource.openIdx, resource.closeIdx + 1);
-    const current = getAttributeValue(block, 'aliases');
-    if (current !== null) {
-        const remaining = parseAliasesValue(current).filter((entry) => entry !== domain);
-        block = remaining.length === 0
-            ? removeAttribute(block, 'aliases')
-            : upsertAttribute(block, 'aliases', renderConditionalAliasesList(remaining));
+    const remaining = aliases.filter((entry) => entry !== domain);
+    if (remaining.length === 0) {
+        block = removeAttribute(block, 'aliases');
+        block = replaceViewerCertificate(block, DEFAULT_VIEWER_CERTIFICATE);
+    } else {
+        block = upsertAttribute(block, 'aliases', renderConditionalAliasesList(remaining));
     }
-    block = replaceViewerCertificate(block, DEFAULT_VIEWER_CERTIFICATE);
     return head + block + tail;
 }
 
@@ -676,18 +690,41 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
     const domain = parsed?.domain;
     const mode = parsed?.mode || 'unknown';
     const yes = options.yes === true;
-    if (!yes && resolveHeadless(options)) {
-        return failCommand({
-            noExit,
-            message: '\n✖ Refusing to remove the custom domain without confirmation. Re-run with --yes.\n',
-            event: 'domain_run',
-            telemetry: { projectName, subcommand: 'remove', error_code: 'CONFIRMATION_REQUIRED' },
-            reason: 'confirmation-required',
-            resultExtra: { subcommand: 'remove', projectName },
-        });
-    }
+    const readRemainingAliases = () => {
+        try {
+            if (!domain || !fsSync.existsSync(cloudfrontTfPath)) return null;
+            return getCloudFrontAliases(fsSync.readFileSync(cloudfrontTfPath, 'utf-8')).filter((entry) => entry !== domain);
+        } catch {
+            return null;
+        }
+    };
     if (!yes) {
-        const answer = await confirm({ message: `Remove custom domain ${domain || '(unparseable)'} and restore the default CloudFront certificate?` });
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ domain needs confirmation before removing the custom domain.`,
+            hint: '  Re-run with --yes to remove non-interactively.\n',
+            event: 'domain_run',
+            telemetry: { projectName },
+            errorCode: 'DOMAIN_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
+        // Explicit non-interactive flags without --yes keep the
+        // historical refusal (the gate above fires inferred-headless
+        // only, so any headless run reaching here was explicitly asked).
+        if (resolveHeadless(options)) {
+            return failCommand({
+                noExit,
+                message: '\n✖ Refusing to remove the custom domain without confirmation. Re-run with --yes.\n',
+                event: 'domain_run',
+                telemetry: { projectName, subcommand: 'remove', error_code: 'CONFIRMATION_REQUIRED' },
+                reason: 'confirmation-required',
+                resultExtra: { subcommand: 'remove', projectName },
+            });
+        }
+        const previewRemaining = readRemainingAliases();
+        const prompt = previewRemaining && previewRemaining.length > 0
+            ? `Remove custom domain ${domain || '(unparseable)'}? ${previewRemaining.length} other alias(es) (${previewRemaining.join(', ')}) will keep the ACM certificate wiring.`
+            : `Remove custom domain ${domain || '(unparseable)'} and restore the default CloudFront certificate?`;
+        const answer = await confirm({ message: prompt });
         if (isCancel(answer) || !answer) {
             return failCommand({
                 noExit,
@@ -699,18 +736,25 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
             });
         }
     }
+    let remainingAliases = [];
     try {
         if (domain && fsSync.existsSync(cloudfrontTfPath)) {
             const content = fsSync.readFileSync(cloudfrontTfPath, 'utf-8');
             const updated = unpatchCloudFrontDomain(content, domain);
             if (updated !== content) atomicWriteFileSync(cloudfrontTfPath, updated);
+            remainingAliases = getCloudFrontAliases(updated).filter((entry) => entry !== domain);
         }
     } catch {
         // A best-effort unpatch never blocks domain.tf removal.
     }
     ensureUsEast1Provider(path.join(path.dirname(domainTfPath), 'main.tf'));
     fsSync.rmSync(domainTfPath, { force: true });
-    console.log(color.green(`\n✅ Custom domain ${domain || ''} removed; CloudFront restored to the default certificate.`.replace('  ', ' ')));
+    if (remainingAliases.length > 0) {
+        console.log(color.green(`\n✅ Custom domain ${domain || ''} removed.`.replace('  ', ' ')));
+        console.log(color.yellow(`⚠ ${remainingAliases.length} alias(es) remain (${remainingAliases.join(', ')}): the ACM viewer_certificate is kept, but its validation resource is deleted with domain.tf — rewire the certificate by hand before applying.`));
+    } else {
+        console.log(color.green(`\n✅ Custom domain ${domain || ''} removed; CloudFront restored to the default certificate.`.replace('  ', ' ')));
+    }
     console.log(`  Run ${color.green('npx grada-run apply')} to push the change.`);
     outro(color.green('Done.'));
     await trackSuccess('domain_run', { projectName, subcommand: 'remove', mode });

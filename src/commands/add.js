@@ -11,7 +11,7 @@ import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars, addonTargetDisp
 import { stripTerraformMetadata, readEjectedMarker } from '../utils/terraform-metadata.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, isValidFromEmail, parseDomainTf } from '../utils/domains.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive } from '../utils/command.js';
 import { findArrayBounds, findMapBounds, findNestedBlock, findResourceBlock, enclosingBraceBounds, normalizeBlankLines, realignAssignmentRuns } from '../utils/hcl.js';
 import { syncDocCostEstimate } from '../utils/visualizer.js';
 import { withProjectLock } from '../utils/file-lock.js';
@@ -810,11 +810,33 @@ function invalidModelFailure(model) {
     };
 }
 
+// Armed non-interactive gate for the resolveAddonOptions prompt sites.
+// `gateProject` is non-null only for runAddMain (which threads its
+// projectName through ctx), so init and direct callers keep their
+// historical missing-value failures byte-identical. Returns the
+// `{ ok: false, nonInteractiveRefusal }` marker for runAddMain to
+// propagate verbatim, or null when the prompt may proceed.
+async function refuseHeadlessAddonPrompt(opts, gateProject, { message, hint }) {
+    if (gateProject === null || gateProject === undefined) return null;
+    const refused = await refuseIfNonInteractive(opts, {
+        message,
+        hint,
+        event: 'add_run',
+        telemetry: { projectName: gateProject },
+        errorCode: 'ADD_NON_INTERACTIVE',
+    });
+    if (!refused) return null;
+    return { ok: false, nonInteractiveRefusal: refused };
+}
+
 // Post-guard option resolution per capability: interactive prompts,
 // auto-detection, and template/env assembly. `ctx` carries
-// `{ cwd, region, isInteractive, heldCatalog }`. Returns
-// `{ ok: true, templateVars, conditionalBlocks, envVars, upsertKeys, meta }`,
-// `{ ok: false, cancelled: true }`, or a structured validation failure.
+// `{ cwd, region, isInteractive, heldCatalog, projectName? }` —
+// `projectName` (runAddMain only) arms the non-interactive gates.
+// Returns `{ ok: true, templateVars, conditionalBlocks, envVars,
+// upsertKeys, meta }`, `{ ok: false, cancelled: true }`,
+// `{ ok: false, nonInteractiveRefusal }` (runAddMain propagates the
+// refused result verbatim), or a structured validation failure.
 export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
     const opts = normalizeOptions(options);
     const context = normalizeOptions(ctx);
@@ -822,6 +844,7 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
     const region = context.region || resolveRegion(opts, cwd);
     const isInteractive = context.isInteractive === true;
     const heldCatalog = context.heldCatalog || null;
+    const gateProject = context.projectName ?? null;
     const upsertKeys = [...(ADDON_UPSERT_KEYS[capability] || [])];
 
     const flagError = validateAddonFlags(capability, opts);
@@ -844,6 +867,11 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
         let selectedInteractively = false;
         let customTypedModel = false;
         if (isInteractive && !explicitModel) {
+            const refused = await refuseHeadlessAddonPrompt(opts, gateProject, {
+                message: `\n✖ add needs a model before scaffolding Bedrock.`,
+                hint: '  Re-run with --model <model-id> to scaffold non-interactively.\n',
+            });
+            if (refused) return refused;
             const catalog = heldCatalog || loadBedrockCatalog({ cachePath: opts.cachePath });
             const providerChoice = await promptBedrockProvider(catalog);
             if (isCancel(providerChoice)) return { ok: false, cancelled: true };
@@ -915,6 +943,11 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
         }
         let selectedInteractively = false;
         if (domain === null) {
+            const refused = await refuseHeadlessAddonPrompt(opts, gateProject, {
+                message: `\n✖ add needs a domain before scaffolding Amazon SES.`,
+                hint: '  Re-run with --domain <domain> to scaffold non-interactively.\n',
+            });
+            if (refused) return refused;
             if (!isInteractive) {
                 return {
                     ok: false,
@@ -997,6 +1030,11 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
         timezone = typeof timezone === 'string' ? timezone.trim() : 'UTC';
 
         if (!schedule && isInteractive) {
+            const refused = await refuseHeadlessAddonPrompt(opts, gateProject, {
+                message: `\n✖ add needs a schedule before scaffolding cron.`,
+                hint: '  Re-run with --schedule <expression> to scaffold non-interactively.\n',
+            });
+            if (refused) return refused;
             const choice = await promptCronSchedule();
             if (isCancel(choice)) return { ok: false, cancelled: true };
             if (choice === CRON_CUSTOM_VALUE) {
@@ -1020,6 +1058,11 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
 
         let cronCommandPrompted = false;
         if (!cronCommand && isInteractive) {
+            const refused = await refuseHeadlessAddonPrompt(opts, gateProject, {
+                message: `\n✖ add needs a command before scaffolding cron.`,
+                hint: '  Re-run with --cmd <command> to scaffold non-interactively.\n',
+            });
+            if (refused) return refused;
             const answer = await promptCronCommand();
             if (isCancel(answer)) return { ok: false, cancelled: true };
             cronCommand = String(answer).trim();
@@ -1327,7 +1370,8 @@ async function runAddMain(input = {}) {
         Boolean(process.stdout?.isTTY)
     );
 
-    const resolved = await resolveAddonOptions(capability, options, { cwd, region, isInteractive, heldCatalog });
+    const resolved = await resolveAddonOptions(capability, options, { cwd, region, isInteractive, heldCatalog, projectName });
+    if (!resolved.ok && resolved.nonInteractiveRefusal) return resolved.nonInteractiveRefusal;
     if (!resolved.ok && resolved.cancelled) return cancelSelection();
     if (!resolved.ok) return failResolved(resolved);
 

@@ -6,6 +6,7 @@ import { SLEEP_STATE_DIRNAME } from './sleep-state.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 import { normalizeOptions } from './args.js';
 import { failCommand, shouldAutoApprove } from './command.js';
+import { resolveHeadless } from './resolvers.js';
 import { trackEvent } from '../core/telemetry.js';
 
 // Shared home for grada provenance metadata: stripping managed markers
@@ -157,7 +158,7 @@ export async function requireManagedTree({
     }
     if (opts.force === true || opts.force === 'true') return { proceed: true, ejected: which };
 
-    if (shouldAutoApprove(opts)) {
+    if (shouldAutoApprove(opts) || resolveHeadless(opts)) {
         trackEvent('managed_tree_refused', { projectName: project, command });
         return {
             proceed: false,

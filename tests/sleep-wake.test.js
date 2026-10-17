@@ -440,16 +440,20 @@ describe('runSleep', () => {
         expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
-    it('guards the default environment: headless requires --yes', async () => {
+    it('guards the default environment: explicit headless auto-approves, interactive still confirms', async () => {
         const dir = makeTmp();
         const { ecsClient, rdsClient } = mockClients({
             ecs: { 'myapp-service': activeService('myapp-service', 1) },
         });
-        const denied = await runSleep({ cwd: dir, projectName: 'myapp', region: 'us-east-2', isHeadless: true, ecsClient, rdsClient });
-        expect(denied.ok).toBe(false);
-        expect(denied.reason).toBe('confirmation-required');
-        expect(exitSpy).toHaveBeenCalledWith(1);
-        expect(ecsClient.send).not.toHaveBeenCalled();
+        // Explicit headless mode is an approval flag under the shared gate
+        // (shouldAutoApprove, matching destroy/apply/gc/eject): the sleep
+        // proceeds without prompting. Implicit headless without flags
+        // still refuses — pinned by the refusal test below.
+        const approved = await runSleep({ cwd: dir, projectName: 'myapp', region: 'us-east-2', isHeadless: true, ecsClient, rdsClient });
+        expect(approved.ok).toBe(true);
+        expect(vi.mocked(confirm)).not.toHaveBeenCalled();
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(ecsClient.send).toHaveBeenCalled();
 
         vi.mocked(confirm).mockResolvedValueOnce(false);
         const declined = await runSleep({ cwd: dir, projectName: 'myapp', region: 'us-east-2', isHeadless: false, ecsClient, rdsClient });
@@ -459,6 +463,25 @@ describe('runSleep', () => {
         const accepted = await runSleep({ cwd: dir, projectName: 'myapp', region: 'us-east-2', isHeadless: false, ecsClient, rdsClient });
         expect(accepted.ok).toBe(true);
         expect(vi.mocked(confirm)).toHaveBeenCalledWith(expect.objectContaining({ initialValue: false }));
+    });
+
+    it('refuses loudly when headless without approval flags instead of abandoning the sleep prompt', async () => {
+        const dir = makeTmp();
+        const { ecsClient, rdsClient } = mockClients({
+            ecs: { 'myapp-service': activeService('myapp-service', 1) },
+        });
+        const result = await runSleep({ cwd: dir, projectName: 'myapp', region: 'us-east-2', ecsClient, rdsClient });
+
+        expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('sleep_run', expect.objectContaining({
+            success: false,
+            error_code: 'SLEEP_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(vi.mocked(confirm)).not.toHaveBeenCalled();
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(rdsClient.send).not.toHaveBeenCalled();
     });
 });
 

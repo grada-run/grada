@@ -3,7 +3,7 @@ import path from 'path';
 import color from 'picocolors';
 import { intro, outro, select, text, cancel, isCancel } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, refuseIfNonInteractive } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, resolveHeadless, readFileSafe, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { findNestedBlock } from '../utils/hcl.js';
@@ -490,14 +490,28 @@ async function runAlertsMain(input = {}) {
     }
 
     const headless = resolveHeadless(options);
-    if (email === undefined && webhook === undefined && !headless) {
-        const prompted = await promptDestinations();
-        if (prompted.cancelled) {
-            cancel('Alerts scaffolding cancelled.');
-            return { ok: false, cancelled: true };
+    if (email === undefined && webhook === undefined) {
+        // One gate covers all three destination prompts (they live in a
+        // single promptDestinations call with no flag-bypass between
+        // them); explicit --email/--webhook flags bypass via the outer
+        // condition, and explicit --headless scaffolds the manual path.
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ alerts needs a destination before scaffolding notifications.`,
+            hint: '  Re-run with --email <address> and/or --webhook <url> to scaffold non-interactively.\n',
+            event: 'alerts_run',
+            telemetry: { projectName },
+            errorCode: 'ALERTS_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
+        if (!headless) {
+            const prompted = await promptDestinations();
+            if (prompted.cancelled) {
+                cancel('Alerts scaffolding cancelled.');
+                return { ok: false, cancelled: true };
+            }
+            email = prompted.email;
+            webhook = prompted.webhook;
         }
-        email = prompted.email;
-        webhook = prompted.webhook;
     }
 
     const alertsPath = path.join(cwd, ALERTS_TF_FILE);

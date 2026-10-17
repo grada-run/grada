@@ -17,6 +17,7 @@ vi.mock('../src/utils/aws.js', () => ({
 
 import { promptStateBucketRecovery, recreateStateBucket } from '../src/utils/recovery.js';
 import { provisionStateBucket, ensureStateBucketExists } from '../src/utils/aws.js';
+import { trackEvent } from '../src/core/telemetry.js';
 import { confirm } from '@clack/prompts';
 
 const tmp = createTmpDirTracker();
@@ -54,6 +55,29 @@ describe('promptStateBucketRecovery', () => {
     it('treats a dismissed prompt as declined', async () => {
         mockConfirm.mockResolvedValueOnce(Symbol('clack:cancel'));
         await expect(promptStateBucketRecovery({})).resolves.toBe(false);
+    });
+
+    it('refuses loudly when headless without approval flags instead of prompting', async () => {
+        // No-op exit so the refusal result returns instead of throwing.
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        try {
+            const result = await promptStateBucketRecovery({ options: {}, projectName: 'myapp' });
+            expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(trackEvent).toHaveBeenCalledWith(
+                'infrastructure_applied',
+                expect.objectContaining({ success: false, error_code: 'APPLY_NON_INTERACTIVE', reason: 'non-interactive' })
+            );
+            expect(confirm).not.toHaveBeenCalled();
+        } finally {
+            exitSpy.mockRestore();
+        }
+    });
+
+    it('still prompts on a TTY without approval flags', async () => {
+        mockConfirm.mockResolvedValueOnce(true);
+        await expect(promptStateBucketRecovery({ options: { isHeadless: false }, projectName: 'myapp' })).resolves.toBe(true);
+        expect(confirm).toHaveBeenCalledTimes(1);
     });
 });
 

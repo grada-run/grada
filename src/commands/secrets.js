@@ -6,7 +6,7 @@ import { spinner, confirm, outro, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 import path from 'path';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand } from '../utils/command.js';
+import { failCommand, refuseIfNonInteractive } from '../utils/command.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
@@ -149,6 +149,44 @@ export function diffSecretsEnvs(localSecrets = {}, remoteSecrets = {}) {
     return { missingLocally, mismatched, untrackedLocally };
 }
 
+// Shared failure tail for push/pull/audit: identical telemetry stamps,
+// not-found guidance, auth branch, and spinner/exit routing, so the
+// three subcommands cannot drift apart again.
+async function handleSecretsCatch({
+    error,
+    event,
+    verb,
+    s,
+    opts,
+    projectName,
+    notFoundMessage,
+    notFoundGuidance,
+    spinnerStopped = false,
+    stackTraceOnTypeError = false,
+}) {
+    await trackFailure(event, {
+        projectName,
+        error_code: error.code || error.name || 'UNKNOWN',
+        error_message: error.message,
+        ...(stackTraceOnTypeError ? { stack_trace: error.name === 'TypeError' ? error.stack : undefined } : {}),
+    });
+    if (error.name === 'ResourceNotFoundException') {
+        s.stop(color.red(notFoundMessage));
+        console.log(color.yellow('\n💡 Next Step:'));
+        for (const line of notFoundGuidance) console.log(line);
+    } else if (handleAuthErrorBranch(error, s, opts)) {
+        return;
+    } else if (spinnerStopped) {
+        // The spinner already stopped, so its stop is a no-op —
+        // route the message through the failure stamp instead.
+        return failCommand({ message: `❌ Failed to ${verb} secrets: ${error.message}`, exitCode: 1 });
+    } else {
+        s.stop(`❌ Failed to ${verb} secrets: ${error.message}`);
+    }
+
+    return failCommand({ exitCode: 1 });
+}
+
 export function resolveEcsCluster(projectName, options = {}) {
     if (typeof options.cluster === 'string' && options.cluster.trim()) return options.cluster.trim();
     if (typeof process.env.ECS_CLUSTER === 'string' && process.env.ECS_CLUSTER.trim()) {
@@ -226,6 +264,14 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     },
                 });
             }
+            const refused = await refuseIfNonInteractive(opts, {
+                message: `\n✖ secrets push needs an .env file before pushing.`,
+                hint: '  Generate the .env file before pushing, or run interactively to create an empty one.\n',
+                event: 'secrets_pushed',
+                telemetry: { projectName: resolvedProjectName },
+                errorCode: 'SECRETS_NON_INTERACTIVE',
+            });
+            if (refused) return refused;
             const confirmed = await confirm({
                 message: `Would you like to create an empty ${resolvedFilePath} file now to get started?`,
             });
@@ -335,6 +381,14 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                 });
                 return { keysChanged: false, restarted: false };
             }
+            const refused = await refuseIfNonInteractive(opts, {
+                message: `\n✖ secrets push needs approval before triggering the ECS restart.`,
+                hint: '  Re-run with --headless to skip the restart non-interactively (values apply on the next deployment), or run interactively to decide.\n',
+                event: 'secrets_pushed',
+                telemetry: { projectName: resolvedProjectName },
+                errorCode: 'SECRETS_NON_INTERACTIVE',
+            });
+            if (refused) return refused;
             const shouldRestart = await confirm({
                 message: 'Keys are unchanged. Trigger a rolling ECS restart to apply new values immediately?',
                 initialValue: false,
@@ -377,24 +431,20 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         return { keysChanged };
 
     } catch (error) {
-        await trackFailure('secrets_pushed', {
+        return handleSecretsCatch({
+            error,
+            event: 'secrets_pushed',
+            verb: 'push',
+            s,
+            opts,
             projectName: resolvedProjectName,
-            error_code: error.code || error.name || 'UNKNOWN',
-            error_message: error.message,
-            stack_trace: error.name === 'TypeError' ? error.stack : undefined
+            notFoundMessage: `❌ Secrets Vault "${secretVaultId(resolvedProjectName)}" does not exist in AWS yet.`,
+            notFoundGuidance: [
+                `Run ${color.cyan('npx --yes grada-run apply')} first to provision the infrastructure and Secrets Manager vault.`,
+                `Once applied, run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} to upload your environment variables.\n`,
+            ],
+            stackTraceOnTypeError: true,
         });
-        if (error.name === 'ResourceNotFoundException') {
-            s.stop(color.red(`❌ Secrets Vault "${secretVaultId(resolvedProjectName)}" does not exist in AWS yet.`));
-            console.log(color.yellow('\n💡 Next Step:'));
-            console.log(`Run ${color.cyan('npx --yes grada-run apply')} first to provision the infrastructure and Secrets Manager vault.`);
-            console.log(`Once applied, run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} to upload your environment variables.\n`);
-        } else if (handleAuthErrorBranch(error, s, opts)) {
-            return;
-        } else {
-            s.stop(`❌ Failed to push secrets: ${error.message}`);
-        }
-
-        return failCommand({ exitCode: 1 });
     }
 }
 
@@ -467,6 +517,14 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             if (isHeadless) {
                 overwrite = true;
             } else {
+                const refused = await refuseIfNonInteractive(opts, {
+                    message: `\n✖ secrets pull needs approval before overwriting local values.`,
+                    hint: '  Re-run with --headless to overwrite non-interactively, or run interactively to review conflicts.\n',
+                    event: 'secrets_pull',
+                    telemetry: { projectName: resolvedProjectName },
+                    errorCode: 'SECRETS_NON_INTERACTIVE',
+                });
+                if (refused) return refused;
                 const answer = await confirm({
                     message: 'Conflicting variables found. Overwrite local values with remote?',
                     initialValue: false,
@@ -512,26 +570,19 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
 
         return { synced: remoteKeys.length, file: resolvedFilePath, overwritten: overwrite, conflicts: mismatched };
     } catch (error) {
-        await trackFailure('secrets_pull', {
+        return handleSecretsCatch({
+            error,
+            event: 'secrets_pull',
+            verb: 'pull',
+            s,
+            opts,
             projectName: resolvedProjectName,
-            error_code: error.code || error.name || 'UNKNOWN',
-            error_message: error.message,
+            notFoundMessage: `❌ No remote secrets found for "${secretVaultId(resolvedProjectName)}".`,
+            notFoundGuidance: [
+                `Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`,
+            ],
+            spinnerStopped: remoteFetched,
         });
-        if (error.name === 'ResourceNotFoundException') {
-            s.stop(color.red(`❌ No remote secrets found for "${secretVaultId(resolvedProjectName)}".`));
-            console.log(color.yellow('\n💡 Next Step:'));
-            console.log(`Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`);
-        } else if (handleAuthErrorBranch(error, s, opts)) {
-            return;
-        } else if (remoteFetched) {
-            // The spinner already stopped, so its stop is a no-op —
-            // route the message through the failure stamp instead.
-            return failCommand({ message: `❌ Failed to pull secrets: ${error.message}`, exitCode: 1 });
-        } else {
-            s.stop(`❌ Failed to pull secrets: ${error.message}`);
-        }
-
-        return failCommand({ exitCode: 1 });
     }
 }
 
@@ -618,21 +669,17 @@ async function auditSecretsMain(envFilePath, projectName, options = {}) {
 
         return { missingLocally, mismatched, untrackedLocally, driftCount };
     } catch (error) {
-        await trackFailure('secrets_audit', {
+        return handleSecretsCatch({
+            error,
+            event: 'secrets_audit',
+            verb: 'audit',
+            s,
+            opts,
             projectName: resolvedProjectName,
-            error_code: error.code || error.name || 'UNKNOWN',
-            error_message: error.message,
+            notFoundMessage: `❌ No remote secrets found for "${secretVaultId(resolvedProjectName)}".`,
+            notFoundGuidance: [
+                `Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`,
+            ],
         });
-        if (error.name === 'ResourceNotFoundException') {
-            s.stop(color.red(`❌ No remote secrets found for "${secretVaultId(resolvedProjectName)}".`));
-            console.log(color.yellow('\n💡 Next Step:'));
-            console.log(`Run ${color.cyan(`npx grada-run secrets push ${resolvedFilePath}`)} first to upload your environment variables.\n`);
-        } else if (handleAuthErrorBranch(error, s, opts)) {
-            return;
-        } else {
-            s.stop(`❌ Failed to audit secrets: ${error.message}`);
-        }
-
-        return failCommand({ exitCode: 1 });
     }
 }

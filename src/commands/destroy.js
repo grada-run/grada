@@ -7,7 +7,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { teardownStateBucket, drainBucketObjects, resolveClient } from '../utils/aws.js';
 import { checkDependency, pollUntil } from '../utils/system.js';
 import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, shouldAutoApprove, refuseIfNonInteractive } from '../utils/command.js';
 import { runTerraformCommand, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, getTerraformStateBuckets, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
 import { classifyTerraformError, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { findDbTarget, dbStatusOf, resolveDbIdentifier, resolveDbClusterIdentifier, generateSnapshotId } from '../utils/rds.js';
@@ -96,6 +96,14 @@ async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy,
 
         if (unlockId && approvedByFlag) return unlockAndRetry('flag');
         if (unlockId && !shouldAutoApprove(options)) {
+            const refused = await refuseIfNonInteractive(options, {
+                message: `\n✖ destroy needs approval to force-unlock the Terraform state lock.`,
+                hint: `  Re-run with --force-unlock ${unlockId} to unlock non-interactively.\n`,
+                event: 'infrastructure_destroyed',
+                telemetry: { projectName: actualProjectName },
+                errorCode: 'DESTROY_NON_INTERACTIVE',
+            });
+            if (refused) return refused;
             const runbook = getRunbook('STATE_LOCK_HELD', { headless: false, lockId });
             console.error(color.red(`✖ ${runbook.message}`));
             console.log(`  ${runbook.hint}`);
@@ -214,12 +222,25 @@ async function destroyStackMain(input = {}) {
     if (dbNeedsProtection && shouldAutoApprove(options)) {
         return failCommand({
             message: `\n✖ Refusing to destroy: database ${dbTarget.id} is still provisioned and --allow-data-loss was not passed.`,
-            hint: `  Re-run with --allow-data-loss to snapshot it first and then destroy, or delete the database by hand.\n`,
+            hint: `  Re-run with --allow-data-loss to destroy without a snapshot, or run interactively (a pre-destroy snapshot is taken first), or delete the database by hand.\n`,
             event: 'infrastructure_destroyed',
             telemetry: { projectName: projectNameForTelemetry, error_code: 'DATA_LOSS_UNCONFIRMED' },
             errorCode: 'DATA_LOSS_UNCONFIRMED',
             reason: 'data-loss-unconfirmed',
         });
+    }
+
+    if (!shouldAutoApprove(options)) {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ destroy needs confirmation before tearing down infrastructure.`,
+            hint: dbNeedsProtection
+                ? '  Re-run with --yes --allow-data-loss to destroy non-interactively (no pre-destroy snapshot), or run interactively to snapshot first.\n'
+                : '  Re-run with --yes to destroy non-interactively.\n',
+            event: 'infrastructure_destroyed',
+            telemetry: { projectName: projectNameForTelemetry },
+            errorCode: 'DESTROY_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
     }
 
     const proceed = shouldAutoApprove(options) ? true : await confirm({
@@ -533,6 +554,16 @@ async function destroyStackMain(input = {}) {
     let deleteS3Bucket = false;
 
     if (bucketName) {
+        if (!shouldAutoApprove(options)) {
+            const refused = await refuseIfNonInteractive(options, {
+                message: `\n✖ destroy needs confirmation before deleting the S3 state bucket.`,
+                hint: '  Re-run with --yes to delete the state bucket non-interactively.\n',
+                event: 'infrastructure_destroyed',
+                telemetry: { projectName: projectNameForTelemetry },
+                errorCode: 'DESTROY_NON_INTERACTIVE',
+            });
+            if (refused) return refused;
+        }
         deleteS3Bucket = shouldAutoApprove(options) ? true : await confirm({
             message: color.yellow(`AWS compute resources destroyed. Do you also want to permanently delete the S3 state bucket?\n  (Select 'No' if you plan to run 'grada apply' later to spin this back up.)`),
             initialValue: false,

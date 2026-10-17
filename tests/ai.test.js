@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { syncAi } from '../src/commands/sync-ai.js';
 import { injectManagedBlock } from '../src/utils/ai-rules.js';
+import { trackEvent } from '../src/core/telemetry.js';
 
 // 1. Mock the interactive prompts to simulate user input
 
@@ -40,8 +41,8 @@ describe('AI Context Synchronization', () => {
         await fs.mkdir('terraform', { recursive: true });
         await fs.writeFile(path.join('terraform', 'main.tf'), 'region = "us-east-2"\nport = "8000"');
 
-        // Execute the CLI command
-        await syncAi();
+        // Execute the CLI command (isHeadless:false simulates the TTY prompt)
+        await syncAi({ isHeadless: false });
 
         // Assert: Read the file back and verify both contents exist
         const finalContent = await fs.readFile('CLAUDE.md', 'utf-8');
@@ -51,6 +52,27 @@ describe('AI Context Synchronization', () => {
 
         // 2. The grada managed block MUST be injected
         expect(finalContent).toContain('grada');
+    });
+
+    it('refuses loudly instead of no-op succeeding without a TTY', async () => {
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            // No isHeadless flag: the VITEST env trips resolveHeadless like
+            // closed stdin would, so the guard must refuse before prompting.
+            await syncAi();
+
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('interactive'));
+            expect(mockMultiselect).not.toHaveBeenCalled();
+            expect(trackEvent).toHaveBeenCalledWith('sync_ai', expect.objectContaining({
+                success: false,
+                error_code: 'SYNC_AI_NON_INTERACTIVE',
+            }));
+        } finally {
+            exitSpy.mockRestore();
+            logSpy.mockRestore();
+        }
     });
 
     it('replaces a legacy markdown block instead of duplicating it', async () => {
@@ -84,5 +106,37 @@ describe('AI Context Synchronization', () => {
         const finalContent = await fs.readFile('FRESH.md', 'utf-8');
         expect(finalContent).toContain('<!-- BEGIN GRADA CONTEXT -->');
         expect(finalContent).toContain('<!-- END GRADA CONTEXT -->');
+    });
+
+    it('migrates a hash-style block to markdown markers instead of duplicating it', async () => {
+        await fs.writeFile(
+            '.windsurfrules',
+            'User notes.\n\n# BEGIN GRADA CONTEXT\nold rules\n# END GRADA CONTEXT\n'
+        );
+        injectManagedBlock('.windsurfrules', 'new rules', true);
+        const finalContent = await fs.readFile('.windsurfrules', 'utf-8');
+        expect(finalContent).toContain('User notes.');
+        expect(finalContent).toContain('<!-- BEGIN GRADA CONTEXT -->');
+        expect(finalContent).toContain('new rules');
+        expect(finalContent).not.toContain('# BEGIN GRADA CONTEXT');
+        expect(finalContent).not.toContain('old rules');
+    });
+
+    it('sync-ai writes windsurf rules with invisible HTML markers', async () => {
+        mockMultiselect.mockResolvedValueOnce(['windsurf']);
+
+        await syncAi({ isHeadless: false });
+
+        const finalContent = await fs.readFile('.windsurfrules', 'utf-8');
+        expect(finalContent).toContain('<!-- BEGIN GRADA CONTEXT -->');
+        expect(finalContent).not.toContain('# BEGIN GRADA CONTEXT');
+    });
+
+    it('all windsurf call sites use markdown markers', async () => {
+        const syncAiSource = await fs.readFile(path.join(originalCwd, 'src', 'commands', 'sync-ai.js'), 'utf-8');
+        const initSource = await fs.readFile(path.join(originalCwd, 'src', 'commands', 'init.js'), 'utf-8');
+        expect(syncAiSource).toContain("'.windsurfrules'), getBaseRules(context), true)");
+        expect(initSource.match(/\.windsurfrules'\), getBaseRules\(aiContext\), true\)/g)).toHaveLength(2);
+        expect(initSource).not.toContain(".windsurfrules'), getBaseRules(aiContext), false)");
     });
 });

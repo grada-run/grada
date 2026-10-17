@@ -148,7 +148,7 @@ describe('Command: rollback (mocked ECS)', () => {
                     : { services: [activeService(12, completedPrimary(12))] };
             }
             if (command instanceof DescribeTaskDefinitionCommand) {
-                return { taskDefinition: { taskDefinitionArn: arn(12), revision: 12, status: 'ACTIVE' } };
+                return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
             }
             if (command instanceof UpdateServiceCommand) return {};
             throw new Error(`unexpected command ${command.constructor.name}`);
@@ -189,7 +189,7 @@ describe('Command: rollback (mocked ECS)', () => {
                 return { services: [activeService(14)] };
             }
             if (command instanceof DescribeTaskDefinitionCommand) {
-                return { taskDefinition: { taskDefinitionArn: arn(12), revision: 12, status: 'ACTIVE' } };
+                return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
             }
             if (command instanceof UpdateServiceCommand) return {};
             throw new Error(`unexpected command ${command.constructor.name}`);
@@ -204,6 +204,71 @@ describe('Command: rollback (mocked ECS)', () => {
             targetRevision: '12',
             skipWait: true,
         });
+        expect(result).toMatchObject({ ok: true, targetTaskDefArn: arn(12), targetRevision: '12' });
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses an explicit revision from a foreign family without touching the service', async () => {
+        const foreignArn = 'arn:aws:ecs:us-east-2:123456789012:task-definition/otherapp-task:3';
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) return { services: [activeService(14)] };
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                return { taskDefinition: { taskDefinitionArn: foreignArn, family: 'otherapp-task', revision: 3, status: 'ACTIVE' } };
+            }
+            if (command instanceof UpdateServiceCommand) return {};
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        await runRollback({ ...baseOptions(), revision: 'otherapp-task:3', ecsClient });
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('otherapp-task'));
+        expect(ecsClient.send.mock.calls.some(([cmd]) => cmd instanceof UpdateServiceCommand)).toBe(false);
+        expect(trackEvent).toHaveBeenCalledWith('rollback_run', {
+            projectName: 'myapp',
+            success: false,
+            error_code: 'REVISION_FAMILY_MISMATCH',
+            reason: 'revision-family-mismatch',
+        });
+    });
+
+    it('names the family mismatch instead of the already-on-revision warning for same-number foreign refs', async () => {
+        const foreignArn = 'arn:aws:ecs:us-east-2:123456789012:task-definition/otherapp-task:14';
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) return { services: [activeService(14)] };
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                return { taskDefinition: { taskDefinitionArn: foreignArn, family: 'otherapp-task', revision: 14, status: 'ACTIVE' } };
+            }
+            if (command instanceof UpdateServiceCommand) return {};
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        await runRollback({ ...baseOptions(), revision: 'otherapp-task:14', ecsClient });
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('otherapp-task'));
+        expect(trackEvent).toHaveBeenCalledWith('rollback_run', expect.objectContaining({
+            error_code: 'REVISION_FAMILY_MISMATCH',
+        }));
+    });
+
+    it('still applies an explicit same-family revision given as family:rev', async () => {
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) {
+                const calls = ecsClient.send.mock.calls.filter(([c]) => c instanceof DescribeServicesCommand).length;
+                return calls <= 1
+                    ? { services: [activeService(14)] }
+                    : { services: [activeService(12, completedPrimary(12))] };
+            }
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
+            }
+            if (command instanceof UpdateServiceCommand) return {};
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        const result = await runRollback({ ...baseOptions(), revision: 'myapp-task:12', ecsClient });
+
         expect(result).toMatchObject({ ok: true, targetTaskDefArn: arn(12), targetRevision: '12' });
         expect(exitSpy).not.toHaveBeenCalled();
     });
@@ -232,7 +297,7 @@ describe('Command: rollback (mocked ECS)', () => {
         expect(result).toMatchObject({ ok: true, targetRevision: '13' });
     });
 
-    it('falls back to CI auto-detection when isHeadless is omitted', async () => {
+    it('CI-inferred headless without flags refuses instead of auto-picking', async () => {
         process.env.CI = 'true';
         const ecsClient = mockClient((command) => {
             if (command instanceof DescribeServicesCommand) {
@@ -252,7 +317,35 @@ describe('Command: rollback (mocked ECS)', () => {
         const result = await runRollback({ ...withoutHeadless, ecsClient });
 
         expect(select).not.toHaveBeenCalled();
-        expect(result).toMatchObject({ ok: true, targetRevision: '13' });
+        expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('rollback_run', expect.objectContaining({
+            error_code: 'ROLLBACK_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(ecsClient.send.mock.calls.some(([cmd]) => cmd instanceof UpdateServiceCommand)).toBe(false);
+    });
+
+    it('refuses inferred-headless rollback without flags instead of auto-picking', async () => {
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) return { services: [activeService(14)] };
+            if (command instanceof ListTaskDefinitionsCommand) {
+                return { taskDefinitionArns: [arn(14), arn(13)] };
+            }
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        const { isHeadless, ...withoutHeadless } = baseOptions();
+        const result = await runRollback({ ...withoutHeadless, ecsClient });
+
+        expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('rollback_run', expect.objectContaining({
+            error_code: 'ROLLBACK_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(select).not.toHaveBeenCalled();
+        expect(ecsClient.send.mock.calls.some(([cmd]) => cmd instanceof UpdateServiceCommand)).toBe(false);
     });
 
     it('interactive mode prompts with shortened image tags and updates with the chosen ARN', async () => {

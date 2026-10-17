@@ -3,12 +3,30 @@ import path from 'path';
 import { confirm, isCancel } from '@clack/prompts';
 import { ensureStateBucketExists } from './aws.js';
 import { parseStateBucketBackend } from './terraform-metadata.js';
+import { refuseIfNonInteractive } from './command.js';
 
 // Asks whether to recreate a missing state bucket and resume
 // provisioning. Returns true when approved. Has no side effects
 // besides the prompt itself — callers own telemetry and the resume.
-export async function promptStateBucketRecovery({ autoApprove = false } = {}) {
+//
+// Non-interactive gate: apply is the sole caller, so the gate lives
+// here (apply context) instead of at a call site. Pass `options` (plus
+// `projectName` for telemetry) and a headless run without approval
+// flags refuses loudly with APPLY_NON_INTERACTIVE — returning the
+// failure result for the caller to propagate — instead of abandoning
+// the prompt. Callers answering boolean keep working unchanged.
+export async function promptStateBucketRecovery({ autoApprove = false, options = null, projectName = null } = {}) {
     if (autoApprove === true || autoApprove === 'true') return true;
+    if (options !== null && options !== undefined) {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ apply needs approval to recreate the missing state bucket and resume provisioning.`,
+            hint: '  Re-run with --auto-approve to recover non-interactively.\n',
+            event: 'infrastructure_applied',
+            telemetry: { projectName },
+            errorCode: 'APPLY_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
+    }
     const shouldRecreate = await confirm({
         message: 'Do you want to automatically recreate the state bucket and resume provisioning?\nPrevious state is unrecoverable — if infrastructure still exists (bucket deleted out-of-band), apply will try to recreate it.',
         initialValue: true,

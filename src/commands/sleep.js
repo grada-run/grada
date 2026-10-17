@@ -5,10 +5,10 @@ import { RDSClient, StopDBInstanceCommand, StopDBClusterCommand } from '@aws-sdk
 import color from 'picocolors';
 import { intro, outro, spinner, confirm, cancel } from '@clack/prompts';
 import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseIfNonInteractive, shouldAutoApprove } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveHeadless, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { findDbTarget } from '../utils/rds.js';
 import { fetchActiveService } from '../utils/ecs.js';
@@ -82,7 +82,6 @@ async function runSleepMain(input = {}) {
     const computeTarget = readTerraformComputeTarget(cwd);
     const isLambda = computeTarget === 'lambda';
     const isStatic = computeTarget === 'static';
-    const headless = resolveHeadless(options);
     const skipDb = options.skipDb === true || options.skipDb === 'true';
     const confirmed = options.yes === true || options.yes === 'true'
         || options.force === true || options.force === 'true';
@@ -173,18 +172,18 @@ async function runSleepMain(input = {}) {
     // Safety guard: sleeping the default (production) environment takes the
     // web service offline, so it needs an explicit confirmation.
     if (target.requiresConfirm && !confirmed) {
-        if (headless) {
-            return failCommand({
-                message: '\n✖ Sleeping the default environment requires confirmation. Re-run with --yes.\n',
+        if (!shouldAutoApprove(options)) {
+            const refused = await refuseIfNonInteractive(options, {
+                message: `\n✖ sleep needs confirmation before putting the default environment to sleep.`,
+                hint: '  Re-run with --yes to sleep non-interactively.\n',
                 event: 'sleep_run',
-                telemetry: { projectName, env_kind: target.envKind },
-                errorCode: 'CONFIRMATION_REQUIRED',
-                reason: 'confirmation-required',
-                resultExtra: { cluster: target.cluster, region },
+                telemetry: { projectName },
+                errorCode: 'SLEEP_NON_INTERACTIVE',
             });
+            if (refused) return refused;
         }
         console.log(color.yellow('\n⚠ This will take the web service offline until you run "grada wake".'));
-        const answer = await confirm({ message: SLEEP_CONFIRM_MESSAGE, initialValue: false });
+        const answer = shouldAutoApprove(options) ? true : await confirm({ message: SLEEP_CONFIRM_MESSAGE, initialValue: false });
         if (answer !== true) {
             cancel('Cancelled. Nothing was changed.');
             return { ok: false, reason: 'cancelled', cluster: target.cluster, region };

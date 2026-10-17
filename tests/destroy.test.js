@@ -134,10 +134,27 @@ describe('Command: destroy (mocked terraform spawn)', () => {
   it('cancels cleanly when the user declines the confirm prompt', async () => {
     writeBackend();
     clack.mockConfirm.mockResolvedValue(false);
-    await expect(destroyStack()).rejects.toMatchObject({ exitCode: 0 });
+    await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 0 });
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(teardownStateBucket).not.toHaveBeenCalled();
     expect(clack.mockCancel).toHaveBeenCalled();
+  });
+
+  it('refuses loudly when headless without approval flags instead of abandoning the confirm prompt', async () => {
+    writeBackend();
+    // No-op exit so the refusal result returns instead of throwing.
+    exitSpy.mockImplementation(() => { });
+    const result = await destroyStack({});
+
+    expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_destroyed',
+      expect.objectContaining({ success: false, error_code: 'DESTROY_NON_INTERACTIVE', reason: 'non-interactive' })
+    );
+    expect(clack.mockConfirm).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(teardownStateBucket).not.toHaveBeenCalled();
   });
 
   it('destroys compute and retains the state bucket when declined', async () => {
@@ -153,7 +170,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       return makeChild({ code: 0, stdout: 'destroy complete' });
     });
 
-    await destroyStack(); // success path calls outro, not process.exit
+    await destroyStack({ isHeadless: false }); // success path calls outro, not process.exit
 
     expect(mockSpawn).toHaveBeenCalledTimes(3);
     expect(teardownStateBucket).not.toHaveBeenCalled();
@@ -172,7 +189,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       .mockResolvedValueOnce(true); // delete bucket
     mockSpawn.mockImplementation(() => makeChild({ code: 0, stdout: 'destroy complete' }));
 
-    await destroyStack();
+    await destroyStack({ isHeadless: false });
 
     expect(teardownStateBucket).toHaveBeenCalledWith('us-east-2', 'delete-me-123');
     expect(trackEvent).toHaveBeenCalledWith(
@@ -188,7 +205,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       makeChild({ code: 1, stderr: 'Error: destroy failed dramatically' })
     );
 
-    await expect(destroyStack()).rejects.toMatchObject({ exitCode: 1 });
+    await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(teardownStateBucket).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_destroyed',
@@ -231,7 +248,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       return makeChild({ code: 0, stdout: 'destroy complete' });
     });
 
-    await destroyStack();
+    await destroyStack({ isHeadless: false });
 
     expect(seen).toEqual(['init', 'show', 'destroy', 'force-unlock', 'destroy']);
     const unlockCall = mockSpawn.mock.calls.find(([, args]) => args[0] === 'force-unlock');
@@ -296,7 +313,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       makeChild({ error: new Error('spawn terraform ENOENT') })
     );
 
-    await expect(destroyStack()).rejects.toMatchObject({ exitCode: 1 });
+    await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_destroyed',
       expect.objectContaining({ success: false })
@@ -313,7 +330,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      await destroyStack();
+      await destroyStack({ isHeadless: false });
       expect(teardownStateBucket).toHaveBeenCalled();
       expect(trackEvent).toHaveBeenCalledWith(
         'infrastructure_destroyed',
@@ -384,7 +401,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['stopped', 'starting', 'available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, isHeadless: false });
 
       expect(rdsClient.seen).toContain('StartDBInstanceCommand');
       expect(rdsClient.seen).not.toContain('StartDBClusterCommand');
@@ -398,7 +415,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'cluster', statuses: ['stopping', 'stopping', 'stopped', 'starting', 'available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, isHeadless: false });
 
       // Start fires only after the settle loop observed `stopped`
       // (describe, describe, describe, start, ...).
@@ -412,7 +429,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['starting', 'available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, isHeadless: false });
 
       expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
       expect(rdsClient.seen).not.toContain('StartDBClusterCommand');
@@ -446,7 +463,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
         }),
       };
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
 
       expect(seen).not.toContain('StartDBInstanceCommand');
       expect(mockSpawn).toHaveBeenCalledTimes(3);
@@ -457,7 +474,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, isHeadless: false });
 
       expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
       expect(clack.mockSpinnerStart).not.toHaveBeenCalledWith('Waking database before destruction...');
@@ -470,7 +487,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       mockSpawn.mockImplementation(() => makeChild({ code: 0, stdout: 'destroy complete' }));
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['stopped'] });
 
-      await expect(destroyStack({ rdsClient, sleepFn: noopSleep, timeoutMs: 0 })).rejects.toMatchObject({ exitCode: 1 });
+      await expect(destroyStack({ rdsClient, sleepFn: noopSleep, timeoutMs: 0, isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
       expect(mockSpawn.mock.calls.filter(([, args]) => args[0] === 'destroy')).toHaveLength(0);
       expect(trackEvent).toHaveBeenCalledWith(
         'infrastructure_destroyed',
@@ -483,7 +500,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['deleting'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, isHeadless: false });
 
       expect(rdsClient.seen).not.toContain('StartDBInstanceCommand');
       expect(rdsClient.seen).not.toContain('CreateDBSnapshotCommand');
@@ -500,7 +517,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'cluster', statuses: ['creating', 'creating', 'available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, isHeadless: false });
 
       expect(rdsClient.seen).not.toContain('StartDBClusterCommand');
       expect(rdsClient.seen).toContain('CreateDBClusterSnapshotCommand');
@@ -516,7 +533,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
 
       const modify = rdsClient.sent.find((c) => c.constructor.name === 'ModifyDBInstanceCommand');
       expect(modify.input).toMatchObject({ DBInstanceIdentifier: expect.any(String), DeletionProtection: false, ApplyImmediately: true });
@@ -533,7 +550,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'cluster', statuses: ['available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
 
       const modify = rdsClient.sent.find((c) => c.constructor.name === 'ModifyDBClusterCommand');
       expect(modify.input).toMatchObject({ DBClusterIdentifier: expect.any(String), DeletionProtection: false, ApplyImmediately: true });
@@ -549,7 +566,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
 
       expect(rdsClient.seen).toContain('CreateDBSnapshotCommand');
       expect(rdsClient.seen).toContain('ModifyDBInstanceCommand');
@@ -569,7 +586,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
         modifyError: Object.assign(new Error('InvalidDBInstanceState'), { name: 'InvalidDBInstanceState' }),
       });
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500 });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
 
       expect(mockSpawn).toHaveBeenCalledTimes(3);
       expect(trackEvent).toHaveBeenCalledWith(
@@ -582,13 +599,13 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       writeBackend();
       confirmDestroy();
       const noDb = scriptedRdsClient({ kind: 'none' });
-      await destroyStack({ rdsClient: noDb, sleepFn: noopSleep, allowDataLoss: true });
+      await destroyStack({ rdsClient: noDb, sleepFn: noopSleep, allowDataLoss: true, isHeadless: false });
       expect(noDb.seen).not.toContain('ModifyDBInstanceCommand');
       expect(noDb.seen).not.toContain('ModifyDBClusterCommand');
 
       const deleting = scriptedRdsClient({ kind: 'instance', statuses: ['deleting'] });
       confirmDestroy();
-      await destroyStack({ rdsClient: deleting, sleepFn: noopSleep, allowDataLoss: true });
+      await destroyStack({ rdsClient: deleting, sleepFn: noopSleep, allowDataLoss: true, isHeadless: false });
       expect(deleting.seen).not.toContain('ModifyDBInstanceCommand');
     });
 
@@ -597,7 +614,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmDestroy();
       const rdsClient = { send: vi.fn(async () => { throw new Error('boom'); }) };
 
-      await destroyStack({ rdsClient, sleepFn: noopSleep, force: true });
+      await destroyStack({ rdsClient, sleepFn: noopSleep, force: true, isHeadless: false });
 
       expect(rdsClient.send).not.toHaveBeenCalled();
       expect(mockSpawn).toHaveBeenCalledTimes(3);
@@ -661,7 +678,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       const lines = [];
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation((...args) => { lines.push(args.join(' ')); });
       try {
-        await expect(destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true })).rejects.toMatchObject({ exitCode: 1 });
+        await expect(destroyStack({ rdsClient, sleepFn: noopSleep, allowDataLoss: true, isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
       } finally {
         consoleSpy.mockRestore();
       }
@@ -708,7 +725,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
         return { deleted: 1100, failed: [] };
       });
 
-      await destroyStack();
+      await destroyStack({ isHeadless: false });
 
       expect(drainBucketObjects).toHaveBeenCalledTimes(1);
       expect(drainBucketObjects).toHaveBeenCalledWith(expect.objectContaining({ bucket: 'myapp-storage-123' }));
@@ -724,7 +741,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       writeBackend();
       confirmAndSucceed('{}');
 
-      await destroyStack();
+      await destroyStack({ isHeadless: false });
 
       expect(drainBucketObjects).not.toHaveBeenCalled();
       expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
@@ -736,7 +753,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmAndSucceed(SHOW_JSON);
       drainBucketObjects.mockRejectedValue(Object.assign(new Error('AccessDenied'), { name: 'AccessDenied' }));
 
-      await expect(destroyStack()).rejects.toMatchObject({ exitCode: 1 });
+      await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
       expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(false);
       expect(trackEvent).toHaveBeenCalledWith(
         'infrastructure_destroyed',
@@ -751,7 +768,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       let logged;
       try {
-        await expect(destroyStack()).rejects.toMatchObject({ exitCode: 1 });
+        await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
         logged = consoleSpy.mock.calls.flat().join('\n');
       } finally {
         consoleSpy.mockRestore();
@@ -769,7 +786,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       confirmAndSucceed(SHOW_JSON);
       drainBucketObjects.mockRejectedValue(Object.assign(new Error('nope'), { name: 'NoSuchBucket' }));
 
-      await destroyStack();
+      await destroyStack({ isHeadless: false });
 
       expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
       expect(exitSpy).not.toHaveBeenCalled();

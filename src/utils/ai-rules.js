@@ -73,9 +73,19 @@ export function injectManagedBlock(filePath, content, isMarkdown = true) {
         // (Markers carry no regex metacharacters, so direct interpolation
         // is safe.)
         const regex = new RegExp(`\\n?(?:${beginMarker}|${legacyBeginMarker})[\\s\\S]*?(?:${endMarker}|${legacyEndMarker})\\n?`);
+        // A file whose marker style changed (e.g. windsurf migrating from
+        // hash to HTML comments) carries the other style's block: replace
+        // that too instead of appending a second block.
+        const otherBegin = isMarkdown ? '# BEGIN GRADA CONTEXT' : '<!-- BEGIN GRADA CONTEXT -->';
+        const otherEnd = isMarkdown ? '# END GRADA CONTEXT' : '<!-- END GRADA CONTEXT -->';
+        const otherLegacyBegin = isMarkdown ? '# BEGIN DEPLOY-STACK CONTEXT' : '<!-- BEGIN DEPLOY-STACK CONTEXT -->';
+        const otherLegacyEnd = isMarkdown ? '# END DEPLOY-STACK CONTEXT' : '<!-- END DEPLOY-STACK CONTEXT -->';
+        const otherRegex = new RegExp(`\\n?(?:${otherBegin}|${otherLegacyBegin})[\\s\\S]*?(?:${otherEnd}|${otherLegacyEnd})\\n?`);
 
         if (regex.test(fileContent)) {
             fileContent = fileContent.replace(regex, block); // Replace our old rules
+        } else if (otherRegex.test(fileContent)) {
+            fileContent = fileContent.replace(otherRegex, block); // Replace the other style's block
         } else {
             fileContent = fileContent.trim() + '\n' + block; // Append to bottom
         }

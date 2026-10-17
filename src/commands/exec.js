@@ -2,7 +2,7 @@ import { ECSClient, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/clie
 import { spawn } from 'child_process';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
-import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
@@ -13,6 +13,7 @@ import {
     printAwsCliGuidance,
     printSessionManagerGuidance,
     printNoTasksGuidance,
+    pickNewestRunningTask,
 } from '../utils/ecs.js';
 
 // Re-exported from the shared ECS module for backward compatibility.
@@ -73,11 +74,11 @@ export async function findRunningTask(ecsClient, { cluster, service }) {
     const taskArns = listResp.taskArns || [];
     if (taskArns.length === 0) return null;
     const descResp = await ecsClient.send(
-        new DescribeTasksCommand({ cluster, tasks: taskArns.slice(0, 1) })
+        new DescribeTasksCommand({ cluster, tasks: taskArns.slice(0, 10) })
     );
-    const tasks = descResp.tasks || [];
-    if (tasks.length === 0) return { taskArn: taskArns[0], containerName: null };
-    return { taskArn: tasks[0].taskArn || taskArns[0], containerName: tasks[0].containers?.[0]?.name || null, task: tasks[0] };
+    const newest = pickNewestRunningTask(descResp.tasks || []);
+    if (!newest) return null;
+    return { taskArn: newest.taskArn || taskArns[0], containerName: newest.containers?.[0]?.name || null, task: newest };
 }
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
@@ -211,27 +212,29 @@ async function runExecMain(input = {}) {
             region,
         });
 
-        await trackSuccess('exec_run', { projectName });
-
-        await new Promise((resolve) => {
+        const { code } = await new Promise((resolve) => {
             const child = spawnImpl('aws', cliArgs, { stdio: 'inherit' });
             child.on('error', (err) => {
                 console.log(color.red(`\n✖ Failed to start AWS CLI: ${err?.message || err}`));
                 console.log(color.dim(`Install help: ${AWS_CLI_INSTALL_URL}`));
                 resolve({ code: 1 });
             });
-            child.on('close', (code) => resolve({ code: code ?? 0 }));
-        }).then(async ({ code }) => {
-            if (code === 0) {
-                outro(color.green('Shell session ended. 👋'));
-            } else {
-                console.log(color.yellow(`\nShell exited with code ${code}.`));
-                console.log(color.dim(`If the connection failed, ensure ECS Exec is enabled (re-run ${color.green('npx grada-run apply')}) and the Session Manager plugin is installed.`));
-                outro(color.yellow('Exec finished.'));
-            }
+            // A null close code means the process died by signal — never
+            // report that as success.
+            child.on('close', (code) => resolve({ code: code ?? 1 }));
         });
 
-        return { ok: true, cluster, service, taskArn, container: resolvedContainer, region };
+        if (code === 0) {
+            outro(color.green('Shell session ended. 👋'));
+            await trackSuccess('exec_run', { projectName, exit_code: 0 });
+        } else {
+            console.log(color.yellow(`\nShell exited with code ${code}.`));
+            console.log(color.dim(`If the connection failed, ensure ECS Exec is enabled (re-run ${color.green('npx grada-run apply')}) and the Session Manager plugin is installed.`));
+            outro(color.yellow('Exec finished.'));
+            await trackFailure('exec_run', { projectName, error_code: 'EXEC_SESSION_FAILED', exit_code: code });
+        }
+
+        return { ok: code === 0, exitCode: code, cluster, service, taskArn, container: resolvedContainer, region };
     } catch (error) {
         if (isAuthError(error)) {
             await trackAwsFailure('exec_run', error, { projectName });

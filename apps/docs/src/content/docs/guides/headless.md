@@ -99,6 +99,18 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - `apply` fails with `PARTIAL_STATE` when the outputs map comes back empty (pass `--allow-partial-outputs` for trees that legitimately declare no outputs).
 - Re-running setup over a multi-entry or non-literal OIDC trust fails with `OIDC_TRUST_WIDENING_REFUSED` when no repo can be determined (pass `--github-repo owner/name` to scope it explicitly, or narrow `terraform/oidc.tf` by hand) — headless never widens such a trust to `repo:*` silently.
 - `secrets pull` fails with `SECRETS_PULL_UNREPRESENTABLE_VALUE` when a vault entry cannot round-trip through `.env` quoting (rename or re-encode the named keys in the vault and retry) — the local file is left untouched rather than corrupted.
+- `sync-ai` fails with `SYNC_AI_NON_INTERACTIVE` without a TTY (assistant selection is prompt-only — run it in a terminal instead of scripting it).
+- `add` fails with `ADD_NON_INTERACTIVE` when an interactive picker would fire with no flag value — Bedrock without `--model`, SES without `--domain`, cron without `--schedule`/`--cmd` (pass the flag to scaffold non-interactively).
+- `alerts` fails with `ALERTS_NON_INTERACTIVE` without `--email`/`--webhook` (pass at least one destination, or run with explicit `--headless` to scaffold the manual-subscribe path).
+- `apply` fails with `APPLY_NON_INTERACTIVE` before any confirmation it cannot answer — provisioning approval (pass `--auto-approve`), missing-state-bucket recovery (same flag), target-switch review (pass `--destroy-previous-target`), and state-lock unlock (pass `--force-unlock <lock-id>`).
+- `destroy` fails with `DESTROY_NON_INTERACTIVE` before teardown, state-bucket deletion, or state-lock unlock without approval (pass `--yes` — plus `--allow-data-loss` with a live database, or `--force-unlock <lock-id>` for a stuck lock).
+- `domain remove` fails with `DOMAIN_NON_INTERACTIVE` without confirmation (pass `--yes`).
+- `eject` fails with `EJECT_NON_INTERACTIVE` before decoupling — or before waking an asleep stack — without approval (pass `--yes`; asleep stacks still need `wake` first or `--force`).
+- `gc` fails with `GC_NON_INTERACTIVE` before deleting without confirmation (pass `--yes`).
+- `init` fails with `INIT_NON_INTERACTIVE` when a bare run in CI/no-TTY would open the setup wizard (re-run with `--headless --framework <id>`, or run interactively in a terminal — approval flags alone never answer setup questions).
+- `rollback` fails with `ROLLBACK_NON_INTERACTIVE` when no revision is given and no TTY can pick one (pass an explicit revision, or `--headless` for the newest previous revision).
+- `secrets` fails with `SECRETS_NON_INTERACTIVE` before prompts it cannot answer — `push` with no `.env` file (generate it first), `push` restart approval (pass `--headless` to defer to the next deploy), `pull` overwrite approval (pass `--headless` to overwrite).
+- `sleep` fails with `SLEEP_NON_INTERACTIVE` before putting the default environment to sleep without confirmation (pass `--yes`).
 - Anything that escapes all of the above (an SDK-internal failure, a bug) is caught by a last-resort handler: exit 1 with a one-line report on stderr — or a parseable `{ok: false, exitCode: 1, error, reason}` envelope on stdout under `--json` — so even unanticipated failures stay machine-readable.
 
 ## Exit codes

@@ -499,6 +499,64 @@ function isSameServerConfig(entry) {
         && entry.args.every((arg, index) => arg === MCP_SERVER_CONFIG.args[index]);
 }
 
+// Editors whose config files are JSONC (comments allowed). A commented
+// file from any other editor is genuinely corrupt.
+const JSONC_EDITORS = new Set(['zed', 'vscode', 'gemini-cli']);
+
+// Strips `//` and `/* */` comments for detection only (never written
+// back): string contents — including `//` inside URLs — are preserved.
+function stripJsonComments(text) {
+    let out = '';
+    let i = 0;
+    let inString = false;
+    let stringQuote = '';
+    while (i < text.length) {
+        const ch = text[i];
+        const next = text[i + 1];
+        if (inString) {
+            out += ch;
+            if (ch === '\\') {
+                out += next || '';
+                i += 2;
+                continue;
+            }
+            if (ch === stringQuote) inString = false;
+            i += 1;
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            inString = true;
+            stringQuote = ch;
+            out += ch;
+            i += 1;
+            continue;
+        }
+        if (ch === '/' && next === '/') {
+            while (i < text.length && text[i] !== '\n') i += 1;
+            continue;
+        }
+        if (ch === '/' && next === '*') {
+            i += 2;
+            while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+            i += 2;
+            continue;
+        }
+        out += ch;
+        i += 1;
+    }
+    return out;
+}
+
+function tryParseJsoncObject(text) {
+    try {
+        const parsed = JSON.parse(stripJsonComments(String(text ?? '')));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
 // Writes the Grada MCP server entry into an editor's config file,
 // preserving every existing key and server. `homeDir` is injectable so
 // tests never touch the real home directory. Never throws and never
@@ -536,6 +594,22 @@ export function installMcpConfig(editor, { homeDir = safeHomedir(), platform = o
             }
         }
     } catch {
+        // A commented file is healthy for JSONC editors: say so and hand
+        // over the exact block to paste instead of misdiagnosing it.
+        if (JSONC_EDITORS.has(normalized) && fsSync.existsSync(target.path)) {
+            const jsonc = tryParseJsoncObject(fsSync.readFileSync(target.path, 'utf-8'));
+            if (jsonc) {
+                const block = JSON.stringify({ grada: { ...MCP_SERVER_CONFIG, args: [...MCP_SERVER_CONFIG.args] } }, null, 4);
+                return {
+                    ok: false,
+                    reason: 'jsonc-config',
+                    errorCode: 'MCP_INSTALL_JSONC_CONFIG',
+                    editor: normalized,
+                    path: target.path,
+                    message: `\n✖ ${target.path} uses JSONC (comments), which grada cannot edit without destroying them — your file is untouched.\nAdd the Grada server by hand under "${target.key}":\n\n${block}\n`,
+                };
+            }
+        }
         return {
             ok: false,
             reason: 'unreadable-config',

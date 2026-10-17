@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest';
-import { stripTerraformMetadata, stripGitignoreMetadata } from '../src/commands/eject.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+// NOTE: helper imports must stay above src imports: vi.mock factories run
+// during module evaluation and need the factories initialized.
+import { mockConfirm } from './helpers/clack.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { ejectStack, stripTerraformMetadata, stripGitignoreMetadata, isGradaBackupName } from '../src/commands/eject.js';
+import { trackEvent } from '../src/core/telemetry.js';
 
 describe('eject metadata stripping', () => {
     it('strips grada headers and tag blocks', () => {
@@ -90,5 +97,55 @@ describe('eject metadata stripping', () => {
             + '# A user comment about grada add workflows.\n';
         expect(stripTerraformMetadata(content)).toBe(content);
         expect(stripGitignoreMetadata('dist/\n')).toBe('dist/\n');
+    });
+});
+
+describe('eject non-interactive gate', () => {
+    const originalCwd = process.cwd();
+    let tmpDir;
+    let exitSpy;
+    let consoleSpy;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eject-gate-test-'));
+        process.chdir(tmpDir);
+        exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        process.chdir(originalCwd);
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('refuses loudly when headless without approval flags instead of abandoning the eject prompt', async () => {
+        const result = await ejectStack({});
+
+        expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('project_ejected', expect.objectContaining({
+            success: false,
+            error_code: 'EJECT_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(mockConfirm).not.toHaveBeenCalled();
+        expect(fs.existsSync(path.join(tmpDir, 'STATE_BUCKET_CLEANUP.md'))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, '.grada'))).toBe(false);
+    });
+});
+
+describe('eject backup purge', () => {
+    it.each([
+        ['terraform.bak.1791725950691', true],
+        ['main.tf.bak.123', true],
+        ['user.bak.notes.txt', false],
+        ['config.bak.json', false],
+        ['file.bak', false],
+        ['notes.txt', false],
+    ])('isGradaBackupName(%s) is %s', (name, expected) => {
+        expect(isGradaBackupName(name)).toBe(expected);
     });
 });

@@ -8,6 +8,7 @@ import {
     hasSessionManagerPlugin,
     fetchActiveService,
     pickRuntimeContainer,
+    pickNewestRunningTask,
     printAwsCliGuidance,
     printSessionManagerGuidance,
     printNoTasksGuidance,
@@ -122,6 +123,26 @@ describe('ecs shared module', () => {
         expect(pickRuntimeContainer(task, 'missing').runtimeId).toBe('rt-redis');
         expect(pickRuntimeContainer({ containers: [{ name: 'only' }] }, 'missing').name).toBe('only');
         expect(pickRuntimeContainer({ containers: [] }, 'missing')).toBeNull();
+    });
+
+    it('pickNewestRunningTask skips non-RUNNING tasks and prefers the latest start', () => {
+        const tasks = [
+            { taskArn: 'old', lastStatus: 'RUNNING', startedAt: new Date('2026-01-01T00:00:00Z') },
+            { taskArn: 'prov', lastStatus: 'PROVISIONING', startedAt: new Date('2026-01-03T00:00:00Z') },
+            { taskArn: 'new', lastStatus: 'RUNNING', startedAt: new Date('2026-01-02T00:00:00Z') },
+        ];
+        expect(pickNewestRunningTask(tasks).taskArn).toBe('new');
+        expect(pickNewestRunningTask(tasks.slice(1, 2))).toBeNull();
+        expect(pickNewestRunningTask([])).toBeNull();
+    });
+
+    it('pickNewestRunningTask excludes UNHEALTHY tasks only when asked', () => {
+        const tasks = [
+            { taskArn: 'sick', lastStatus: 'RUNNING', healthStatus: 'UNHEALTHY', startedAt: new Date('2026-01-02T00:00:00Z') },
+            { taskArn: 'well', lastStatus: 'RUNNING', healthStatus: 'HEALTHY', startedAt: new Date('2026-01-01T00:00:00Z') },
+        ];
+        expect(pickNewestRunningTask(tasks).taskArn).toBe('sick');
+        expect(pickNewestRunningTask(tasks, { excludeUnhealthy: true }).taskArn).toBe('well');
     });
 
     it('pickRuntimeContainer also reads task-definition containerDefinitions', () => {

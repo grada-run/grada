@@ -35,7 +35,7 @@ Without a revision number, you'll see an interactive revision selector:
 
 | Flag | Description |
 | ---- | ----------- |
-| `[revision]` | Task revision to roll back to: a number (`12`), `family:revision` (`myapp-task:12`), or a full task definition ARN. Defaults to the most recent older revision (interactive prompt on a TTY). |
+| `[revision]` | Task revision to roll back to: a number (`12`), `family:revision` (`myapp-task:12`), or a full task definition ARN. Defaults to the most recent older revision (interactive prompt on a TTY). Explicit `family:revision`/ARN input must belong to the service's own family — foreign families are refused (`REVISION_FAMILY_MISMATCH`) rather than re-pointing the service. |
 | `--cluster <name>` | Explicit cluster name override. |
 | `--service <name>` | Explicit service name override. |
 | `--region <region>` | Explicit AWS region override. |
@@ -44,7 +44,7 @@ Without a revision number, you'll see an interactive revision selector:
 
 ## Automation & edge cases
 
-- Headless runs default to the most recent older revision with no prompt. Wrong-target refusals exit 3 (distinct from failure's 1 and strict-skip's 2) so automation can tell them apart. Full catalog: [Headless Mode](/grada/guides/headless/).
+- Headless runs default to the most recent older revision with no prompt. Wrong-target refusals exit 3 (distinct from failure's 1 and strict-skip's 2) so automation can tell them apart. Non-interactive runs with no revision and no TTY fail with `ROLLBACK_NON_INTERACTIVE` (pass a revision). Full catalog: [Headless Mode](/grada/guides/headless/).
 - Inputs resolve automatically: cluster/service from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE`), region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`); `--workspace` targets a PR-preview environment's namespaced service.
 - On an asleep environment, proceeds with a warning (the restore targets stopped services) — `apply` stays gated until you [`wake`](/grada/cli/sleep/).
 

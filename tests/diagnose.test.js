@@ -124,6 +124,49 @@ describe('Command: diagnose', () => {
         }
     });
 
+    it('prints the honest line (not "no events") when the log fetch fails', async () => {
+        mockEcsSend
+            .mockResolvedValueOnce({
+                taskArns: ['arn:aws:ecs:us-east-1:123456789012:task/test-cluster/abc123']
+            })
+            .mockResolvedValueOnce({
+                tasks: [{
+                    taskArn: 'arn:aws:ecs:us-east-1:123456789012:task/test-cluster/abc123',
+                    stoppedReason: 'Essential container in task exited',
+                    stoppedAt: new Date().toISOString(),
+                    containers: [{ name: 'app', exitCode: 1, reason: 'Essential container in task exited' }],
+                }],
+            });
+        const throttle = new Error('Rate exceeded');
+        throttle.name = 'ThrottlingException';
+        mockLogsSend.mockRejectedValue(throttle);
+
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+
+        try {
+            const result = await runDiagnose({
+                cluster: 'test-cluster',
+                region: 'us-east-2',
+                logGroup: '/ecs/test',
+            });
+
+            expect(result.healthy).toBe(false);
+            expect(result.logFetchFailed).toBe(true);
+            const text = output.join('\n');
+            expect(text).toContain('Could not fetch recent logs');
+            expect(text).not.toContain('No recent log events found');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'diagnose_run',
+                expect.objectContaining({ success: true, healthy: false, log_fetch_failed: true })
+            );
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
     it('should report healthy when there are no stopped tasks', async () => {
         mockEcsSend.mockResolvedValueOnce({ taskArns: [] });
 
@@ -738,6 +781,44 @@ describe('Command: diagnose on --target lambda projects', () => {
         const logsClient = { send: vi.fn().mockResolvedValue({ events: [{ message: 'FATAL out of memory' }] }) };
         const result = await runLambdaDiagnose(baseInput({ logsClient }));
         expect(result.healthy).toBe(false);
+    });
+
+    it('reports unhealthy (never healthy) when the log fetch fails', async () => {
+        const throttle = new Error('Rate exceeded');
+        throttle.name = 'ThrottlingException';
+        const logsClient = { send: vi.fn().mockRejectedValue(throttle) };
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+
+        try {
+            const result = await runLambdaDiagnose(baseInput({ logsClient }));
+
+            expect(result).toMatchObject({ healthy: false, logFetchFailed: true });
+            const text = output.join('\n');
+            expect(text).toContain('Could not fetch recent logs');
+            expect(text).not.toContain('No recent log events found');
+            expect(text).not.toContain('Nothing to fix!');
+            expect(trackEvent).toHaveBeenCalledWith('diagnose_run', expect.objectContaining({
+                healthy: false,
+                log_fetch_failed: true,
+                success: true,
+            }));
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it("reports log_source 'log-group' (not the ECS fallback label) when lambda logs load", async () => {
+        const logsClient = { send: vi.fn().mockResolvedValue({ events: [{ message: 'ok line' }] }) };
+
+        await runLambdaDiagnose(baseInput({ logsClient }));
+
+        expect(trackEvent).toHaveBeenCalledWith('diagnose_run', expect.objectContaining({
+            healthy: true,
+            log_source: 'log-group',
+        }));
     });
 
     it('handles missing functions and missing CLIs without throwing', async () => {

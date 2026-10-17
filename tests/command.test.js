@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
 import { mockConsoleTrio } from './helpers/console.js';
-import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall } from '../src/utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive } from '../src/utils/command.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
 
@@ -206,6 +206,62 @@ describe('failAwsError', () => {
         expect(trackEvent).toHaveBeenCalledWith('logs_streamed', expect.objectContaining({
             error_code: 'UNKNOWN',
         }));
+    });
+});
+
+describe('refuseIfNonInteractive', () => {
+    let spies;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        spies = mockConsoleTrio();
+    });
+
+    afterEach(() => {
+        spies.restore();
+    });
+
+    const spec = {
+        message: '\n✖ gc needs approval.',
+        hint: '  Re-run with --yes.',
+        event: 'gc_run',
+        telemetry: { projectName: 'myapp' },
+        errorCode: 'GC_NON_INTERACTIVE',
+    };
+
+    it.each([
+        [{ isHeadless: false }],
+        [{ yes: true }],
+        [{ isHeadless: true }],
+        [{ autoApprove: true }],
+    ])('returns null (proceed) for %j', async (options) => {
+        await expect(refuseIfNonInteractive(options, spec)).resolves.toBeNull();
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses with the named error when headless without approval flags', async () => {
+        const result = await refuseIfNonInteractive({}, spec);
+
+        expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining('needs approval'));
+        expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining('--yes'));
+        expect(trackEvent).toHaveBeenCalledWith('gc_run', expect.objectContaining({
+            success: false,
+            error_code: 'GC_NON_INTERACTIVE',
+        }));
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it('refuses under CI=true without flags and restores the env', async () => {
+        const saved = process.env.CI;
+        process.env.CI = 'true';
+        try {
+            const result = await refuseIfNonInteractive({}, spec);
+            expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        } finally {
+            if (saved === undefined) delete process.env.CI;
+            else process.env.CI = saved;
+        }
     });
 });
 

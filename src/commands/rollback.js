@@ -8,7 +8,7 @@ import {
 import color from 'picocolors';
 import { intro, outro, spinner, select, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failAwsError, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized, refuseIfNonInteractive } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
@@ -196,9 +196,24 @@ async function runRollbackMain(input = {}) {
             }
             targetTaskDefArn = descResp.taskDefinition.taskDefinitionArn;
             targetRevisionNum = String(descResp.taskDefinition.revision);
+            // Explicit family/ARN input escapes the numeric path's forced
+            // family scoping: refuse to re-point the service at a foreign
+            // family's task definition (fail closed when family is absent).
+            if (descResp.taskDefinition.family !== family) {
+                s.stop(color.red('Foreign task definition family.'));
+                return failCommand({
+                    message: `\n✖ Task definition "${targetInput}" belongs to family "${descResp.taskDefinition.family ?? 'unknown'}", not "${family}". Rollback stays within the service's own family.`,
+                    hint: 'List recent revisions with: aws ecs list-task-definitions --family-prefix ' + family + ` --region ${region}\n`,
+                    event: 'rollback_run',
+                    telemetry: { projectName, error_code: 'REVISION_FAMILY_MISMATCH' },
+                    reason: 'revision-family-mismatch',
+                    resultExtra: { cluster, service, region },
+                    exitCode: 1,
+                });
+            }
             // A request for the currently deployed revision warns instead
             // of silently redeploying it.
-            if (Number(targetRevisionNum) === currentRevNum) {
+            if (targetTaskDefArn === currentTaskDefArn) {
                 s.stop(color.yellow('Already on the requested revision.'));
                 trackEvent('rollback_current_revision_warned', { projectName, revision: targetRevisionNum });
                 return failCommand({
@@ -230,6 +245,17 @@ async function runRollbackMain(input = {}) {
                 });
             }
 
+            // Inferred-headless runs (CI, no TTY) refuse instead of
+            // silently auto-picking: an explicit revision (Case A) or an
+            // explicit --headless flag still bypasses this gate.
+            const refused = await refuseIfNonInteractive(options, {
+                message: `\n✖ rollback needs a revision before rolling back.`,
+                hint: '  Re-run with an explicit revision (rollback 12) or --headless to take the newest previous revision non-interactively.\n',
+                event: 'rollback_run',
+                telemetry: { projectName },
+                errorCode: 'ROLLBACK_NON_INTERACTIVE',
+            });
+            if (refused) return refused;
             if (headless) {
                 targetTaskDefArn = pickNewestEligible(eligibleArns);
                 targetRevisionNum = targetTaskDefArn.split(':').pop();

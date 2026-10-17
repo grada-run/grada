@@ -75,7 +75,7 @@ Not sure which to pick? Choose `ecs` for steady or latency-sensitive traffic, lo
 
 ## Automation & edge cases
 
-- Headless runs never prompt — the full automation contract (flags, gates, error codes) lives in [Headless Mode](/grada/guides/headless/).
+- Headless runs never prompt — the full automation contract (flags, gates, error codes) lives in [Headless Mode](/grada/guides/headless/). A bare run in CI/no-TTY fails with `INIT_NON_INTERACTIVE` instead of opening the wizard (re-run with `--headless --framework <id>`).
 - `--offline` scaffolds without AWS calls for template development and CI fixtures: placeholder account IDs plus a printed reconciliation checklist. Reconcile before applying.
 - Detection is read-only and skips secret values entirely; worker dependencies pre-fill the background-worker command.
 - Compose files merge by fixed rules — `build:` service first, then framework-port match, then first non-datastore service; secret-like env vars are withheld with a warning, datastore-only files skip the merge. Full rules: [Docker Compose Support](/grada/guides/docker-compose/).

@@ -14,6 +14,9 @@ export const DEFAULT_BACKUP_POLL_INTERVAL_MS = 5000;
 
 const SNAPSHOT_NOT_FOUND_NAMES = new Set(['DBSnapshotNotFound', 'DBSnapshotNotFoundFault']);
 const CLUSTER_SNAPSHOT_NOT_FOUND_NAMES = new Set(['DBClusterSnapshotNotFound', 'DBClusterSnapshotNotFoundFault']);
+// Snapshot states that never become available: polling past them only
+// wastes the timeout and misreports.
+const TERMINAL_SNAPSHOT_STATUSES = new Set(['failed', 'deleted', 'deleting']);
 
 export function parseDbBackupArgs(argv = []) {
     const args = normalizeArgv(argv);
@@ -191,10 +194,32 @@ async function runDbBackupMain(input = {}) {
                 if (snapshot && snapshot.Status === 'available') {
                     return { done: true, value: snapshot };
                 }
+                // Terminal states never become available: fail fast naming
+                // the actual state instead of waiting out the timeout and
+                // misreporting "still creating".
+                if (snapshot && TERMINAL_SNAPSHOT_STATUSES.has(String(snapshot.Status || '').toLowerCase())) {
+                    return { done: true, value: { terminalFailure: true, status: snapshot.Status } };
+                }
                 s.message(`Waiting for snapshot ${snapshotId}... [${Math.floor(elapsedMs / 1000)}s]`);
                 return { done: false };
             },
         });
+
+        if (outcome.value?.terminalFailure) {
+            const failedStatus = outcome.value.status;
+            s.stop(color.red(`❌ Snapshot ${failedStatus}.`));
+            return failCommand({
+                print: () => {
+                    console.log(color.red(`\n✖ Snapshot ${snapshotId} reached a terminal state (${failedStatus}) and will never become available.`));
+                    console.log('  Check the failure cause in the RDS console, then retry the backup.\n');
+                },
+                event: 'db_backup_run',
+                telemetry: { projectName, waited: true },
+                errorCode: 'SNAPSHOT_FAILED',
+                reason: 'snapshot-failed',
+                resultExtra: { dbIdentifier, region, snapshotId },
+            });
+        }
 
         if (outcome.timedOut) {
             s.stop(color.yellow('Snapshot still creating.'));

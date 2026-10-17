@@ -229,7 +229,7 @@ describe('Secrets Push Command', () => {
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(true);
 
-        const result = await pushSecrets('.env', 'my-project');
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: false });
 
         expect(MockGetSecretValueCommand).toHaveBeenCalledWith({ SecretId: 'my-project-secrets' });
         expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
@@ -253,7 +253,7 @@ describe('Secrets Push Command', () => {
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(false);
 
-        const result = await pushSecrets('.env', 'my-project');
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: false });
 
         expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
             message: 'Keys are unchanged. Trigger a rolling ECS restart to apply new values immediately?',
@@ -325,7 +325,7 @@ describe('Secrets Push Command', () => {
         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
 
         try {
-            await pushSecrets('.env', 'my-project');
+            await pushSecrets('.env', 'my-project', { isHeadless: false });
 
             expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
                 message: expect.stringContaining('Would you like to create an empty .env file'),
@@ -351,7 +351,7 @@ describe('Secrets Push Command', () => {
         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
 
         try {
-            await pushSecrets('.env', 'my-project');
+            await pushSecrets('.env', 'my-project', { isHeadless: false });
 
             expect(mockConfirm).toHaveBeenCalled();
             await expect(fs.readFile('.env', 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
@@ -373,7 +373,7 @@ describe('Secrets Push Command', () => {
         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
 
         try {
-            await pushSecrets('.env', 'my-project');
+            await pushSecrets('.env', 'my-project', { isHeadless: false });
 
             await expect(fs.readFile('.env', 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
             expect(MockSecretsManagerClient).not.toHaveBeenCalled();
@@ -467,7 +467,7 @@ describe('Secrets Pull Command', () => {
         await fs.writeFile('.env', 'API_KEY=local\nLOCAL_ONLY=keep');
         mockConfirm.mockResolvedValueOnce(true);
 
-        await pullSecrets('.env', 'my-project');
+        await pullSecrets('.env', 'my-project', { isHeadless: false });
 
         expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('Overwrite local values with remote'),
@@ -483,13 +483,38 @@ describe('Secrets Pull Command', () => {
         await fs.writeFile('.env', 'API_KEY=local\nLOCAL_ONLY=keep');
         mockConfirm.mockResolvedValueOnce(false);
 
-        const result = await pullSecrets('.env', 'my-project');
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: false });
 
         expect(result.overwritten).toBe(false);
         const content = await fs.readFile('.env', 'utf-8');
         expect(content).toContain('API_KEY="local"');
         expect(content).toContain('NEW_KEY="new"');
         expect(content).toContain('LOCAL_ONLY="keep"');
+    });
+
+    it('refuses loudly when headless without approval flags instead of abandoning the overwrite prompt', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'remote' }) });
+        await fs.writeFile('.env', 'API_KEY=local');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await pullSecrets('.env', 'my-project');
+
+            expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(trackEvent).toHaveBeenCalledWith('secrets_pull', expect.objectContaining({
+                success: false,
+                error_code: 'SECRETS_NON_INTERACTIVE',
+                reason: 'non-interactive',
+            }));
+            expect(mockConfirm).not.toHaveBeenCalled();
+            expect(await fs.readFile('.env', 'utf-8')).toBe('API_KEY=local');
+        } finally {
+            exitSpy.mockRestore();
+            consoleSpy.mockRestore();
+        }
     });
 
     it('auto-overwrites conflicts in headless mode without prompting', async () => {
@@ -700,7 +725,7 @@ describe('Secrets Region Resolution', () => {
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(true);
 
-        const result = await pushSecrets('.env', 'my-project');
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: false });
 
         expect(result).toEqual(expect.objectContaining({ restarted: true }));
         expect(MockECSClient).toHaveBeenCalledWith({ region: 'us-east-2' });

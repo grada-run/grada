@@ -1,6 +1,7 @@
 import color from 'picocolors';
 import { trackEvent, trackFailure, flushTelemetry } from '../core/telemetry.js';
 import { normalizeOptions } from './args.js';
+import { resolveHeadless } from './resolvers.js';
 
 // True when a destructive confirm must be skipped: explicit approval flags
 // (--auto-approve, --yes) or explicit headless mode. Deliberately checks
@@ -23,6 +24,32 @@ export function isProgrammaticCall(options = {}) {
     return [opts.isHeadless, opts.headless, opts.json].some(
         (flag) => flag === true || flag === 'true'
     );
+}
+
+// Non-interactive prompt gate shared by every command. When the caller is
+// headless (explicit flag, CI, or no TTY) but passed no approval flag, an
+// upcoming prompt could only abandon — refuse loudly with a named error
+// instead of silently skipping. Returns the failure result, or null when
+// the command may proceed (approval flags and real TTYs always proceed).
+// Callers place one gate after arg validation, before the first prompt:
+//
+//   const refused = await refuseIfNonInteractive(options, { message, hint, event, telemetry, errorCode });
+//   if (refused) return refused;
+export async function refuseIfNonInteractive(options = {}, spec = {}) {
+    const opts = normalizeOptions(options);
+    if (shouldAutoApprove(opts) || !resolveHeadless(opts)) return null;
+    const { message, hint, event, telemetry, errorCode, resultExtra } = spec;
+    return failCommand({
+        noExit: isProgrammaticCall(opts),
+        message,
+        hint,
+        event,
+        telemetry,
+        errorCode,
+        reason: 'non-interactive',
+        resultExtra,
+        exitCode: 1,
+    });
 }
 
 function paint(tone, fallback) {

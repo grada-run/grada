@@ -176,6 +176,51 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('refuses loudly when inferred-headless without --headless instead of abandoning the wizard', async () => {
+        // Simulate: bare `init` in CI (no TTY, no mode flags). Under vitest
+        // resolveHeadless is true via the environment, matching CI.
+        process.chdir(tmpDir);
+
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy, errorSpy } = spies;
+
+        try {
+            const result = await mainStack({});
+
+            expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(trackEvent).toHaveBeenCalledWith(
+                'project_provisioned',
+                expect.objectContaining({ success: false, error_code: 'INIT_NON_INTERACTIVE', reason: 'non-interactive' })
+            );
+            const output = logSpy.mock.calls.flat().join('\n') + '\n' + errorSpy.mock.calls.flat().join('\n');
+            expect(output).toContain('--headless');
+            expectNoInteractivePrompts();
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('refuses standalone --preconfigured without --headless in CI (flags are only exposed in headless mode)', async () => {
+        // The parser empties headlessOptions unless --headless is passed,
+        // so proceeding would silently ignore --framework/--region. Refuse
+        // and point at the working invocation instead.
+        process.chdir(tmpDir);
+
+        const spies = mockConsoleTrio();
+        const { exitSpy } = spies;
+
+        try {
+            const result = await mainStack({ isPreconfigured: true });
+
+            expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expectNoInteractivePrompts();
+        } finally {
+            spies.restore();
+        }
+    });
+
     it('tolerates null headlessOptions in headless mode', async () => {
         process.chdir(tmpDir);
         const spies = mockConsoleTrio();

@@ -29,6 +29,7 @@ This command accepts no CLI flags. Region, cluster, and log group resolve automa
 
 - Inputs resolve automatically: region from `AWS_REGION`, falling back to `region` in `terraform/main.tf` (default `us-east-2`); cluster and log group from the project name (overridable via `ECS_CLUSTER` / `ECS_LOG_GROUP`); the project name from `app_name` in `terraform/main.tf`, falling back to the directory name.
 - Diagnoses the most recently stopped of up to 100 recent tasks (by container exit time, with fallbacks): stopped reason, failing container, exit code, and how long ago — with up to 50 log lines from the crashed task's own stream first, then the last hour of group-wide events.
+- When the log fetch itself fails (throttling, access errors), says so honestly instead of reporting "no events": Lambda never claims healthy without log evidence, and ECS prints the fetch failure rather than an empty tail.
 - On expired credentials, points to `aws sso login` / `aws configure` and the [AWS credentials guide](/grada/guides/aws-credentials/), then exits 1 instead of throwing.
 
 ## See also

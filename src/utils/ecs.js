@@ -33,6 +33,36 @@ export async function fetchActiveService(ecsClient, clusterName, serviceName) {
     return service;
 }
 
+// `startedAt` is set when the task actually starts running. `createdAt`
+// predates provisioning, so it must never stand in for uptime — a task
+// without `startedAt` has not run yet and fails closed to 0.
+export function taskStartedAtMs(task) {
+    const stamp = task?.startedAt;
+    if (stamp === undefined || stamp === null) return 0;
+    return new Date(stamp).getTime() || 0;
+}
+
+// Newest actually-RUNNING task from a described batch.
+// ListTasks({ desiredStatus: 'RUNNING' }) also returns tasks still
+// PROVISIONING/PENDING toward that goal, and its order is arbitrary —
+// so filter on lastStatus and compare start times instead of trusting
+// position. `excludeUnhealthy` proves service recovery (diagnose); exec
+// keeps unhealthy-but-running tasks (often the debug target).
+export function pickNewestRunningTask(tasks = [], { excludeUnhealthy = false } = {}) {
+    let newest = null;
+    let newestStart = 0;
+    for (const task of tasks || []) {
+        if (task?.lastStatus !== 'RUNNING') continue;
+        if (excludeUnhealthy && task?.healthStatus === 'UNHEALTHY') continue;
+        const started = taskStartedAtMs(task);
+        if (!newest || started > newestStart) {
+            newest = task;
+            newestStart = started;
+        }
+    }
+    return newest;
+}
+
 // Container preference shared by the interactive commands: the expected
 // name first, then the first RUNNING container, then the first entry.
 // Works for both live tasks and task-definition `containerDefinitions`

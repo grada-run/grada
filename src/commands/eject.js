@@ -3,7 +3,7 @@ import path from 'path';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import color from 'picocolors';
 import { trackEvent, flushTelemetry, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, refuseIfNonInteractive, shouldAutoApprove } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import {
     stripTerraformMetadata,
@@ -27,6 +27,12 @@ export function parseEjectArgs(argv = []) {
 
 // Re-exported so existing importers (tests) keep working unchanged.
 export { stripTerraformMetadata, stripGitignoreMetadata };
+
+// Grada's own backups are exactly `<name>.bak.<Date.now()>` — match that
+// shape only so user files merely containing `.bak.` survive the purge.
+export function isGradaBackupName(fileName) {
+    return /^.+\.bak\.\d+$/.test(String(fileName ?? ''));
+}
 
 function collectTerraformFiles(dir, out = []) {
     if (!fs.existsSync(dir)) return out;
@@ -87,6 +93,14 @@ async function ejectStackMain(input = {}) {
                 reason: 'eject-while-asleep',
             });
         }
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ eject needs approval before waking the asleep stack.`,
+            hint: '  Run npx grada-run wake first, or re-run with --force to eject anyway (the ledger migrates to SLEEPING.md).\n',
+            event: 'project_ejected',
+            telemetry: { projectName },
+            errorCode: 'EJECT_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
         const wakeFirst = await confirm({
             message: 'The stack is asleep. Wake it now and continue with eject?',
             initialValue: true,
@@ -118,6 +132,16 @@ async function ejectStackMain(input = {}) {
         await flushTelemetry();
     }
 
+    if (!shouldAutoApprove(options)) {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ eject needs confirmation before decoupling infrastructure from the grada CLI.`,
+            hint: '  Re-run with --yes to eject non-interactively.\n',
+            event: 'project_ejected',
+            telemetry: { projectName },
+            errorCode: 'EJECT_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
+    }
     const shouldEject = shouldAutoApprove(options) ? true : await confirm({
         message: 'Are you sure you want to eject? (This cannot be undone)',
         initialValue: false,
@@ -162,7 +186,7 @@ async function ejectStackMain(input = {}) {
             const files = fs.readdirSync(dir);
             for (const file of files) {
                 const fullPath = path.join(dir, file);
-                if (file.includes('.bak.')) {
+                if (isGradaBackupName(file)) {
                     fs.rmSync(fullPath, { recursive: true, force: true });
                 } else if (fs.statSync(fullPath).isDirectory() && file !== 'node_modules' && file !== '.git') {
                     cleanBackups(fullPath); // Recursively check subdirectories like .github/workflows

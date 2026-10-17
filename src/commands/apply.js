@@ -5,7 +5,7 @@ import color from 'picocolors';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, shouldAutoApprove, refuseIfNonInteractive } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { spawnSync } from 'child_process';
 import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
@@ -69,6 +69,14 @@ async function handleApplyStateLock({ options, tfDir, runTerraform, lockId, proj
 
     if (approvedByFlag) return unlockAndRetry('flag');
     if (!shouldAutoApprove(options)) {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ apply needs approval to force-unlock the Terraform state lock.`,
+            hint: `  Re-run with --force-unlock ${unlockId} to unlock non-interactively.\n`,
+            event: 'infrastructure_applied',
+            telemetry: { projectName },
+            errorCode: 'APPLY_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
         const runbook = getRunbook('STATE_LOCK_HELD', { headless: false, lockId });
         log.error(color.red(`✖ ${runbook.message}`));
         log.message(`  ${runbook.hint}\n`);
@@ -126,6 +134,14 @@ async function enforceTargetSwitchGate({ options, targetDir, tfDir, runTerraform
     }
 
     if (!shouldAutoApprove(options)) {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ apply needs review before destroying the previous compute target (${from} → ${diskTarget}).`,
+            hint: '  Run "cd terraform && terraform plan" to review the destroys, then re-run with --destroy-previous-target.\n',
+            event: 'infrastructure_applied',
+            telemetry: { projectName },
+            errorCode: 'APPLY_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
         log.warn(color.yellow(`⚠ This tree targets "${diskTarget}" but the last apply recorded "${from}". Applying would destroy the previous stack.`));
         await renderSwitchPlan({ runTerraform, tfDir, lifecycleOpts });
         const confirmed = await confirm({
@@ -245,6 +261,14 @@ async function applyStackMain(input = {}) {
         // confirmed it before the lock failure.
         await renderDryRunPreview(detectedConfig, true);
     } else {
+        const refused = await refuseIfNonInteractive(options, {
+            message: `\n✖ apply needs approval before provisioning infrastructure.`,
+            hint: '  Re-run with --auto-approve to apply non-interactively.\n',
+            event: 'infrastructure_applied',
+            telemetry: { projectName: detectedConfig.projectName },
+            errorCode: 'APPLY_NON_INTERACTIVE',
+        });
+        if (refused) return refused;
         const confirmed = await renderDryRunPreview(detectedConfig, false);
         if (!confirmed) {
             cancel('Apply aborted.');
@@ -402,7 +426,11 @@ async function applyStackMain(input = {}) {
 
             trackEvent('recovery_prompted', { type: 'state_bucket_missing' });
 
-            const shouldRecreate = await promptStateBucketRecovery({ autoApprove: shouldAutoApprove(options) });
+            const shouldRecreate = await promptStateBucketRecovery({ autoApprove: shouldAutoApprove(options), options, projectName: actualProjectName });
+
+            // A refused non-interactive run propagates as-is (object
+            // result); otherwise the util answers boolean.
+            if (typeof shouldRecreate === 'object' && shouldRecreate !== null) return shouldRecreate;
 
             if (!shouldRecreate) {
                 return failCommand({

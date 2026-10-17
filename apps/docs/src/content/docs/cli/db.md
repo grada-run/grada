@@ -109,6 +109,8 @@ npx grada-run db backup --no-wait          # return immediately
 | `--id <snapshot-id>` | Custom snapshot id. Defaults to `<db>-manual-YYYYMMDD-HHmmss`. |
 | `--timeout <seconds>` | Give up waiting after this long (default `900`). Creation continues in the background. |
 | `--no-wait` | Return immediately without waiting for the snapshot to become available. |
+
+Snapshots that reach a terminal state (`failed`, `deleted`) fail fast with `SNAPSHOT_FAILED` naming the actual state — only genuine timeouts report "still creating".
 | `--project-name <name>` | Explicit project name override. |
 | `--workspace <name>` | Target a PR-preview environment. |
 | `--db-identifier <id>` | Explicit RDS identifier override (instance or Aurora cluster). |

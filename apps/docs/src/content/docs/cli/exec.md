@@ -36,6 +36,7 @@ Type `exit` to leave the shell.
 ## Automation & edge cases
 
 - Inputs resolve automatically: cluster, service, and container from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE` / `ECS_CONTAINER`), region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`).
+- Attaches to the newest actually-`RUNNING` task (still-provisioning tasks are skipped), and the CLI exits with the session's own exit code — so `exec --command "./migrate.sh" && deploy` gates correctly, and signal-killed sessions report failure instead of success.
 - On expired credentials you get the `aws sso login` / `aws configure` pointer and exit 1 instead of an error dump.
 
 ## Prerequisites

@@ -256,7 +256,7 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
     it('scaffolds alerts.tf and prints manual subscribe steps', async () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir);
-        const result = await runAlerts(alertOptions(dir));
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
 
         expect(result).toMatchObject({ ok: true, action: 'scaffold', file: ALERTS_TF_FILE });
         const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
@@ -272,7 +272,7 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
     it('scaffolds a Lambda Errors alarm on lambda targets', async () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir, { lambda: true, alb: false });
-        const result = await runAlerts(alertOptions(dir));
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
 
         expect(result).toMatchObject({ ok: true, target: 'lambda' });
         const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
@@ -283,7 +283,7 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
     it('scaffolds a CloudFront alarm on static and ensures the us-east-1 alias', async () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir, { staticSite: true, alb: false });
-        const result = await runAlerts(alertOptions(dir));
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
 
         expect(result).toMatchObject({ ok: true, target: 'static' });
         const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
@@ -341,6 +341,22 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         expect(written).toContain('endpoint  = "you@example.com"');
     });
 
+    it('refuses inferred-headless scaffolding without destination flags', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        const result = await runAlerts(alertOptions(dir));
+
+        expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('alerts_run', expect.objectContaining({
+            error_code: 'ALERTS_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(mockSelect).not.toHaveBeenCalled();
+        expect(mockText).not.toHaveBeenCalled();
+        expect(fs.existsSync(path.join(dir, ALERTS_TF_FILE))).toBe(false);
+    });
+
     it('rejects invalid email, webhook, and threshold flags', async () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir);
@@ -355,7 +371,7 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir);
         fs.writeFileSync(path.join(dir, ALERTS_TF_FILE), '# custom\n');
-        const result = await runAlerts(alertOptions(dir));
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
 
         expect(result.ok).toBe(false);
         expect(result.reason).toBe('alerts-file-exists');
@@ -367,7 +383,7 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir);
         fs.writeFileSync(path.join(dir, ALERTS_TF_FILE), '# custom\n');
-        const result = await runAlerts(alertOptions(dir, { force: true }));
+        const result = await runAlerts(alertOptions(dir, { force: true, isHeadless: true }));
 
         expect(result.ok).toBe(true);
         expect(fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8')).toContain('aws_sns_topic');

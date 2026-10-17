@@ -487,12 +487,20 @@ describe('CloudFront patching', () => {
         const patched = patchCloudFrontDomain(patchCloudFrontDomain(CLOUDFRONT_TF, 'example.com'), 'www.example.com');
         const removed = unpatchCloudFrontDomain(patched, 'example.com');
         expect(removed).toContain('aliases = terraform.workspace == "default" ? ["www.example.com"] : []');
-        expect(removed).toContain('cloudfront_default_certificate = true');
-        expect(removed).not.toContain('acm_certificate_arn');
+        // Remaining aliases require an ACM cert: keep the wiring, never the
+        // default certificate (CloudFront rejects that combination).
+        expect(removed).toContain('acm_certificate_arn');
+        expect(removed).not.toContain('cloudfront_default_certificate = true');
         const empty = unpatchCloudFrontDomain(removed, 'www.example.com');
         expect(empty).not.toContain('aliases');
         expect(empty).toContain('cloudfront_default_certificate = true');
         expect(unpatchCloudFrontDomain(CLOUDFRONT_TF, 'example.com')).toContain('cloudfront_default_certificate');
+    });
+
+    it('leaves the content untouched when the domain is not wired', () => {
+        const patched = patchCloudFrontDomain(CLOUDFRONT_TF, 'example.com');
+        expect(unpatchCloudFrontDomain(patched, 'other.com')).toBe(patched);
+        expect(unpatchCloudFrontDomain(CLOUDFRONT_TF, 'other.com')).toBe(CLOUDFRONT_TF);
     });
 
     it('isCloudFrontWired detects the wired state', () => {
@@ -833,6 +841,24 @@ describe('domain remove', () => {
         }));
     });
 
+    it('keeps ACM wiring and warns when hand-added aliases remain', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com', zoneId: 'Z1' });
+        // Simulate a hand-added second alias (add is replace-only).
+        const cloudfrontTfPath = path.join(dir, 'terraform', 'cloudfront.tf');
+        fs.writeFileSync(cloudfrontTfPath, patchCloudFrontDomain(fs.readFileSync(cloudfrontTfPath, 'utf-8'), 'www.example.com'));
+        const result = await runDomain({ cwd: dir, subcommand: 'remove', yes: true });
+        expect(result).toMatchObject({ ok: true, removed: true, domain: 'example.com' });
+        const cloudfront = fs.readFileSync(cloudfrontTfPath, 'utf-8');
+        expect(cloudfront).toContain('www.example.com');
+        expect(cloudfront).toContain('acm_certificate_arn');
+        expect(cloudfront).not.toContain('cloudfront_default_certificate = true');
+        const text = capturedOutput();
+        expect(text).toContain('www.example.com');
+        expect(text).not.toContain('restored to the default certificate');
+    });
+
     it('requires --yes in headless mode', async () => {
         const dir = makeTmp();
         writeCloudfrontTf(dir);
@@ -840,6 +866,21 @@ describe('domain remove', () => {
         const result = await runDomain({ cwd: dir, subcommand: 'remove', isHeadless: true });
         expect(result.ok).toBe(false);
         expect(result.reason).toBe('confirmation-required');
+        expect(fs.existsSync(path.join(dir, 'terraform', 'domain.tf'))).toBe(true);
+    });
+
+    it('refuses inferred-headless remove without flags as non-interactive', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com', zoneId: 'Z1' });
+        const result = await runDomain({ cwd: dir, subcommand: 'remove' });
+        expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('domain_run', expect.objectContaining({
+            error_code: 'DOMAIN_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(vi.mocked(confirm)).not.toHaveBeenCalled();
         expect(fs.existsSync(path.join(dir, 'terraform', 'domain.tf'))).toBe(true);
     });
 

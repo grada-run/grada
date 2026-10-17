@@ -31,7 +31,7 @@ npx grada-run gc --yes
 
 ## Automation & edge cases
 
-- `--yes` is the CI hatch for standard-target deletion; deep findings stay report-only with or without it.
+- `--yes` is the CI hatch for standard-target deletion; deep findings stay report-only with or without it. Non-interactive runs without `--yes` fail with `GC_NON_INTERACTIVE` instead of prompting.
 - Discovery paginates fully, so large accounts are completely scanned.
 - AWS failures print a one-line message with the credentials hint and exit 1 (headless callers get a structured `{ ok: false }` result instead) — never a raw SDK dump.
 
@@ -39,7 +39,7 @@ npx grada-run gc --yes
 
 Deletion requires explicit interactive confirmation (`Are you sure you want to permanently delete these orphaned resources? (y/N)`, defaulting to no), unless `--yes` is passed. Declining or cancelling deletes nothing; finding nothing skips the prompt entirely.
 
-Deep discovery (`--deep`) is strictly read-only: VPCs, secrets, and the state bucket are reported but never deleted, because live infrastructure matches the same name heuristics. Standard-target deletion is scoped to resources tagged `GradaProject = <project-name>` (an exact tag match, not a name-prefix match), so projects sharing one AWS account can never delete each other's resources. The `GradaProject` tag is stamped on every managed resource via `default_tags` at `init` time.
+Deep discovery (`--deep`) is strictly read-only: VPCs, secrets, and the state bucket are reported but never deleted, because live infrastructure matches the same name heuristics. Standard-target deletion is ownership-scoped, never prefix-scoped: untagged images come only from your exact `<project>-repo` ECR repository, and log-group candidates must match your anchored `-pr-<n>` preview shape — foreign lookalikes (`myapp-evil-…`) in a shared account are never proposed. The live log group is always excluded, as are preview groups whose service (ECS) or function (Lambda) still exists; when that liveness check itself fails, no preview groups are proposed at all and `gc` says so.
 
 ## See also
 

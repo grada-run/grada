@@ -33,7 +33,7 @@ npx grada-run destroy --yes --allow-data-loss
 
 ## Automation & edge cases
 
-- Headless runs refuse with `DATA_LOSS_UNCONFIRMED` when a live database exists (pass `--allow-data-loss`); `--force` skips discovery entirely for wedged states. Full catalog: [Headless Mode](/grada/guides/headless/).
+- Headless runs refuse with `DATA_LOSS_UNCONFIRMED` when a live database exists (pass `--allow-data-loss`); `--force` skips discovery entirely for wedged states. Non-interactive runs without approval fail with `DESTROY_NON_INTERACTIVE` (teardown/bucket delete: `--yes`; stuck lock: `--force-unlock <lock-id>`). Full catalog: [Headless Mode](/grada/guides/headless/).
 - `--allow-data-loss` (or the confirmed prompt) also switches deletion protection off via the RDS API before Terraform runs, so protected clusters destroy instead of failing with `DELETION_PROTECTION_ACTIVE`. If the lift fails, destroy warns and proceeds.
 - Transitional databases (`creating`, `backing-up`, `modifying`, …) are waited out on their own settle budget; the run aborts with a retry message if one never becomes ready.
 - The S3 drain covers versions, delete markers, and in-flight uploads past the 1,000-key pagination cap; the state bucket is excluded, and drain failures abort with `BUCKET_DRAIN_FAILED` naming every residual key.

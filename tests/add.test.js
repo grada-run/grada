@@ -1379,7 +1379,7 @@ describe('interactive model selector', () => {
         vi.mocked(select)
             .mockResolvedValueOnce('Anthropic')
             .mockResolvedValueOnce('us.anthropic.claude-haiku-4-5-20251001-v1:0');
-        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true });
+        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true, isHeadless: false });
         expect(result.ok).toBe(true);
         const chosen = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
         expect(fs.readFileSync(path.join(dir, 'terraform', 'bedrock.tf'), 'utf-8')).toContain(`value = "${chosen}"`);
@@ -1392,7 +1392,7 @@ describe('interactive model selector', () => {
         writeMainTf(dir);
         vi.mocked(select).mockResolvedValueOnce(CUSTOM_MODEL_VALUE);
         vi.mocked(text).mockResolvedValueOnce('  us.custom.trimmed-model  ');
-        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true });
+        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true, isHeadless: false });
         expect(result.ok).toBe(true);
         expect(fs.readFileSync(path.join(dir, 'terraform', 'bedrock.tf'), 'utf-8')).toContain('value = "us.custom.trimmed-model"');
     });
@@ -1402,7 +1402,7 @@ describe('interactive model selector', () => {
         writeMainTf(dir);
         vi.mocked(select).mockResolvedValueOnce('Anthropic').mockResolvedValueOnce(CUSTOM_MODEL_VALUE);
         vi.mocked(text).mockResolvedValueOnce('bad model!');
-        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true });
+        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true, isHeadless: false });
         expect(result.ok).toBe(false);
         expect(result.reason).toBe('invalid-model-id');
         expect(exitSpy).toHaveBeenCalledWith(1);
@@ -1413,7 +1413,7 @@ describe('interactive model selector', () => {
         const dir = makeTmp();
         writeMainTf(dir);
         vi.mocked(select).mockResolvedValueOnce(Symbol('clack:cancel'));
-        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true });
+        const result = await runAdd({ cwd: dir, capability: 'ai:bedrock', interactive: true, isHeadless: false });
         expect(result).toEqual({ ok: false, reason: 'cancelled' });
         expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({
             capability: 'ai:bedrock',
@@ -1598,21 +1598,35 @@ describe('email:ses pre-guard validation', () => {
         writeMainTf(dir);
         // No explicit --domain and no domain.tf: the missing domain (not the
         // sender) is reported in headless mode.
-        const result = await runAdd({ cwd: dir, capability: 'email:ses', fromEmail: 'hi@other.com' });
+        const result = await runAdd({ cwd: dir, capability: 'email:ses', fromEmail: 'hi@other.com', isHeadless: false });
         expect(result.ok).toBe(false);
         expect(result.reason).toBe('missing-ses-domain');
     });
 
-    it('fails headless without a domain as MISSING_SES_DOMAIN', async () => {
+    it('fails non-interactively without a domain as MISSING_SES_DOMAIN', async () => {
         const dir = makeTmp();
         writeMainTf(dir);
-        const result = await runAdd({ cwd: dir, capability: 'email:ses' });
+        const result = await runAdd({ cwd: dir, capability: 'email:ses', isHeadless: false });
         expect(result.ok).toBe(false);
         expect(result.reason).toBe('missing-ses-domain');
         expect(exitSpy).toHaveBeenCalledWith(1);
         expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({
             error_code: 'MISSING_SES_DOMAIN',
         }));
+    });
+
+    it('refuses inferred-headless SES without a domain as ADD_NON_INTERACTIVE', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        const result = await runAdd({ cwd: dir, capability: 'email:ses' });
+        expect(result).toMatchObject({ ok: false, reason: 'non-interactive' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({
+            error_code: 'ADD_NON_INTERACTIVE',
+            reason: 'non-interactive',
+        }));
+        expect(vi.mocked(text)).not.toHaveBeenCalled();
+        expect(fs.existsSync(path.join(dir, 'terraform', 'ses.tf'))).toBe(false);
     });
 
     it('rejects wildcard domains for SES identities', async () => {
@@ -1774,7 +1788,7 @@ describe('email:ses interactive prompt', () => {
         const dir = makeTmp();
         writeMainTf(dir);
         vi.mocked(text).mockResolvedValueOnce('prompted.example.com');
-        const result = await runAdd({ cwd: dir, capability: 'email:ses', interactive: true, region: 'us-east-2' });
+        const result = await runAdd({ cwd: dir, capability: 'email:ses', interactive: true, isHeadless: false, region: 'us-east-2' });
         expect(result.ok).toBe(true);
         expect(vi.mocked(text)).toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('Amazon SES'),
@@ -1785,7 +1799,7 @@ describe('email:ses interactive prompt', () => {
         const dir2 = makeTmp();
         writeMainTf(dir2);
         vi.mocked(text).mockResolvedValueOnce(Symbol('clack:cancel'));
-        const cancelled = await runAdd({ cwd: dir2, capability: 'email:ses', interactive: true });
+        const cancelled = await runAdd({ cwd: dir2, capability: 'email:ses', interactive: true, isHeadless: false });
         expect(cancelled).toEqual({ ok: false, reason: 'cancelled' });
         expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({
             capability: 'email:ses', success: false, reason: 'cancelled',
@@ -1951,7 +1965,7 @@ describe('cron interactive prompt', () => {
         writeMainTf(dir);
         vi.mocked(select).mockResolvedValueOnce('rate(15 minutes)');
         vi.mocked(text).mockResolvedValueOnce('node scripts/cleanup.js');
-        const result = await runAdd({ cwd: dir, capability: 'cron', interactive: true, region: 'us-east-2' });
+        const result = await runAdd({ cwd: dir, capability: 'cron', interactive: true, isHeadless: false, region: 'us-east-2' });
         expect(result.ok).toBe(true);
         expect(vi.mocked(select)).toHaveBeenCalledWith(expect.objectContaining({ message: 'Choose a schedule:' }));
         const rendered = fs.readFileSync(path.join(dir, 'terraform', 'cron.tf'), 'utf-8');
@@ -1961,7 +1975,7 @@ describe('cron interactive prompt', () => {
         const dir2 = makeTmp();
         writeMainTf(dir2);
         vi.mocked(select).mockResolvedValueOnce(Symbol('clack:cancel'));
-        const cancelled = await runAdd({ cwd: dir2, capability: 'cron', interactive: true });
+        const cancelled = await runAdd({ cwd: dir2, capability: 'cron', interactive: true, isHeadless: false });
         expect(cancelled).toEqual({ ok: false, reason: 'cancelled' });
         expect(fs.existsSync(path.join(dir2, 'terraform', 'cron.tf'))).toBe(false);
     });
@@ -1971,7 +1985,7 @@ describe('cron interactive prompt', () => {
         writeMainTf(dir);
         vi.mocked(select).mockResolvedValueOnce('__custom__');
         vi.mocked(text).mockResolvedValueOnce('whenever');
-        const result = await runAdd({ cwd: dir, capability: 'cron', interactive: true, region: 'us-east-2' });
+        const result = await runAdd({ cwd: dir, capability: 'cron', interactive: true, isHeadless: false, region: 'us-east-2' });
         expect(result.ok).toBe(false);
         expect(result.reason).toBe('invalid-cron-schedule');
     });

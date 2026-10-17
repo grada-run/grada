@@ -379,7 +379,7 @@ describe('S1: apply while asleep', () => {
         asleepFixture();
         mockConfirm.mockResolvedValueOnce(true);
         const wakeImpl = vi.fn(async () => ({ ok: true }));
-        await applyStack({ wakeImpl });
+        await applyStack({ wakeImpl, isHeadless: false });
         expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('asleep'),
         }));
@@ -391,7 +391,7 @@ describe('S1: apply while asleep', () => {
         asleepFixture();
         mockConfirm.mockResolvedValueOnce(false);
         const wakeImpl = vi.fn(async () => ({ ok: true }));
-        const result = await applyStack({ wakeImpl });
+        const result = await applyStack({ wakeImpl, isHeadless: false });
         expect(result).toMatchObject({ ok: false, reason: 'cancelled' });
         expect(wakeImpl).not.toHaveBeenCalled();
         expect(runTerraformCommand).not.toHaveBeenCalled();
@@ -401,7 +401,7 @@ describe('S1: apply while asleep', () => {
         asleepFixture();
         mockConfirm.mockResolvedValueOnce(true);
         const wakeImpl = vi.fn(async () => ({ ok: false, reason: 'rds-wake-timeout' }));
-        const result = await applyStack({ wakeImpl });
+        const result = await applyStack({ wakeImpl, isHeadless: false });
         expect(result).toMatchObject({ ok: false, reason: 'wake-failed', wakeReason: 'rds-wake-timeout' });
         expect(runTerraformCommand).not.toHaveBeenCalled();
         expect(trackEvent).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
@@ -1093,7 +1093,7 @@ describe('S12: target-switch destroy gate', () => {
         switchFixture();
         mockConfirm.mockResolvedValueOnce(true);
         mockHealthyEcsOutputs();
-        await applyStack({});
+        await applyStack({ isHeadless: false });
         expect(runTerraformCommand).toHaveBeenCalledWith(
             expect.arrayContaining(['plan']),
             expect.anything(),
@@ -1114,7 +1114,7 @@ describe('S12: target-switch destroy gate', () => {
     it('S12 interactive: declining the switch review cancels with zero apply', async () => {
         switchFixture();
         mockConfirm.mockResolvedValueOnce(false);
-        const result = await applyStack({});
+        const result = await applyStack({ isHeadless: false });
         expect(result).toMatchObject({ ok: false, reason: 'cancelled' });
         expect(runTerraformCommand).not.toHaveBeenCalledWith(
             ['apply', '-auto-approve'],
@@ -1187,7 +1187,7 @@ describe('S14: stale state lock', () => {
             applies += 1;
             if (applies === 1) throw new Error(LOCK_STDERR);
         });
-        await applyStack({ runTerraformImpl });
+        await applyStack({ runTerraformImpl, isHeadless: false });
         expect(runTerraformImpl).toHaveBeenCalledWith(
             expect.arrayContaining(['force-unlock', 'abc-123-lock']),
             expect.anything(),
@@ -1403,7 +1403,7 @@ describe('S20: eject asleep preflight', () => {
         mockConfirm.mockResolvedValueOnce(true);
         mockConfirm.mockResolvedValueOnce(true);
         const wakeImpl = vi.fn(async () => ({ ok: true }));
-        await ejectStack({ wakeImpl });
+        await ejectStack({ wakeImpl, isHeadless: false });
         expect(output()).toMatch(/ASLEEP/);
         expect(wakeImpl).toHaveBeenCalled();
         expect(readEjectedMarker(process.cwd())).toMatchObject({ ejectedAt: expect.any(String) });
@@ -1413,7 +1413,7 @@ describe('S20: eject asleep preflight', () => {
         sleptFixture();
         mockConfirm.mockResolvedValueOnce(false);
         const wakeImpl = vi.fn(async () => ({ ok: true }));
-        await ejectStack({ wakeImpl });
+        await ejectStack({ wakeImpl, isHeadless: false });
         expect(wakeImpl).not.toHaveBeenCalled();
         expect(readEjectedMarker(process.cwd())).toBeNull();
         expect(exitSpy).toHaveBeenCalledWith(0);
@@ -1467,7 +1467,7 @@ describe('S21: eject emits bucket cleanup', () => {
         process.chdir(dir);
         mockConfirm.mockResolvedValueOnce(true);
         mockConfirm.mockResolvedValueOnce(true);
-        await ejectStack({ wakeImpl: vi.fn(async () => ({ ok: true })) });
+        await ejectStack({ wakeImpl: vi.fn(async () => ({ ok: true })), isHeadless: false });
         const cleanup = fs.readFileSync(path.join(dir, 'STATE_BUCKET_CLEANUP.md'), 'utf-8');
         expect(cleanup).toContain('start-db-cluster');
         expect(cleanup).toContain('myapp-db-cluster');
@@ -1558,6 +1558,8 @@ describe('S24: destroy data-loss gate', () => {
             error_code: 'DATA_LOSS_UNCONFIRMED',
         }));
         expect(output()).toContain('--allow-data-loss');
+        expect(output()).toContain('destroy without a snapshot');
+        expect(output()).not.toContain('snapshot it first');
     });
 
     it('headless destroy with --allow-data-loss passes the var and skips the snapshot', async () => {
@@ -1575,7 +1577,7 @@ describe('S24: destroy data-loss gate', () => {
         dbDestroyFixture();
         mockConfirm.mockResolvedValueOnce(true);
         const rdsClient = rdsAvailableInstanceClient();
-        await destroyModule.destroyStack({ rdsClient });
+        await destroyModule.destroyStack({ rdsClient, isHeadless: false });
         expect(output()).toContain('myapp-db');
         const snapshotCalls = rdsClient.send.mock.calls.filter(([c]) => c.constructor.name === 'CreateDBSnapshotCommand');
         expect(snapshotCalls).toHaveLength(1);
@@ -1647,7 +1649,7 @@ describe('S25: gc scoping', () => {
             ],
         });
         mockConfirm.mockResolvedValueOnce(true);
-        const result = await runGc({ cwd: dir, projectName: 'myapp', region: 'us-east-2', ecrClient, logsClient, ec2Client });
+        const result = await runGc({ cwd: dir, projectName: 'myapp', region: 'us-east-2', ecrClient, logsClient, ec2Client, isHeadless: false });
         expect(result.unattachedEips.map((e) => e.AllocationId)).toEqual(['eip-own']);
         const released = ec2Client.send.mock.calls.filter(([c]) => c.constructor.name === 'ReleaseAddressCommand');
         expect(released.map(([c]) => c.input.AllocationId)).toEqual(['eip-own']);
@@ -1833,7 +1835,7 @@ describe('S30: managed-tree guard', () => {
         ejectedFixture();
         await ejectQuietly({ yes: true });
         mockConfirm.mockResolvedValueOnce(true);
-        await applyStack({});
+        await applyStack({ isHeadless: false });
         expect(output()).toMatch(/eject/i);
         expect(runTerraformCommand).toHaveBeenCalled();
     });
@@ -1928,7 +1930,7 @@ describe('R10: managed-tree guard units', () => {
     it('interactive decline cancels cleanly', async () => {
         const dir = ejectedDir();
         mockConfirm.mockResolvedValueOnce(false);
-        const result = await requireManagedTree({ cwd: dir, command: 'sleep', options: {} });
+        const result = await requireManagedTree({ cwd: dir, command: 'sleep', options: { isHeadless: false } });
         expect(result).toMatchObject({ proceed: false, result: { ok: false, reason: 'cancelled' } });
         expect(exitSpy).toHaveBeenCalledWith(0);
         expect(trackEvent).toHaveBeenCalledWith('managed_tree_refused', expect.objectContaining({ command: 'sleep' }));
@@ -2037,7 +2039,7 @@ describe('S33: current-revision rollback', () => {
                     };
                 }
                 if (name === 'DescribeTaskDefinitionCommand') {
-                    return { taskDefinition: { taskDefinitionArn: arn(5), revision: 5, status: 'ACTIVE' } };
+                    return { taskDefinition: { taskDefinitionArn: arn(5), family: 'myapp-task', revision: 5, status: 'ACTIVE' } };
                 }
                 throw new Error(`unexpected ECS command: ${name}`);
             }),

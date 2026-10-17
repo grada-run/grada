@@ -23,12 +23,12 @@ The optional positional argument is the path of the env file to push (resolved r
 **Smart follow-up based on what changed:**
 
 - **Key names changed** (added/removed variables) — commit `terraform/secret_keys.json` and push to GitHub to trigger a deployment with the new variables. The ECS task definition is rebuilt from the updated key map.
-- **Only values changed** (same key set) — the CLI offers a rolling ECS restart (`forceNewDeployment`) so running tasks pick up the new values immediately, no redeploy required. With `--headless` or `CI=true` the prompt is skipped automatically (values apply on the next deployment or restart) so pipelines never hang.
+- **Only values changed** (same key set) — the CLI offers a rolling ECS restart (`forceNewDeployment`) so running tasks pick up the new values immediately, no redeploy required. With explicit `--headless` the prompt is skipped automatically (values apply on the next deployment or restart) so pipelines never hang.
 - **Lambda target** — new values apply to fresh invocations automatically; no restart is offered or needed.
 
 Region resolution is shared across all three commands (see Prerequisites), so they work even when no region is configured. Exits non-zero on failure.
 
-**Missing env file:** if the file does not exist, `push` does not throw. Interactively it asks `Would you like to create an empty <file> file now to get started?` — confirming creates the file (with parent directories) so you can fill it in and re-run; declining leaves everything untouched. With `--headless` or `CI=true` it prints a pointer to generate the file first and exits 1.
+**Missing env file:** if the file does not exist, `push` does not throw. Interactively it asks `Would you like to create an empty <file> file now to get started?` — confirming creates the file (with parent directories) so you can fill it in and re-run; declining leaves everything untouched. Non-interactive runs print a pointer to generate the file first and exit 1 (`SECRETS_NON_INTERACTIVE`).
 
 ## secrets pull
 
@@ -43,7 +43,7 @@ npx grada-run secrets pull .env
 
 - Remote keys are appended after your existing local keys; existing local order is preserved.
 - Local-only variables are kept — pull never deletes them.
-- If a key exists locally and remotely with different values, the CLI asks `Conflicting variables found. Overwrite local values with remote?` In `--headless` mode it overwrites automatically.
+- If a key exists locally and remotely with different values, the CLI asks `Conflicting variables found. Overwrite local values with remote?` Explicit `--headless` overwrites automatically; other non-interactive runs fail with `SECRETS_NON_INTERACTIVE` instead of prompting.
 
 Values are written one per line with the quoting style (double, single, or backtick) chosen per value so the file parses back byte-identical — quotes, backslashes, and multiline values survive the round trip. Entries that cannot be represented in `.env` quoting abort the pull loudly, naming the offending keys, instead of writing a corrupted file. Exits non-zero on failure (e.g. no remote vault yet — run `secrets push` first).
 
@@ -70,6 +70,10 @@ Ends with `Audit complete. N drifted variable(s) found.`
 ## A note on `terraform/secret_keys.json`
 
 This file contains **key names only** (e.g. `["API_KEY"]`), never values — it is safe to commit, and it **must** be committed: Terraform reads it during deployment to map each key into your ECS task definition.
+
+## Automation & edge cases
+
+- Non-interactive runs fail with `SECRETS_NON_INTERACTIVE` instead of prompting: `push` restart approval (pass `--headless` to defer to the next deploy). Full catalog: [Headless Mode](/grada/guides/headless/).
 
 ## See also
 

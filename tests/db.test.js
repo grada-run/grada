@@ -2388,6 +2388,22 @@ describe('Command: db backup (mocked AWS)', () => {
         expect(result.status).toBe('available');
     });
 
+    it('fails fast when the snapshot reaches a terminal failure state', async () => {
+        const rdsClient = mockRdsBackupClient({
+            snapshotScript: [
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'failed' }] },
+            ],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient, timeoutMs: 50 }));
+        expect(result.reason).toBe('snapshot-failed');
+        expect(result.snapshotId).toBe('s1');
+        expect(rdsClient.described.length).toBeLessThanOrEqual(2);
+        const text = stripVTControlCharacters(output.join('\n'));
+        expect(text).toContain('failed');
+        expect(text).not.toContain('continues in the background');
+    });
+
     it('fails on timeout while creation continues in the background', async () => {
         const rdsClient = mockRdsBackupClient({
             snapshotScript: Array.from({ length: 50 }, () => ({ snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating' }] })),

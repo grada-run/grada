@@ -94,6 +94,28 @@ vi.mock('@aws-sdk/client-ec2', () => ({
     DescribeVpcsCommand: MockDescribeVpcsCommand,
 }));
 
+// --- Mock AWS SDK: ECS (preview liveness only) ---
+const { mockEcsSend, MockECSClient, MockListServicesCommand } = vi.hoisted(() => {
+    const send = vi.fn();
+    const makeCommand = (name) =>
+        vi.fn(function (input) {
+            this.commandName = name;
+            Object.assign(this, input);
+        });
+    return {
+        mockEcsSend: send,
+        MockECSClient: vi.fn(function () {
+            this.send = send;
+        }),
+        MockListServicesCommand: makeCommand('ListServicesCommand'),
+    };
+});
+
+vi.mock('@aws-sdk/client-ecs', () => ({
+    ECSClient: MockECSClient,
+    ListServicesCommand: MockListServicesCommand,
+}));
+
 // --- Mock AWS SDK: Secrets Manager (deep scan only) ---
 const { mockSecretsSend, MockSecretsClient, MockListSecretsCommand } = vi.hoisted(() => {
     const send = vi.fn();
@@ -124,14 +146,13 @@ function setupMixedDiscoveryFixtures() {
         if (cmd instanceof MockDescribeRepositoriesCommand) {
             return {
                 repositories: [
-                    { repositoryName: `${PROJECT}-web` },
-                    { repositoryName: `${PROJECT}-worker` },
+                    { repositoryName: `${PROJECT}-repo` },
                     { repositoryName: 'unrelated-repo' },
                 ],
             };
         }
         if (cmd instanceof MockDescribeImagesCommand) {
-            if (cmd.repositoryName === `${PROJECT}-web`) {
+            if (cmd.repositoryName === `${PROJECT}-repo`) {
                 return {
                     imageDetails: [
                         { imageDigest: 'sha256:tagged', imageTags: ['latest'] },
@@ -140,7 +161,7 @@ function setupMixedDiscoveryFixtures() {
                     ],
                 };
             }
-            return { imageDetails: [{ imageDigest: 'sha256:worker-tagged', imageTags: ['v1'] }] };
+            return { imageDetails: [] };
         }
         if (cmd instanceof MockBatchDeleteImageCommand) return { imageIds: cmd.imageIds };
         throw new Error(`Unexpected ECR command: ${cmd?.commandName}`);
@@ -171,6 +192,11 @@ function setupMixedDiscoveryFixtures() {
         }
         if (cmd instanceof MockReleaseAddressCommand) return {};
         throw new Error(`Unexpected EC2 command: ${cmd?.commandName}`);
+    });
+
+    mockEcsSend.mockImplementation(async (cmd) => {
+        if (cmd instanceof MockListServicesCommand) return { serviceArns: [] };
+        throw new Error(`Unexpected ECS command: ${cmd?.commandName}`);
     });
 }
 
@@ -239,7 +265,7 @@ describe('gc: dry-run discovery', () => {
             output.push(args.join(' '));
         });
         try {
-            const result = await runGc({ projectName: PROJECT, region: 'us-east-2' });
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
             expect(result.untaggedImages).toHaveLength(2);
             expect(result.orphanedLogGroups).toHaveLength(2);
             expect(result.unattachedEips).toHaveLength(1);
@@ -254,22 +280,38 @@ describe('gc: dry-run discovery', () => {
         }
     });
 
-    it('ignores repos outside the project prefix', async () => {
-        const ecrClient = { send: mockEcrSend };
-        const logsClient = { send: mockLogsSend };
-        const ec2Client = { send: mockEc2Send };
-        const result = await discoverOrphanedResources({ ecrClient, logsClient, ec2Client, projectName: PROJECT });
-        expect(result.untaggedImages.every((i) => i.repositoryName.startsWith(`${PROJECT}-`))).toBe(true);
-        expect(result.untaggedImages).toHaveLength(2);
+    it('ignores lookalike repos outside the exact project repo', async () => {
+        const ecrSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeRepositoriesCommand) {
+                return {
+                    repositories: [
+                        { repositoryName: `${PROJECT}-repo` },
+                        { repositoryName: `${PROJECT}-evil-repo` },
+                    ],
+                };
+            }
+            if (cmd instanceof MockDescribeImagesCommand) {
+                return { imageDetails: [{ imageDigest: `sha256:orphan-${cmd.repositoryName}` }] };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources({
+            ecrClient: { send: ecrSend },
+            logsClient: { send: mockLogsSend },
+            ec2Client: { send: mockEc2Send },
+            projectName: PROJECT,
+        });
+        expect(result.untaggedImages).toHaveLength(1);
+        expect(result.untaggedImages[0].repositoryName).toBe(`${PROJECT}-repo`);
     });
 
     it('follows nextToken through paginated ECR responses', async () => {
         const ecrSend = vi.fn(async (cmd) => {
             if (cmd instanceof MockDescribeRepositoriesCommand) {
                 if (cmd.nextToken === undefined) {
-                    return { repositories: [{ repositoryName: `${PROJECT}-web` }], nextToken: 'repos-page-2' };
+                    return { repositories: [{ repositoryName: `${PROJECT}-repo` }], nextToken: 'repos-page-2' };
                 }
-                return { repositories: [{ repositoryName: `${PROJECT}-worker` }] };
+                return { repositories: [{ repositoryName: `${PROJECT}-evil-repo` }] };
             }
             if (cmd instanceof MockDescribeImagesCommand) {
                 if (cmd.nextToken === undefined) {
@@ -285,11 +327,152 @@ describe('gc: dry-run discovery', () => {
             ec2Client: { send: mockEc2Send },
             projectName: PROJECT,
         });
-        expect(result.untaggedImages).toHaveLength(4);
+        expect(result.untaggedImages).toHaveLength(2);
         const repoCalls = ecrSend.mock.calls.filter((call) => call[0] instanceof MockDescribeRepositoriesCommand);
         expect(repoCalls).toHaveLength(2);
         const imageCalls = ecrSend.mock.calls.filter((call) => call[0] instanceof MockDescribeImagesCommand);
-        expect(imageCalls).toHaveLength(4);
+        expect(imageCalls).toHaveLength(2);
+        expect(imageCalls.every(([call]) => call.repositoryName === `${PROJECT}-repo`)).toBe(true);
+    });
+
+    it('excludes foreign-project lookalike log groups', async () => {
+        const logsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeLogGroupsCommand) {
+                return {
+                    logGroups: [
+                        { logGroupName: `/ecs/${PROJECT}-evil-pr-2` },
+                        { logGroupName: `/ecs/${PROJECT}-pr-123` },
+                    ],
+                };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources({
+            ecrClient: { send: mockEcrSend },
+            logsClient: { send: logsSend },
+            ec2Client: { send: mockEc2Send },
+            projectName: PROJECT,
+        });
+        expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/ecs/${PROJECT}-pr-123`]);
+    });
+
+    it('excludes the live group on suffixed ECS trees', async () => {
+        const logsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeLogGroupsCommand) {
+                return {
+                    logGroups: [
+                        { logGroupName: `/ecs/${PROJECT}-a1b2c3` },
+                        { logGroupName: `/ecs/${PROJECT}-pr-123-a1b2c3` },
+                    ],
+                };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources({
+            ecrClient: { send: mockEcrSend },
+            logsClient: { send: logsSend },
+            ec2Client: { send: mockEc2Send },
+            projectName: PROJECT,
+            resourceSuffix: '-a1b2c3',
+            excludeLogGroup: `/ecs/${PROJECT}-a1b2c3`,
+        });
+        expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/ecs/${PROJECT}-pr-123-a1b2c3`]);
+    });
+
+    it('honors the precomputed live-preview set during discovery', async () => {
+        const logsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeLogGroupsCommand) {
+                return {
+                    logGroups: [
+                        { logGroupName: `/ecs/${PROJECT}-pr-123` },
+                        { logGroupName: `/ecs/${PROJECT}-pr-456` },
+                    ],
+                };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources({
+            ecrClient: { send: mockEcrSend },
+            logsClient: { send: logsSend },
+            ec2Client: { send: mockEc2Send },
+            projectName: PROJECT,
+            livePreviewGroups: new Set([`/ecs/${PROJECT}-pr-123`]),
+        });
+        expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/ecs/${PROJECT}-pr-456`]);
+    });
+
+    it('proposes no preview groups when liveness is unknown', async () => {
+        const logsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeLogGroupsCommand) {
+                return { logGroups: [{ logGroupName: `/ecs/${PROJECT}-pr-123` }] };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources({
+            ecrClient: { send: mockEcrSend },
+            logsClient: { send: logsSend },
+            ec2Client: { send: mockEc2Send },
+            projectName: PROJECT,
+            previewLivenessUnknown: true,
+        });
+        expect(result.orphanedLogGroups).toHaveLength(0);
+    });
+
+    it('excludes log groups of running preview services end to end', async () => {
+        mockEcsSend.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockListServicesCommand) {
+                expect(cmd.cluster).toBe(`${PROJECT}-cluster`);
+                return { serviceArns: [`arn:aws:ecs:us-east-2:123:service/${PROJECT}-cluster/${PROJECT}-pr-123-service`] };
+            }
+            throw new Error('unexpected');
+        });
+        clack.mockConfirm.mockResolvedValue(false);
+        const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
+        expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/ecs/${PROJECT}-pr-456`]);
+    });
+
+    it('never proposes the live group on suffixed ECS trees end to end', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-ecs-suffix-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'main.tf'),
+                'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\nresource "aws_ecs_service" "app" {}\n'
+            );
+            mockLogsSend.mockImplementation(async (cmd) => {
+                if (cmd instanceof MockDescribeLogGroupsCommand) {
+                    return {
+                        logGroups: [
+                            { logGroupName: `/ecs/${PROJECT}-a1b2c3` },
+                            { logGroupName: `/ecs/${PROJECT}-pr-9-a1b2c3` },
+                        ],
+                    };
+                }
+                if (cmd instanceof MockDeleteLogGroupCommand) return {};
+                throw new Error(`Unexpected Logs command: ${cmd?.commandName}`);
+            });
+            clack.mockConfirm.mockResolvedValue(false);
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', cwd: dir, isHeadless: false });
+            expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/ecs/${PROJECT}-pr-9-a1b2c3`]);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('fails closed on preview groups (with a warning) when the service scan throws', async () => {
+        mockEcsSend.mockRejectedValue(new Error('throttled'));
+        clack.mockConfirm.mockResolvedValue(false);
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
+            expect(result.orphanedLogGroups).toHaveLength(0);
+            expect(output.join('\n')).toContain('could not be verified');
+        } finally {
+            consoleSpy.mockRestore();
+        }
     });
 });
 
@@ -298,7 +481,7 @@ describe('gc: safety guards', () => {
         clack.mockConfirm.mockResolvedValue(false);
         const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
         try {
-            const result = await runGc({ projectName: PROJECT, region: 'us-east-2' });
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
             expect(clack.mockConfirm).toHaveBeenCalledTimes(1);
             expect(result.deleted).toBe(false);
             expect(deleteCommandCalls()).toBe(0);
@@ -312,7 +495,7 @@ describe('gc: safety guards', () => {
         clack.mockConfirm.mockResolvedValue(Symbol.for('clack:cancel'));
         const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
         try {
-            const result = await runGc({ projectName: PROJECT, region: 'us-east-2' });
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
             expect(result.deleted).toBe(false);
             expect(deleteCommandCalls()).toBe(0);
         } finally {
@@ -324,13 +507,13 @@ describe('gc: safety guards', () => {
         clack.mockConfirm.mockResolvedValue(true);
         const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
         try {
-            const result = await runGc({ projectName: PROJECT, region: 'us-east-2' });
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
             expect(result.deleted).toBe(true);
             expect(result.deletedImages).toBe(2);
             expect(result.deletedLogGroups).toBe(2);
             expect(result.releasedEips).toBe(1);
             expect(MockBatchDeleteImageCommand).toHaveBeenCalledWith(
-                expect.objectContaining({ repositoryName: `${PROJECT}-web` })
+                expect.objectContaining({ repositoryName: `${PROJECT}-repo` })
             );
             expect(MockDeleteLogGroupCommand).toHaveBeenCalledWith(
                 expect.objectContaining({ logGroupName: `/ecs/${PROJECT}-pr-123` })
@@ -342,6 +525,26 @@ describe('gc: safety guards', () => {
             const releasedIds = MockReleaseAddressCommand.mock.calls.map((c) => c[0].AllocationId);
             expect(releasedIds).not.toContain('eipalloc-attached');
         } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('refuses loudly when headless without approval flags instead of abandoning the delete prompt', async () => {
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2' });
+            expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(trackEvent).toHaveBeenCalledWith('gc_run', expect.objectContaining({
+                success: false,
+                error_code: 'GC_NON_INTERACTIVE',
+                reason: 'non-interactive',
+            }));
+            expect(clack.mockConfirm).not.toHaveBeenCalled();
+            expect(deleteCommandCalls()).toBe(0);
+        } finally {
+            exitSpy.mockRestore();
             consoleSpy.mockRestore();
         }
     });
@@ -384,7 +587,7 @@ describe('gc: ECR batch-delete chunking', () => {
 
     it('splits more than 100 untagged images into multiple BatchDelete requests', async () => {
         const untaggedImages = Array.from({ length: 250 }, (_, i) => ({
-            repositoryName: `${PROJECT}-web`,
+            repositoryName: `${PROJECT}-repo`,
             imageDigest: `sha256:orphan-${i}`,
         }));
         const ecrSend = vi.fn().mockResolvedValue({});
@@ -402,7 +605,7 @@ describe('gc: ECR batch-delete chunking', () => {
         expect(batchSizes).toEqual([100, 100, 50]);
         for (const call of ecrSend.mock.calls) {
             expect(call[0].imageIds.length).toBeLessThanOrEqual(100);
-            expect(call[0].repositoryName).toBe(`${PROJECT}-web`);
+            expect(call[0].repositoryName).toBe(`${PROJECT}-repo`);
         }
         const sentDigests = ecrSend.mock.calls.flatMap((call) => call[0].imageIds.map((id) => id.imageDigest));
         expect(sentDigests).toHaveLength(250);
@@ -411,7 +614,7 @@ describe('gc: ECR batch-delete chunking', () => {
 
     it('sends exactly one request for 100 images', async () => {
         const untaggedImages = Array.from({ length: 100 }, (_, i) => ({
-            repositoryName: `${PROJECT}-web`,
+            repositoryName: `${PROJECT}-repo`,
             imageDigest: `sha256:orphan-${i}`,
         }));
         const ecrSend = vi.fn().mockResolvedValue({});
@@ -483,9 +686,34 @@ describe('gc: lambda log group discovery', () => {
             ec2Client: { send: mockEc2Send },
             projectName: PROJECT,
             logGroupPrefix: `/aws/lambda/${PROJECT}-`,
+            isLambda: true,
             excludeLogGroup: `/aws/lambda/${PROJECT}-fn`,
         });
         expect(seenPrefixes).toEqual([`/aws/lambda/${PROJECT}-`]);
+        expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-pr-123-fn`]);
+    });
+
+    it('excludes foreign-project lookalike lambda groups', async () => {
+        const logsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeLogGroupsCommand) {
+                return {
+                    logGroups: [
+                        { logGroupName: `/aws/lambda/${PROJECT}-evil-pr-2-fn` },
+                        { logGroupName: `/aws/lambda/${PROJECT}-pr-123-fn` },
+                    ],
+                };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources({
+            ecrClient: { send: mockEcrSend },
+            logsClient: { send: logsSend },
+            ec2Client: { send: mockEc2Send },
+            projectName: PROJECT,
+            logGroupPrefix: `/aws/lambda/${PROJECT}-`,
+            isLambda: true,
+            excludeLogGroup: `/aws/lambda/${PROJECT}-fn`,
+        });
         expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-pr-123-fn`]);
     });
 
@@ -502,7 +730,7 @@ describe('gc: lambda log group discovery', () => {
                     return {
                         logGroups: [
                             { logGroupName: `/aws/lambda/${PROJECT}-a1b2c3-fn` },
-                            { logGroupName: `/aws/lambda/${PROJECT}-a1b2c3-pr-9-fn` },
+                            { logGroupName: `/aws/lambda/${PROJECT}-pr-9-a1b2c3-fn` },
                         ],
                     };
                 }
@@ -510,8 +738,39 @@ describe('gc: lambda log group discovery', () => {
                 throw new Error(`Unexpected Logs command: ${cmd?.commandName}`);
             });
             clack.mockConfirm.mockResolvedValue(false);
-            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', cwd: dir });
-            expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-a1b2c3-pr-9-fn`]);
+            const spawnSyncImpl = vi.fn(() => ({ status: 0, stdout: '[]', stderr: '' }));
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', cwd: dir, spawnSyncImpl, isHeadless: false });
+            expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-pr-9-a1b2c3-fn`]);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('excludes lambda preview groups whose function still exists', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-lambda-live-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'main.tf'),
+                'locals {\n  app_name = "myapp"\n}\nresource "aws_lambda_function" "app" {}\n'
+            );
+            mockLogsSend.mockImplementation(async (cmd) => {
+                if (cmd instanceof MockDescribeLogGroupsCommand) {
+                    return {
+                        logGroups: [
+                            { logGroupName: `/aws/lambda/${PROJECT}-pr-123-fn` },
+                            { logGroupName: `/aws/lambda/${PROJECT}-pr-456-fn` },
+                        ],
+                    };
+                }
+                if (cmd instanceof MockDeleteLogGroupCommand) return {};
+                throw new Error(`Unexpected Logs command: ${cmd?.commandName}`);
+            });
+            clack.mockConfirm.mockResolvedValue(false);
+            const spawnSyncImpl = vi.fn(() => ({ status: 0, stdout: JSON.stringify([`${PROJECT}-pr-123-fn`]), stderr: '' }));
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', cwd: dir, spawnSyncImpl, isHeadless: false });
+            expect(spawnSyncImpl).toHaveBeenCalledWith('aws', expect.arrayContaining(['lambda', 'list-functions']), expect.anything());
+            expect(result.orphanedLogGroups.map((g) => g.logGroupName)).toEqual([`/aws/lambda/${PROJECT}-pr-456-fn`]);
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }

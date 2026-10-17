@@ -789,6 +789,39 @@ describe('installMcpConfig', () => {
         }
     );
 
+    it('guides JSONC (commented) configs with a paste-ready block instead of misdiagnosing', () => {
+        const home = makeHome();
+        try {
+            const configPath = path.join(home, '.config', 'zed', 'settings.json');
+            fs.mkdirSync(path.dirname(configPath), { recursive: true });
+            const content = '{\n// theme comment\n"theme": "dark",\n"homepage": "https://example.com/docs",\n/* block comment */\n"context_servers": {}\n}\n';
+            fs.writeFileSync(configPath, content);
+            const result = installMcpConfig('zed', { homeDir: home });
+            expect(result).toMatchObject({ ok: false, reason: 'jsonc-config', errorCode: 'MCP_INSTALL_JSONC_CONFIG' });
+            expect(result.message).toContain('context_servers');
+            expect(result.message).toContain('"grada"');
+            expect(result.message).toContain('grada-run');
+            expect(fs.readFileSync(configPath, 'utf-8')).toBe(content);
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+
+    it('still refuses commented configs for strict-JSON editors', () => {
+        const home = makeHome();
+        try {
+            const configPath = path.join(home, '.cursor', 'mcp.json');
+            fs.mkdirSync(path.dirname(configPath), { recursive: true });
+            const content = '{\n// comment\n"mcpServers": {}\n}\n';
+            fs.writeFileSync(configPath, content);
+            const result = installMcpConfig('cursor', { homeDir: home });
+            expect(result).toMatchObject({ ok: false, reason: 'unreadable-config' });
+            expect(fs.readFileSync(configPath, 'utf-8')).toBe(content);
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+
     it('resolves no install target without a home directory', () => {
         expect(mcpInstallTarget('vscode', null)).toBeNull();
     });

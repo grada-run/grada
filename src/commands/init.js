@@ -38,7 +38,7 @@ import { getTargetDirectory, getProjectConfig, promptWorkerCommand, promptGitHub
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
 import { parseDockerCompose, selectComposeWebService } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe, COMPUTE_TARGETS, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS, resolveHeadless, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust } from '../utils/resolvers.js';
 import { readGitHubRepoFromRemote, isValidGitHubRepoSlug } from '../utils/git.js';
 import { parseDomainTf } from '../utils/domains.js';
 
@@ -197,6 +197,27 @@ async function mainStackMain(input = {}) {
     const explicitGitHubRepo = typeof initOptions.githubRepo === 'string' && initOptions.githubRepo.trim() !== ''
         ? initOptions.githubRepo.trim()
         : null;
+    // Non-interactive wizard gate (sync-ai precedent: bespoke, not the
+    // shared helper — approval flags cannot answer input questions, so
+    // even `init --yes` must refuse here). Without --headless the wizard
+    // always prompts (directory first), so an inferred-headless run (CI,
+    // no TTY) could only abandon — refuse loudly instead. This sits
+    // before the 2b flag validation below because the directory prompt
+    // precedes it; re-running with --headless surfaces any specific
+    // INVALID_* error. No preconfigured exemption: the parser only
+    // exposes flag values in headless mode, so standalone
+    // --preconfigured would silently ignore --framework/--region.
+    if (!isHeadless && resolveHeadless(options)) {
+        return failCommand({
+            message: '\n✖ init needs an interactive terminal to gather project configuration.',
+            hint: '  Re-run with --headless --framework <id> --target <ecs|lambda|static> (plus --region/--with as needed), or run interactively in a terminal.\n',
+            event: 'project_provisioned',
+            telemetry: { projectName: explicitProjectName ?? path.basename(process.cwd()) },
+            errorCode: 'INIT_NON_INTERACTIVE',
+            reason: 'non-interactive',
+            exitCode: 1,
+        });
+    }
     const dirConfig = await getTargetDirectory(isHeadless, headlessOptions, { projectName: explicitProjectName });
 
     // Re-init over an existing tree keeps the tree's project name: after a
@@ -903,7 +924,7 @@ async function mainStackMain(input = {}) {
             fsSync.writeFileSync(path.join(promptsDir, 'grada.prompt'), getBaseRules(aiContext));
         }
         if (config.aiAssistants.includes('windsurf')) {
-            injectManagedBlock(path.join(cwd, '.windsurfrules'), getBaseRules(aiContext), false);
+            injectManagedBlock(path.join(cwd, '.windsurfrules'), getBaseRules(aiContext), true);
         }
         if (config.aiAssistants.includes('copilot')) {
             const copilotPath = path.join(cwd, '.github', 'copilot-instructions.md');
@@ -942,7 +963,7 @@ async function mainStackMain(input = {}) {
             fsSync.writeFileSync(path.join(promptsDir, 'grada.prompt'), getBaseRules(aiContext));
         }
         if (fsSync.existsSync(path.join(cwd, '.windsurf')) || fsSync.existsSync(path.join(cwd, '.windsurfrules'))) {
-            injectManagedBlock(path.join(cwd, '.windsurfrules'), getBaseRules(aiContext), false);
+            injectManagedBlock(path.join(cwd, '.windsurfrules'), getBaseRules(aiContext), true);
         }
 
         const copilotPath = path.join(cwd, '.github', 'copilot-instructions.md');

@@ -8,7 +8,7 @@ import { atomicWriteFileSync } from './atomic-write.js';
 import { withProjectLock } from './file-lock.js';
 import { ensureGitignoreRules, GITIGNORE_RULE_GRADA_DIR } from './gitignore.js';
 import { trackEvent, trackSuccess, flushTelemetry } from '../core/telemetry.js';
-import { resolveProjectName, resolveWorkspaceSuffix, resolveCluster, resolveService, resolveCwd, readResourceSuffix } from './resolvers.js';
+import { resolveProjectName, resolveWorkspaceSuffix, resolveCluster, resolveService, resolveCwd, readResourceSuffix, resolveHeadless } from './resolvers.js';
 import { resolveDbIdentifier, resolveDbClusterIdentifier } from './rds.js';
 
 export const SLEEP_STATE_DIRNAME = '.grada';
@@ -238,7 +238,7 @@ export async function guardSleepingEnv({
         await flushTelemetry();
         return { proceed: true, entry };
     }
-    if (shouldAutoApprove(opts)) {
+    if (shouldAutoApprove(opts) || resolveHeadless(opts)) {
         return {
             proceed: false,
             result: await failCommand({

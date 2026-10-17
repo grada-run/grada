@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.40.13
+
+- Version alignment with CLI releases (no functional changes).
+
 ## 0.40.12
 
 - Version alignment with CLI releases (no functional changes).

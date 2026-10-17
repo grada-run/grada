@@ -137,6 +137,24 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
+  it('refuses loudly when headless without approval flags instead of abandoning the preview prompt', async () => {
+    writeProject();
+    // No-op exit so the refusal result returns instead of throwing.
+    exitSpy.mockImplementation(() => { });
+    const result = await applyStack({});
+
+    expect(result).toEqual({ ok: false, reason: 'non-interactive' });
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'APPLY_NON_INTERACTIVE', reason: 'non-interactive' })
+    );
+    expect(flushTelemetry).toHaveBeenCalled();
+    expect(renderDryRunPreview).not.toHaveBeenCalled();
+    expect(clack.mockConfirm).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('provisions successfully: init + apply exit 0 and prints app/direct URL outputs', async () => {
     writeProject();
     mockSpawn.mockImplementation((cmd, args = []) => {
@@ -158,7 +176,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     // Success exit(0) lives INSIDE applyStack's try block, so a throwing
     // process.exit mock would be swallowed as a failure. Use a no-op here.
     exitSpy.mockImplementation(() => { });
-    await applyStack({});
+    await applyStack({ isHeadless: false });
 
     expect(mockSpawn).toHaveBeenCalledTimes(3);
     expect(mockSpawn.mock.calls[0][1]).toEqual(['init', '-upgrade']);
@@ -189,7 +207,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
       return makeChild({ code: 0, stdout: '{}' });
     });
 
-    await expect(applyStack({})).rejects.toMatchObject({ exitCode: 1 });
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(clack.mockLogError).toHaveBeenCalled();
     expect(provisionStateBucket).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith(
@@ -219,7 +237,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
 
     // Final success exit(0) is inside try: use no-op exit so it is not swallowed.
     exitSpy.mockImplementation(() => { });
-    await applyStack({});
+    await applyStack({ isHeadless: false });
 
     expect(exitSpy).toHaveBeenCalledWith(0);
     expect(ensureStateBucketExists).toHaveBeenCalledWith({
@@ -263,7 +281,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     });
     clack.mockConfirm.mockResolvedValue(false); // decline recovery
 
-    await expect(applyStack({})).rejects.toMatchObject({ exitCode: 1 });
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(provisionStateBucket).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith('recovery_declined', expect.anything());
   });
@@ -278,7 +296,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
       });
     });
 
-    await expect(applyStack({})).rejects.toMatchObject({ exitCode: 1 });
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(clack.mockLogError).toHaveBeenCalledWith(
       expect.stringContaining('OIDC')
     );
@@ -294,7 +312,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
       makeChild({ error: new Error('spawn terraform ENOENT') })
     );
 
-    await expect(applyStack({})).rejects.toMatchObject({ exitCode: 1 });
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(provisionStateBucket).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_applied',

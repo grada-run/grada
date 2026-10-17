@@ -11,7 +11,7 @@ Serve your application from your own domain with automated edge TLS — no manua
 - With `--zone-id <id>`, validation and routing are fully automated: grada creates the ACM validation records plus apex `A`/`AAAA` alias records in your Route 53 hosted zone, then binds the certificate to CloudFront in a single `apply`.
 - Without `--zone-id`, you get a guided 2-step flow for external DNS providers (Cloudflare, Namecheap): `domain add` stages the certificate, `domain status` shows the exact CNAME records to paste, and `domain verify` activates the domain once DNS is in place.
 - `domain status` shows the configured domain, its mode, whether CloudFront is wired, and a copy-paste DNS record table.
-- `domain remove` deletes the domain configuration and restores the free `*.cloudfront.net` default certificate.
+- `domain remove` deletes the domain configuration and restores the free `*.cloudfront.net` default certificate once no aliases remain. If hand-added aliases are still wired, they (and the ACM certificate block) are kept — with a warning that the certificate validation resource is deleted with `domain.tf`, so rewire it by hand before applying.
 - Domain configuration lives in `terraform/domain.tf`, so `destroy` tears it down and `eject` keeps it automatically.
 
 ## Usage
@@ -51,7 +51,7 @@ Requires a project initialized with `grada` (`terraform/cloudfront.tf` must exis
 ## Automation & edge cases
 
 - Domain resources are scoped to the production workspace: previews keep serving over their own `*.cloudfront.net` URL, and preview teardowns never touch your certificate, aliases, or DNS.
-- `domain remove` needs `--yes` in headless/CI mode.
+- `domain remove` needs `--yes` in headless/CI mode (non-interactive runs without it fail with `DOMAIN_NON_INTERACTIVE`).
 
 ## See also
 

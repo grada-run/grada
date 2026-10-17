@@ -198,7 +198,7 @@ describe('matrix: gc (ADAPT — clean exit on static)', () => {
 describe('matrix: alerts (ADAPT all targets)', () => {
     it('scaffolds a CloudFront 5xx-rate alarm on static', async () => {
         const dir = makeProject('alerts-static');
-        const result = await runAlerts({ cwd: dir, projectName: 'myapp', region: 'us-east-2' });
+        const result = await runAlerts({ cwd: dir, projectName: 'myapp', region: 'us-east-2', isHeadless: true });
         expect(result).toMatchObject({ ok: true, target: 'static' });
         const written = fs.readFileSync(path.join(dir, 'terraform', 'alerts.tf'), 'utf8');
         expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_5xx_rate"');
@@ -208,7 +208,7 @@ describe('matrix: alerts (ADAPT all targets)', () => {
 
     it('scaffolds a Lambda Errors alarm on lambda', async () => {
         const dir = makeProject('alerts-lambda', 'resource "aws_lambda_function" "app" {}\n');
-        const result = await runAlerts({ cwd: dir, projectName: 'myapp', region: 'us-east-2' });
+        const result = await runAlerts({ cwd: dir, projectName: 'myapp', region: 'us-east-2', isHeadless: true });
         expect(result).toMatchObject({ ok: true, target: 'lambda' });
         const written = fs.readFileSync(path.join(dir, 'terraform', 'alerts.tf'), 'utf8');
         expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_errors"');

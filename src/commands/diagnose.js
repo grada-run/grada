@@ -8,6 +8,7 @@ import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, 
 import { normalizeOptions } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { pickNewestRunningTask } from '../utils/ecs.js';
 
 export const LOG_FETCH_LIMIT = 50;
 
@@ -74,6 +75,25 @@ export function extractTaskIdFromArn(taskArn) {
 
 function isLogGroupNotFoundError(error) {
     return !!error && error.name === 'ResourceNotFoundException';
+}
+
+// Shared log tail for the ECS and Lambda paths: fetched lines, the honest
+// fetch-failure warning (never "no events" when the fetch failed), the
+// missing-group hint, or the genuine empty line — in that order.
+function printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix, region }) {
+    if (logs.length > 0) {
+        console.log(`\n  ${color.bold(`Last ${logs.length} log lines (${color.cyan(logGroup)}):`)}`);
+        for (const line of logs) {
+            console.log(`  ${color.dim('│')} ${highlightErrorLine(line)}`);
+        }
+    } else if (logFetchFailed) {
+        console.log(color.yellow(`\n⚠ Could not fetch recent logs from ${logGroup} (${fetchError}). Log health is unverified.`));
+    } else if (logGroupMissing) {
+        console.log(color.yellow(`\n⚠ Log group not found (expected ${logGroup}).`));
+        console.log(color.dim(`List matching groups with: aws logs describe-log-groups --log-group-name-prefix "${listPrefix}" --region ${region}`));
+    } else {
+        console.log(color.dim(`\n  No recent log events found in ${logGroup}.`));
+    }
 }
 
 // Lambda diagnosis without new dependencies: function configuration comes
@@ -156,6 +176,8 @@ export async function runLambdaDiagnose(input = {}) {
     s.message(`Fetching last ${LOG_FETCH_LIMIT} log lines for "${functionName}"...`);
     let logs = [];
     let logGroupMissing = false;
+    let logFetchFailed = false;
+    let fetchError = '';
     try {
         const logsResp = await logsClient.send(new FilterLogEventsCommand({
             logGroupName: logGroup,
@@ -169,12 +191,14 @@ export async function runLambdaDiagnose(input = {}) {
             logGroupMissing = true;
             logs = [];
         } else {
+            logFetchFailed = true;
+            fetchError = `${logsError?.name || 'Error'}: ${logsError?.message || logsError}`;
             logs = [];
         }
     }
 
     const errorLines = logs.filter((line) => /error|exception|failed|fatal|outofmemory|killed/i.test(String(line ?? '')));
-    const healthy = !configUnhealthy && errorLines.length === 0;
+    const healthy = !configUnhealthy && !logFetchFailed && errorLines.length === 0;
 
     s.stop('Diagnosis complete.\n');
 
@@ -185,27 +209,28 @@ export async function runLambdaDiagnose(input = {}) {
     console.log(`  ${color.dim('State:')} ${state === 'Active' ? color.green(state) : color.yellow(state)} ${color.dim(`/ ${lastUpdateStatus}`)}`);
     if (configuration.LastModified) console.log(`  ${color.dim('Modified:')} ${configuration.LastModified}`);
 
-    if (logs.length > 0) {
-        console.log(`\n  ${color.bold(`Last ${logs.length} log lines (${color.cyan(logGroup)}):`)}`);
-        for (const line of logs) {
-            console.log(`  ${color.dim('│')} ${highlightErrorLine(line)}`);
-        }
-    } else if (logGroupMissing) {
-        console.log(color.yellow(`\n⚠ Log group not found (expected ${logGroup}).`));
-        console.log(color.dim(`List matching groups with: aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/" --region ${region}`));
-    } else {
-        console.log(color.dim(`\n  No recent log events found in ${logGroup}.`));
-    }
+    printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix: '/aws/lambda/', region });
 
     if (healthy) {
         outro(color.green('Diagnose complete. Nothing to fix!'));
-        await trackSuccess('diagnose_run', { healthy: true, log_source: logs.length > 0 ? 'group-fallback' : 'none' });
+        await trackSuccess('diagnose_run', { healthy: true, log_source: logs.length > 0 ? 'log-group' : 'none' });
         return { healthy: true, functionName, state, lastUpdateStatus, logs: [] };
     }
 
-    outro(color.green('Diagnose complete. Fix the error above, then redeploy. 🚀'));
-    await trackSuccess('diagnose_run', { healthy: false, log_source: logs.length > 0 ? 'group-fallback' : 'none' });
-    return { healthy: false, functionName, state, lastUpdateStatus, logs };
+    if (logFetchFailed && !configUnhealthy && errorLines.length === 0) {
+        outro(color.yellow('Diagnose complete. Log health unverified — retry shortly or check CloudWatch directly.'));
+    } else {
+        outro(color.green('Diagnose complete. Fix the error above, then redeploy. 🚀'));
+    }
+    await trackSuccess('diagnose_run', {
+        healthy: false,
+        log_source: logs.length > 0 ? 'log-group' : 'none',
+        ...(logFetchFailed ? { log_fetch_failed: true } : {}),
+    });
+    return {
+        healthy: false, functionName, state, lastUpdateStatus, logs,
+        ...(logFetchFailed ? { logFetchFailed: true } : {}),
+    };
 }
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
@@ -336,17 +361,8 @@ async function runDiagnoseMain(input = {}) {
                     tasks: runningArns.slice(0, 100)
                 })
             );
-            const runningTasks = runningDescResp.tasks || [];
-            for (const task of runningTasks) {
-                // ListTasks({ desiredStatus: 'RUNNING' }) also returns tasks
-                // still PROVISIONING/PENDING toward that goal. Only a task
-                // whose actual lastStatus is RUNNING — and which isn't
-                // UNHEALTHY — proves the service recovered.
-                if (task?.lastStatus !== 'RUNNING' || task?.healthStatus === 'UNHEALTHY') continue;
-                if (!newestRunning || taskStartTime(task) > taskStartTime(newestRunning)) {
-                    newestRunning = task;
-                }
-            }
+            // Only a healthy RUNNING task proves the service recovered.
+            newestRunning = pickNewestRunningTask(runningDescResp.tasks || [], { excludeUnhealthy: true });
         }
         const latestRunningStart = newestRunning ? taskStartTime(newestRunning) : 0;
 
@@ -399,6 +415,8 @@ async function runDiagnoseMain(input = {}) {
 
         let logs = [];
         let logGroupMissing = false;
+        let logFetchFailed = false;
+        let fetchError = '';
         let logSource = 'none';
         if (streamPrefix) {
             try {
@@ -425,7 +443,12 @@ async function runDiagnoseMain(input = {}) {
                 });
                 if (logs.length > 0) logSource = 'group-fallback';
             } catch (fallbackError) {
-                if (isLogGroupNotFoundError(fallbackError)) logGroupMissing = true;
+                if (isLogGroupNotFoundError(fallbackError)) {
+                    logGroupMissing = true;
+                } else {
+                    logFetchFailed = true;
+                    fetchError = `${fallbackError?.name || 'Error'}: ${fallbackError?.message || fallbackError}`;
+                }
                 logs = [];
             }
         }
@@ -440,21 +463,15 @@ async function runDiagnoseMain(input = {}) {
             console.log(`  ${color.dim('Container reason:')} ${color.yellow(containerReason)}`);
         }
 
-        if (logs.length > 0) {
-            console.log(`\n  ${color.bold(`Last ${logs.length} log lines (${color.cyan(logGroup)}):`)}`);
-            for (const line of logs) {
-                console.log(`  ${color.dim('│')} ${highlightErrorLine(line)}`);
-            }
-        } else if (logGroupMissing) {
-            console.log(color.yellow(`\n⚠ Log group not found (expected ${logGroup}).`));
-            console.log(color.dim(`List matching groups with: aws logs describe-log-groups --log-group-name-prefix "/ecs/" --region ${region}`));
-        } else {
-            console.log(color.dim(`\n  No recent log events found in ${logGroup}.`));
-        }
+        printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix: '/ecs/', region });
 
         outro(color.green('Diagnose complete. Fix the error above, then redeploy. 🚀'));
 
-        await trackSuccess('diagnose_run', { healthy: false, log_source: logSource });
+        await trackSuccess('diagnose_run', {
+            healthy: false,
+            log_source: logSource,
+            ...(logFetchFailed ? { log_fetch_failed: true } : {}),
+        });
 
         return {
             healthy: false,
@@ -464,7 +481,8 @@ async function runDiagnoseMain(input = {}) {
             containerName,
             exitCode,
             containerReason,
-            logs
+            logs,
+            ...(logFetchFailed ? { logFetchFailed: true } : {}),
         };
     } catch (error) {
         if (isAuthError(error)) {

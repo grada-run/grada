@@ -4,7 +4,7 @@ import { intro, outro, spinner, log } from '@clack/prompts';
 import color from 'picocolors';
 import { getAiAssistants } from '../utils/prompts.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readTerraformComputeTarget } from '../utils/resolvers.js';
+import { readTerraformComputeTarget, resolveHeadless } from '../utils/resolvers.js';
 import { trackEvent, flushTelemetry, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 
@@ -29,17 +29,30 @@ function getProjectContext(cwd) {
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
 // invocation path, including direct imports that bypass bin/cli.js and MCP.
-export async function syncAi() {
+export async function syncAi(options = {}) {
     setActiveCommandName('sync_ai');
     try {
-        return await syncAiMain();
+        return await syncAiMain(options);
     } finally {
         resetActiveCommandName();
     }
 }
 
-async function syncAiMain() {
+async function syncAiMain(options = {}) {
     intro(color.bgCyan(color.black(' grada sync-ai 🤖 ')));
+
+    // Assistant selection is prompt-only: refuse loudly without a TTY
+    // instead of abandoning the prompt and "succeeding" with nothing.
+    if (resolveHeadless(options)) {
+        return failCommand({
+            message: '\n✖ sync-ai needs an interactive terminal to choose assistants.',
+            hint: '  Run it in a terminal, or re-run init to regenerate rules non-interactively.\n',
+            event: 'sync_ai',
+            errorCode: 'SYNC_AI_NON_INTERACTIVE',
+            reason: 'non-interactive',
+            exitCode: 1,
+        });
+    }
 
     const assistants = await getAiAssistants();
 
@@ -81,7 +94,7 @@ async function syncAiMain() {
         }
 
         if (assistants.includes('windsurf')) {
-            injectManagedBlock(path.join(cwd, '.windsurfrules'), getBaseRules(context), false);
+            injectManagedBlock(path.join(cwd, '.windsurfrules'), getBaseRules(context), true);
         }
 
         if (assistants.includes('copilot')) {

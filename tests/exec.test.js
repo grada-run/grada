@@ -141,7 +141,7 @@ describe('Command: exec (mocked ECS + spawn)', () => {
         const taskArn = 'arn:aws:ecs:us-east-2:123:task/myapp-cluster/abc123';
         const ecsClient = mockEcsClient({
             taskArns: [taskArn],
-            tasks: [{ taskArn, containers: [{ name: 'myapp-container', lastStatus: 'RUNNING' }] }],
+            tasks: [{ taskArn, lastStatus: 'RUNNING', containers: [{ name: 'myapp-container', lastStatus: 'RUNNING' }] }],
         });
         const calls = [];
         const spawnImpl = mockSpawnImpl(calls, 0);
@@ -172,6 +172,86 @@ describe('Command: exec (mocked ECS + spawn)', () => {
             ]));
             expect(opts).toEqual(expect.objectContaining({ stdio: 'inherit' }));
             expect(calls).toHaveLength(1);
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('propagates a nonzero session code as {ok:false, exitCode}', async () => {
+        const taskArn = 'arn:aws:ecs:us-east-2:123:task/myapp-cluster/abc123';
+        const ecsClient = mockEcsClient({
+            taskArns: [taskArn],
+            tasks: [{ taskArn, lastStatus: 'RUNNING', containers: [{ name: 'myapp-container', lastStatus: 'RUNNING' }] }],
+        });
+        const spawnImpl = mockSpawnImpl([], 3);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await runExec({
+                projectName: 'myapp',
+                region: 'us-east-2',
+                ecsClient,
+                spawnImpl,
+                hasAwsCli: true,
+                hasSsmPlugin: true,
+            });
+            expect(result).toMatchObject({ ok: false, exitCode: 3, taskArn });
+            expect(trackEvent).toHaveBeenCalledWith('exec_run', expect.objectContaining({
+                success: false,
+                exit_code: 3,
+            }));
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('reports signal-killed sessions (null code) as failure with exit 1', async () => {
+        const taskArn = 'arn:aws:ecs:us-east-2:123:task/myapp-cluster/abc123';
+        const ecsClient = mockEcsClient({
+            taskArns: [taskArn],
+            tasks: [{ taskArn, lastStatus: 'RUNNING', containers: [{ name: 'myapp-container', lastStatus: 'RUNNING' }] }],
+        });
+        const spawnImpl = mockSpawnImpl([], null);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await runExec({
+                projectName: 'myapp',
+                region: 'us-east-2',
+                ecsClient,
+                spawnImpl,
+                hasAwsCli: true,
+                hasSsmPlugin: true,
+            });
+            expect(result).toMatchObject({ ok: false, exitCode: 1 });
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('records success telemetry after a clean session with its exit code', async () => {
+        const taskArn = 'arn:aws:ecs:us-east-2:123:task/myapp-cluster/abc123';
+        const ecsClient = mockEcsClient({
+            taskArns: [taskArn],
+            tasks: [{ taskArn, lastStatus: 'RUNNING', containers: [{ name: 'myapp-container', lastStatus: 'RUNNING' }] }],
+        });
+        const spawnImpl = mockSpawnImpl([], 0);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await runExec({
+                projectName: 'myapp',
+                region: 'us-east-2',
+                ecsClient,
+                spawnImpl,
+                hasAwsCli: true,
+                hasSsmPlugin: true,
+            });
+            expect(result).toMatchObject({ ok: true, exitCode: 0 });
+            expect(trackEvent).toHaveBeenCalledWith('exec_run', expect.objectContaining({
+                success: true,
+                exit_code: 0,
+            }));
         } finally {
             consoleSpy.mockRestore();
         }
@@ -262,7 +342,7 @@ describe('Command: exec (mocked ECS + spawn)', () => {
         const taskArn = 'arn:task/1';
         const ecsClient = mockEcsClient({
             taskArns: [taskArn],
-            tasks: [{ taskArn, containers: [{ name: 'myapp-container' }] }],
+            tasks: [{ taskArn, lastStatus: 'RUNNING', containers: [{ name: 'myapp-container' }] }],
         });
         const found = await findRunningTask(ecsClient, { cluster: 'myapp-cluster', service: 'myapp-service' });
         expect(found.taskArn).toBe(taskArn);
@@ -271,6 +351,28 @@ describe('Command: exec (mocked ECS + spawn)', () => {
 
     it('returns null when no RUNNING tasks exist', async () => {
         const ecsClient = mockEcsClient({ taskArns: [] });
+        await expect(findRunningTask(ecsClient, { cluster: 'c', service: 's' })).resolves.toBeNull();
+    });
+
+    it('picks the newest actually-RUNNING task from a mixed-status batch', async () => {
+        const ecsClient = mockEcsClient({
+            taskArns: ['arn:task/old', 'arn:task/prov', 'arn:task/new'],
+            tasks: [
+                { taskArn: 'arn:task/old', lastStatus: 'RUNNING', startedAt: new Date('2026-01-01T00:00:00Z'), containers: [{ name: 'c' }] },
+                { taskArn: 'arn:task/prov', lastStatus: 'PROVISIONING', startedAt: new Date('2026-01-03T00:00:00Z'), containers: [{ name: 'c' }] },
+                { taskArn: 'arn:task/new', lastStatus: 'RUNNING', startedAt: new Date('2026-01-02T00:00:00Z'), containers: [{ name: 'c' }] },
+            ],
+        });
+        const found = await findRunningTask(ecsClient, { cluster: 'c', service: 's' });
+        expect(found.taskArn).toBe('arn:task/new');
+        expect(ecsClient.send).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns null when listed tasks are all still provisioning', async () => {
+        const ecsClient = mockEcsClient({
+            taskArns: ['arn:task/prov'],
+            tasks: [{ taskArn: 'arn:task/prov', lastStatus: 'PROVISIONING', containers: [{ name: 'c' }] }],
+        });
         await expect(findRunningTask(ecsClient, { cluster: 'c', service: 's' })).resolves.toBeNull();
     });
 

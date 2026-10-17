@@ -44,7 +44,7 @@ npx grada-run apply
 
 - Alarm defaults: more than 10 ALB 5xx in 2 minutes (ECS), more than 5 function errors in 5 minutes (Lambda), more than 5% 5xx over 5 minutes (static).
 - CloudWatch only serves CloudFront metrics from `us-east-1`, so static projects pin the topic, alarm, and forwarder to the `aws.us_east_1` provider alias — added to `terraform/main.tf` automatically when missing.
-- In CI / non-TTY shells, `alerts` scaffolds the topic + alarm and prints manual subscribe steps instead of prompting.
+- Without `--email`/`--webhook`, non-interactive runs fail with `ALERTS_NON_INTERACTIVE`; explicit `--headless` scaffolds the topic + alarm with manual subscribe steps instead of prompting.
 
 ## See also
 
