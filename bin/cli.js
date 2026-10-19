@@ -128,11 +128,11 @@ if (wantsVersion) {
 } else if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     const envFile = positionalArgs[2] || '.env';
     const projectName = path.basename(process.cwd());
-    runCommand(pushSecrets(envFile, projectName, { isHeadless, region: parseRegionFlag(rawArgs) }));
+    runCommand(pushSecrets(envFile, projectName, { ...(isHeadless ? { isHeadless: true } : {}), region: parseRegionFlag(rawArgs) }));
 } else if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'pull') {
     const envFile = positionalArgs[2] || '.env';
     const projectName = path.basename(process.cwd());
-    runCommand(pullSecrets(envFile, projectName, { isHeadless, region: parseRegionFlag(rawArgs) }));
+    runCommand(pullSecrets(envFile, projectName, { ...(isHeadless ? { isHeadless: true } : {}), region: parseRegionFlag(rawArgs) }));
 } else if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'audit') {
     const envFile = positionalArgs[2] || '.env';
     const projectName = path.basename(process.cwd());
@@ -178,7 +178,7 @@ if (wantsVersion) {
 } else if (positionalArgs[0] === 'telemetry') {
     runCommand(runTelemetry({ subcommand: positionalArgs[1], ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === undefined || positionalArgs[0] === 'init') {
-    runCommand(mainStack({ isHeadless, isPreconfigured, headlessOptions, initOptions }));
+    runCommand(mainStack({ ...(isHeadless ? { isHeadless: true } : {}), isPreconfigured, headlessOptions, initOptions }));
 } else {
     // Unknown input must never scaffold: a typo is not an init request.
     console.error(`\n✖ Unknown command "${positionalArgs[0]}".`);

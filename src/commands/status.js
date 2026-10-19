@@ -236,7 +236,7 @@ export async function runLambdaStatus(input = {}) {
 
     if (!health.healthy) {
         console.log(color.yellow(DEGRADED_MESSAGE));
-        await trackFailure('status_run', { projectName, healthy: false, degraded: true });
+        await trackFailure('status_run', { projectName, healthy: false, degraded: true, reason: 'degraded' });
         if (options.watchMode) return { ...payload, watchMode: true };
         const diagnosis = await runDiagnose({ cwd, region });
         await failCommand({ exitCode: 1, noExit });
@@ -352,7 +352,7 @@ export async function runStaticStatus(input = {}) {
 
     if (!healthy) {
         console.log(color.yellow(`  Distribution is ${distribution.Status} — CloudFront changes propagate in a few minutes.\n`));
-        await trackFailure('status_run', { projectName, healthy: false, degraded: true });
+        await trackFailure('status_run', { projectName, healthy: false, degraded: true, reason: 'degraded' });
         if (options.watchMode) return { ...payload, watchMode: true };
         await failCommand({ exitCode: 1, noExit });
         return payload;
@@ -543,7 +543,7 @@ async function runStatusMain(input = {}) {
 
         if (!health.healthy) {
             console.log(color.yellow(DEGRADED_MESSAGE));
-            await trackFailure('status_run', { projectName, healthy: false, degraded: true });
+            await trackFailure('status_run', { projectName, healthy: false, degraded: true, reason: 'degraded' });
             if (options.watchMode) return { ...payload, watchMode: true };
             const diagnosis = await runDiagnose({ cluster, region, logGroup });
             await failCommand({ exitCode: 1, noExit });

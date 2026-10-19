@@ -514,6 +514,7 @@ describe('Headless contract (automation-safe)', () => {
             expect(deployYml).toContain(`${match[1]}-cluster`);
             expect(trackEvent).toHaveBeenCalledWith('project_provisioned', expect.objectContaining({
                 resource_suffix_present: true,
+                success: true,
             }));
         } finally {
             spies.restore();

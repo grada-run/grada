@@ -631,6 +631,11 @@ describe('status: lambda target (mocked AWS CLI)', () => {
         expect(result.healthy).toBe(false);
         expect(runDiagnose).toHaveBeenCalled();
         expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('status_run', expect.objectContaining({
+            success: false,
+            degraded: true,
+            reason: 'degraded',
+        }));
     });
 
     it('omits signals on lambda projects for now', async () => {

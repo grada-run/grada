@@ -160,12 +160,42 @@ describe('Tier 0: failure paths', () => {
     it('init with an invalid target exits 1 cleanly', async () => {
         await withTmpDir('tier0-fail-target', async (dir) => {
             // NOTE: --headless is required to reach flag validation: without
-            // it, init prompts for the target directory first and exits 0 on
-            // EOF (the spec shows this command without --headless).
+            // it, init refuses with INIT_NON_INTERACTIVE before any prompt
+            // (the spec shows this command without --headless).
             const result = runCli(['init', '--target', 'fake-target', '--headless'], { cwd: dir, env, capture: true });
             expect(result.status).toBe(1);
             expect(result.output).toContain('Invalid compute target');
             expect(result.output).not.toMatch(/^\s+at\s/m);
+        });
+    });
+
+    it('bare init with closed stdin refuses instead of abandoning the wizard', async () => {
+        await withTmpDir('tier0-fail-init-stdin', async (dir) => {
+            // e2e stdin is closed: the CLI must not pass an explicit
+            // isHeadless:false that would defeat TTY inference. CI is
+            // dropped so closed stdin alone drives the refusal.
+            const { CI: _ci, ...noCiEnv } = env;
+            const result = runCli(['init'], { cwd: dir, env: noCiEnv, capture: true });
+            expect(result.status).toBe(1);
+            expect(result.output).toContain('needs an interactive terminal');
+            expect(result.output).toContain('--headless --framework');
+            expect(fs.existsSync(path.join(dir, 'terraform', 'main.tf'))).toBe(false);
+        });
+    });
+
+    it('secrets push with closed stdin and no .env refuses instead of prompting', async () => {
+        await withTmpDir('tier0-fail-push-stdin', async (dir) => {
+            const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env });
+            expect(init.status).toBe(0);
+            expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+
+            // Drop CI so this pins the inferred-headless gate (not the
+            // older CI-only branch): closed stdin alone must refuse.
+            const { CI: _ci, ...noCiEnv } = env;
+            const result = runCli(['secrets', 'push'], { cwd: dir, env: noCiEnv, capture: true });
+            expect(result.status).toBe(1);
+            expect(result.output).toContain('needs an .env file');
+            expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
         });
     });
 

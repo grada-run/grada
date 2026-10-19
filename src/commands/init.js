@@ -862,6 +862,7 @@ async function mainStackMain(input = {}) {
     trackEvent('project_provisioned', {
         // 1. Core & Context
         projectName: dirConfig.actualProjectName,
+        success: true, // funnel outcome: failures emit success:false via failCommand
         cli_version: CLI_VERSION,
         is_headless: isHeadless,
         setup_mode: config.setupType,
