@@ -108,6 +108,16 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 1: live lifecycle', () => 
 
     it('apply provisions infrastructure', async () => {
         await step(async () => {
+            // The Tier-1 account hosts a permanent OIDC provider (shared
+            // with the bedrock-sync role), so adopt it instead of creating
+            // one — AWS allows a single provider per account.
+            const oidcTfPath = path.join(dir, 'terraform', 'oidc.tf');
+            const oidcTf = fs.readFileSync(oidcTfPath, 'utf-8');
+            expect(oidcTf).toContain('variable "create_oidc_provider"');
+            const adopted = oidcTf.replace(/default\s*=\s*true/, 'default     = false');
+            expect(adopted).not.toBe(oidcTf);
+            fs.writeFileSync(oidcTfPath, adopted);
+
             const apply = runCli(['apply', '--auto-approve'], { cwd: dir, env });
             expect(apply.status).toBe(0);
         });
