@@ -47,18 +47,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "${local.app_name}-db-isolated-${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {

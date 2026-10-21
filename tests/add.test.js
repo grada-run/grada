@@ -17,6 +17,7 @@ import {
     injectContainerEnvVars,
     injectLambdaEnvVars,
     ensureLambdaVpcConfig,
+    ensureIsolatedSubnets,
     ensureWorkerDesiredCountLifecycle,
     formatCatalogListing,
     ADDON_REGISTRY,
@@ -529,7 +530,8 @@ describe('db:redis generated terraform', () => {
         expect(rendered).not.toContain('resource "aws_elasticache_cluster"');
         expect(rendered).not.toContain('elasticache_cluster.redis');
         expect(rendered).not.toContain('cache_nodes');
-        expect(rendered).toContain('subnet_ids = aws_subnet.public[*].id');
+        expect(rendered).toContain('subnet_ids = aws_subnet.db_isolated[*].id');
+        expect(rendered).not.toContain('aws_subnet.public[*].id');
         expect(rendered).toContain('from_port       = 6379');
         expect(rendered).toContain('security_groups = [aws_security_group.ecs_tasks.id]');
         expect(rendered).toContain('trivy:ignore:AVD-AWS-0104');
@@ -2051,6 +2053,38 @@ describe('ensureLambdaVpcConfig', () => {
         expect(once).toContain('security_group_ids = [aws_security_group.ecs_tasks.id]');
         expect(ensureLambdaVpcConfig(once)).toBe(once);
         expect(ensureLambdaVpcConfig('resource "aws_ecs_service" "app" {}')).toBe('resource "aws_ecs_service" "app" {}');
+    });
+});
+
+describe('ensureIsolatedSubnets', () => {
+    const OLD_NETWORK_TF = 'resource "aws_vpc" "main" {}\n';
+
+    it('appends the block once and leaves new trees untouched', () => {
+        const once = ensureIsolatedSubnets(OLD_NETWORK_TF);
+        expect(once).toContain('resource "aws_subnet" "db_isolated"');
+        expect(once).toContain('count.index + 10');
+        expect(ensureIsolatedSubnets(once)).toBe(once);
+    });
+
+    it('backfills network.tf when adding redis to a pre-move tree', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'network.tf'), OLD_NETWORK_TF);
+        const result = await runAdd({ cwd: dir, capability: 'db:redis' });
+        expect(result.ok).toBe(true);
+        const networkTf = fs.readFileSync(path.join(dir, 'terraform', 'network.tf'), 'utf-8');
+        expect(networkTf).toContain('resource "aws_subnet" "db_isolated"');
+    });
+
+    it('leaves network.tf alone when the block already exists', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        const networkTfPath = path.join(dir, 'terraform', 'network.tf');
+        fs.writeFileSync(networkTfPath, ensureIsolatedSubnets(OLD_NETWORK_TF));
+        const before = fs.readFileSync(networkTfPath, 'utf-8');
+        const result = await runAdd({ cwd: dir, capability: 'db:redis' });
+        expect(result.ok).toBe(true);
+        expect(fs.readFileSync(networkTfPath, 'utf-8')).toBe(before);
     });
 });
 

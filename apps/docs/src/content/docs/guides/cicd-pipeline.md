@@ -9,7 +9,7 @@ Every `npx grada-run` run generates `.github/workflows/deploy.yml`. This page ex
 
 ## When it runs
 
-The workflow triggers on a `push` to your deploy branch (`{{DEPLOY_BRANCH}}`, chosen during setup). There is no scheduled trigger on the deploy workflow — recurring checks live in the opt-in drift workflow below, so a broken schedule can never silently disable your deploys.
+The workflow triggers on a `push` to your deploy branch (`{{DEPLOY_BRANCH}}`, chosen during setup). There is no scheduled trigger on the deploy workflow — recurring checks live in the opt-in drift workflow below, so a broken schedule can never silently disable your deploys. Overlapping pushes serialize per branch: a newer run cancels superseded ones, so a stale run can never finish last and silently regress production.
 
 The region, ECR repository, ECS cluster, and ECS service names are baked in at generation time as `<project>-repo`, `<project>-cluster`, and `<project>-service`.
 

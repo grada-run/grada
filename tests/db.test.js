@@ -49,7 +49,7 @@ import {
     buildTargetClientCommand,
     buildSourceDumpCommand,
 } from '../src/commands/db.js';
-import { injectMigrationGate, injectPreviewMigrationGate, quoteShellArg, buildMigrationCommand, findGateBlock } from '../src/commands/db/migrate.js';
+import { injectMigrationGate, injectPreviewMigrationGate, quoteShellArg, buildMigrationCommand, buildRunnerInvocation, findGateBlock } from '../src/commands/db/migrate.js';
 import { resolveWorkspaceSuffix } from '../src/utils/resolvers.js';
 
 
@@ -1567,6 +1567,32 @@ describe('db migrate: gate helpers', () => {
 
     it('injectMigrationGate returns null without an anchor', () => {
         expect(injectMigrationGate('steps: []', { cmd: 'x' })).toBeNull();
+    });
+
+    it('buildRunnerInvocation pins known versions and floats unknown ones', () => {
+        expect(buildRunnerInvocation('0.40.15')).toBe('npx --yes @grada-run/grada@0.40.15');
+        expect(buildRunnerInvocation('  0.40.15  ')).toBe('npx --yes @grada-run/grada@0.40.15');
+        expect(buildRunnerInvocation('unknown')).toBe('npx grada-run');
+        expect(buildRunnerInvocation('')).toBe('npx grada-run');
+        expect(buildRunnerInvocation(undefined)).toBe('npx grada-run');
+    });
+
+    it('injected gates pin the installing CLI version', () => {
+        const preview = [
+            'name: Ephemeral PR Preview',
+            'jobs:',
+            '  deploy-preview:',
+            '    steps:',
+            '      - name: Comment PR',
+            '        uses: actions/github-script@v7',
+        ].join('\n');
+        const deployed = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.40.15' });
+        expect(deployed).toContain('npx --yes @grada-run/grada@0.40.15 db migrate');
+        const previewed = injectPreviewMigrationGate(preview, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.40.15' });
+        expect(previewed).toContain('npx --yes @grada-run/grada@0.40.15 db migrate');
+        const unpinned = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs' });
+        expect(unpinned).toContain('npx grada-run db migrate');
+        expect(unpinned).not.toContain('@grada-run/grada@');
     });
 
     it('findGateBlock locates legacy gates and injection migrates them', () => {

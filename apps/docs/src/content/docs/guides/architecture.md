@@ -7,7 +7,7 @@ Every grada project generates the same shape: a public-subnet VPC, an ALB-fronte
 
 ## Request path
 
-Internet → **CloudFront** → **ALB** → **ECS tasks**. The distribution's origin is the load balancer (`cloudfront.tf`), so web traffic enters through the CDN with SSL terminated at the edge; the `Direct URL` printed by `apply` bypasses it for debugging.
+Internet → **CloudFront** → **ALB** → **ECS tasks**. The distribution's origin is the load balancer (`cloudfront.tf`), so web traffic enters through the CDN with SSL terminated at the edge; the load balancer only accepts CloudFront edge traffic (managed prefix list), so the origin URL `apply` prints is not directly browsable — debugging via the direct URL needs a temporary personal-IP security-group rule.
 
 Tasks run with `awsvpc` networking in **public subnets** spread across availability zones (`10.0.0.0/16` VPC, one subnet per AZ, internet gateway attached). There is intentionally **no NAT gateway** — tasks get public IPs and talk out directly, which saves ~$33/mo versus a conventional private-subnet layout. Isolation comes from security groups: the ALB accepts public internet traffic, tasks accept traffic only from the ALB, and outbound access stays open for image pulls and external APIs.
 

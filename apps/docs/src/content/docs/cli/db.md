@@ -92,7 +92,7 @@ npx grada-run db migrate --cmd "node ./dist/seed.cjs" --timeout 1200
 npx grada-run db migrate --cmd "node ./dist/migrate.cjs" --setup-ci
 ```
 
-The step is re-installed cleanly on every run, so re-running the command updates the wired migration command in place. On ECS trees with PR previews enabled, the same run also wires the preview gate into `preview.yml`, which migrates the preview database post-apply — Lambda previews skip the gate.
+The step is re-installed cleanly on every run, so re-running the command updates the wired migration command in place. On ECS trees with PR previews enabled, the same run also wires the preview gate into `preview.yml`, which migrates the preview database post-apply — Lambda previews skip the gate. The installed step pins the CLI to the installing version (`npx --yes @grada-run/grada@<version>`), so pipelines stay reproducible across releases.
 
 ## db backup
 

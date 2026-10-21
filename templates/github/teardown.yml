@@ -4,6 +4,12 @@ on:
   pull_request:
     types: [closed]
 
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+
 env:
   AWS_REGION: {{REGION}}
   WORKSPACE: pr-${{ github.event.pull_request.number }}
@@ -33,7 +39,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "${{ env.WORKSPACE }}"; then
+            echo "No preview workspace ${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select ${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely

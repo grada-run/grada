@@ -5,6 +5,13 @@ on:
     branches:
       - {{DEPLOY_BRANCH}}
 
+# Overlapping deploys race: each run syncs its own build with --delete, so
+# interleaved runs would publish a mixed old/new file set. Superseded runs
+# cancel instead — newest always wins.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   AWS_REGION: {{REGION}}
   S3_BUCKET: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-site-{{AWS_ACCOUNT_ID}}

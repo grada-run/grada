@@ -40,18 +40,8 @@ CMD ["node", "index.js"]
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Aurora_Serverless > Aurora_Serverless - database.tf 1`] = `
-"# 1. Isolated Subnets (No Internet Gateway routing)
-resource "aws_subnet" "db_isolated" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "\${local.app_name}-db-isolated-\${count.index}"
-  }
-}
-
+"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+# with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
   subnet_ids = aws_subnet.db_isolated[*].id
@@ -155,6 +145,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -610,7 +607,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -687,18 +684,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -741,6 +762,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -786,7 +814,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -813,6 +841,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -843,7 +877,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -916,18 +956,8 @@ CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "gunicorn config.ws
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Django_Postgres > Django_Postgres - database.tf 1`] = `
-"# 1. Isolated Subnets (No Internet Gateway routing)
-resource "aws_subnet" "db_isolated" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "\${local.app_name}-db-isolated-\${count.index}"
-  }
-}
-
+"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+# with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
   subnet_ids = aws_subnet.db_isolated[*].id
@@ -1010,6 +1040,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -1464,7 +1501,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -1541,18 +1578,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -1595,6 +1656,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -1640,7 +1708,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -1667,6 +1735,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -1697,7 +1771,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -1757,6 +1837,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -2223,7 +2310,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -2300,18 +2387,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -2354,6 +2465,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -2399,7 +2517,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -2426,6 +2544,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -2456,7 +2580,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -2538,6 +2668,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -2988,7 +3125,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -3065,18 +3202,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -3119,6 +3280,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -3164,7 +3332,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -3191,6 +3359,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -3221,7 +3395,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -3268,6 +3448,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -3718,7 +3905,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -3795,18 +3982,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -3849,6 +4060,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -3894,7 +4112,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -3921,6 +4139,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -3951,7 +4175,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -4024,18 +4254,8 @@ CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "gunicorn config.ws
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Heroku_Procfile_Migration > Heroku_Procfile_Migration - database.tf 1`] = `
-"# 1. Isolated Subnets (No Internet Gateway routing)
-resource "aws_subnet" "db_isolated" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "\${local.app_name}-db-isolated-\${count.index}"
-  }
-}
-
+"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+# with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
   subnet_ids = aws_subnet.db_isolated[*].id
@@ -4118,6 +4338,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -4572,7 +4799,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -4649,18 +4876,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -4703,6 +4954,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -4748,7 +5006,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -4775,6 +5033,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -4805,7 +5069,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -4934,18 +5204,8 @@ CMD ["node", "index.js"]
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for MySQL_RDS > MySQL_RDS - database.tf 1`] = `
-"# 1. Isolated Subnets (No Internet Gateway routing)
-resource "aws_subnet" "db_isolated" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "\${local.app_name}-db-isolated-\${count.index}"
-  }
-}
-
+"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+# with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
   subnet_ids = aws_subnet.db_isolated[*].id
@@ -5029,6 +5289,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -5484,7 +5751,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -5561,18 +5828,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -5615,6 +5906,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -5660,7 +5958,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -5687,6 +5985,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -5717,7 +6021,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -5796,6 +6106,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -6246,7 +6563,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -6323,18 +6640,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -6377,6 +6718,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -6422,7 +6770,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -6449,6 +6797,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -6479,7 +6833,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -6550,6 +6910,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -7000,7 +7367,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -7077,18 +7444,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -7131,6 +7522,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -7176,7 +7574,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -7203,6 +7601,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -7233,7 +7637,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -7308,18 +7718,8 @@ CMD ["bundle", "exec", "puma", "-b", "tcp://0.0.0.0:8000"]"
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Rails_Postgres > Rails_Postgres - database.tf 1`] = `
-"# 1. Isolated Subnets (No Internet Gateway routing)
-resource "aws_subnet" "db_isolated" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "\${local.app_name}-db-isolated-\${count.index}"
-  }
-}
-
+"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+# with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
   subnet_ids = aws_subnet.db_isolated[*].id
@@ -7402,6 +7802,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -7857,7 +8264,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -7934,18 +8341,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -7988,6 +8419,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -8033,7 +8471,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -8060,6 +8498,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -8090,7 +8534,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -8166,6 +8616,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -8616,7 +9073,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -8693,18 +9150,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -8747,6 +9228,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -8792,7 +9280,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -8819,6 +9307,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -8849,7 +9343,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -8928,6 +9428,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -9378,7 +9885,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -9455,18 +9962,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -9509,6 +10040,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -9554,7 +10092,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -9581,6 +10119,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -9611,7 +10155,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely
@@ -9670,6 +10220,13 @@ on:
   push:
     branches:
       - main
+
+# Overlapping deploys race: each run registers its own revision and force-
+# deploys, so a stale run finishing last would silently regress production.
+# Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -10120,7 +10677,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://\${aws_lb.main.dns_name}"
 }
 
@@ -10197,18 +10754,42 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Isolated Subnets (No Internet Gateway routing). Shared by every data-plane
+# subnet group (RDS, ElastiCache) so caches never need public subnets. The
+# historical db_isolated address is kept deliberately: renaming would force
+# subnet replacement on existing trees.
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}
+
 # --- Security Groups ---
-# ALB SG: Allow public internet access on HTTP
+
+# Origin-facing CloudFront edge IPs: the only callers the ALB accepts.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB SG: Allow HTTP from CloudFront edges only (no direct internet access)
 resource "aws_security_group" "alb" {
   name        = "\${local.app_name}-alb-sg"
-  description = "Allow inbound HTTP to ALB"
+  description = "Allow inbound HTTP to ALB from CloudFront only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
+    # access would bypass the CDN (and TLS on domained trees). Debugging
+    # via the direct URL needs a temporary personal-IP rule.
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {
@@ -10251,6 +10832,13 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
@@ -10296,7 +10884,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create \${{ env.WORKSPACE }}
           terraform apply -auto-approve
@@ -10323,6 +10911,12 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 on:
   pull_request:
     types: [closed]
+
+# Shared with the preview workflow: teardown queues behind an in-flight
+# deploy instead of racing it on the state lock. No cancel-in-progress —
+# a teardown must run to completion, never be skipped.
+concurrency:
+  group: preview-\${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: us-east-2
@@ -10353,7 +10947,13 @@ jobs:
       - name: Terraform Init & Destroy
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
+          # PRs that never got a preview (early failure, pre-previews PR)
+          # have no workspace — exit green instead of failing the run.
+          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "\${{ env.WORKSPACE }}"; then
+            echo "No preview workspace \${{ env.WORKSPACE }} — nothing to tear down."
+            exit 0
+          fi
           # Select the PR workspace
           terraform workspace select \${{ env.WORKSPACE }}
           # Destroy all resources in this workspace safely

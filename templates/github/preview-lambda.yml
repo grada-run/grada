@@ -4,6 +4,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# One runner per PR: rapid pushes cancel superseded previews instead of
+# overlapping applies on the same workspace. Shares its group with
+# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 env:
   AWS_REGION: {{REGION}}
   ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
@@ -48,7 +55,7 @@ jobs:
         id: tf-apply
         working-directory: ./terraform
         run: |
-          terraform init
+          terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create ${{ env.WORKSPACE }}
           terraform apply -auto-approve

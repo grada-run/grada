@@ -5,10 +5,10 @@
 # Billing: fixed ~$9.49/mo baseline (cache.t4g.micro Valkey 8.0 at $0.013/hr
 # in us-east-2); $0 intra-AZ VPC data transfer.
 
-# --- ElastiCache Subnet Group ---
+# --- ElastiCache Subnet Group (isolated subnets, shared with RDS) ---
 resource "aws_elasticache_subnet_group" "redis" {
   name       = "${local.app_name}-redis-subnets"
-  subnet_ids = aws_subnet.public[*].id
+  subnet_ids = aws_subnet.db_isolated[*].id
 }
 
 # --- Redis Security Group (ECS tasks only) ---

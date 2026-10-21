@@ -5,6 +5,13 @@ on:
     branches:
       - {{DEPLOY_BRANCH}}
 
+# Overlapping deploys race: each run publishes its own image and calls
+# update-function-code, so a stale run finishing last would silently
+# regress production. Superseded runs cancel instead — newest always wins.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   AWS_REGION: {{REGION}}
   ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo

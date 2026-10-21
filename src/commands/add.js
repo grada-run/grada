@@ -460,6 +460,45 @@ export const LAMBDA_VPC_CONFIG_BLOCK = `  vpc_config {
     security_group_ids = [aws_security_group.ecs_tasks.id]
   }`;
 
+// Isolated subnets shared by every data-plane subnet group (RDS,
+// ElastiCache). network.tf carries this block on new trees; `add` backfills
+// it for trees generated before it moved out of database.tf (which only
+// existed alongside a database).
+export const ISOLATED_SUBNETS_BLOCK = `# Isolated Subnets (No Internet Gateway routing). Shared by every
+# data-plane subnet group (RDS, ElastiCache).
+resource "aws_subnet" "db_isolated" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "\${local.app_name}-db-isolated-\${count.index}"
+  }
+}`;
+
+// Idempotently appends the isolated-subnet block to network.tf content.
+// Returns the content unchanged when the block already exists.
+export function ensureIsolatedSubnets(networkTfContent) {
+    const content = String(networkTfContent ?? '');
+    if (content.includes('resource "aws_subnet" "db_isolated"')) return content;
+    const prefix = content.endsWith('\n') ? content : `${content}\n`;
+    return `${prefix}\n${ISOLATED_SUBNETS_BLOCK}\n`;
+}
+
+// Backfills the isolated-subnet block into a tree whose network.tf predates
+// it. No-op when network.tf is missing (static) or already has the block.
+// Returns true when the file was written.
+async function backfillIsolatedSubnets(projectDir) {
+    const networkTfPath = path.join(projectDir, 'terraform', 'network.tf');
+    if (!fsSync.existsSync(networkTfPath)) return false;
+    const before = await fs.readFile(networkTfPath, 'utf-8');
+    const after = ensureIsolatedSubnets(before);
+    if (after === before) return false;
+    await atomicWriteFile(networkTfPath, normalizeBlankLines(after));
+    return true;
+}
+
 // Idempotently attaches `vpc_config` to `aws_lambda_function."app"` (used
 // when `add db:redis` runs on a Lambda project generated without a
 // database). Returns the content unchanged for ECS projects or when the
@@ -1469,6 +1508,9 @@ async function scaffoldDatabaseInner(engine, projectDir, refs) {
     } else {
         await atomicWriteFile(databaseTfPath, normalizeBlankLines(rendered));
     }
+    // Engine templates reference the shared isolated subnets: backfill the
+    // block on trees generated before it moved to network.tf.
+    const subnetsBackfilled = await backfillIsolatedSubnets(projectDir);
 
     let randomInjected = false;
     if (isLambda) {
@@ -1518,6 +1560,7 @@ async function scaffoldDatabaseInner(engine, projectDir, refs) {
         workerEnvInjected,
         vpcInjected,
         randomInjected,
+        subnetsBackfilled,
         ejected,
     };
 }
@@ -1659,6 +1702,13 @@ async function scaffoldAddonInner(capability, resolvedOpts, { cwd, region } = {}
         await atomicWriteFile(targetPath, normalizeBlankLines(rendered));
     }
 
+    // Addons referencing the shared isolated subnets (db:redis) backfill the
+    // block on trees generated before it moved to network.tf.
+    let subnetsBackfilled = false;
+    if (rendered.includes('aws_subnet.db_isolated')) {
+        subnetsBackfilled = await backfillIsolatedSubnets(projectDir);
+    }
+
     const envVars = Array.isArray(opts.envVars) ? opts.envVars : [];
     const upsertKeys = Array.isArray(opts.upsertKeys) ? opts.upsertKeys : [];
     const injectOptions = upsertKeys.length > 0 ? { upsertKeys } : {};
@@ -1697,6 +1747,7 @@ async function scaffoldAddonInner(capability, resolvedOpts, { cwd, region } = {}
         envInjected,
         workerEnvInjected,
         vpcInjected,
+        subnetsBackfilled,
         ejected,
     };
 }

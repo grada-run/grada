@@ -2,7 +2,7 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner, text, isCancel } from '@clack/prompts';
-import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
+import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName, getCliVersion } from '../../core/telemetry.js';
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
@@ -113,45 +113,50 @@ function stripPreviousGateBlock(content) {
     return content.slice(0, lineStart) + content.slice(lineEnd === -1 ? content.length : lineEnd + 1);
 }
 
+// Builds the CI invocation of this CLI for injected gate blocks: pinned to
+// the installing version so pipelines stay reproducible across releases.
+// Falls back to the unpinned runner when the version is unknowable
+// (source checkouts report 'unknown').
+export function buildRunnerInvocation(cliVersion) {
+    const ver = typeof cliVersion === 'string' ? cliVersion.trim() : '';
+    if (ver === '' || ver === 'unknown') return 'npx grada-run';
+    return `npx --yes @grada-run/grada@${ver}`;
+}
+
+// Shared injection core: strips any previous gate, renders the block, and
+// splices it before the anchor step. Returns null without the anchor.
+function injectGateBlock(content, { runLine, stepName, anchor }) {
+    const base = stripPreviousGateBlock(String(content ?? ''));
+    const includeSetupNode = !base.includes('actions/setup-node');
+    const block = renderGateBlock({ includeSetupNode, stepName, runLine });
+    const anchorIdx = base.indexOf(anchor);
+    if (anchorIdx === -1) return null;
+    const insertAt = base.lastIndexOf('\n', anchorIdx) + 1;
+    return `${base.slice(0, insertAt)}${block}${base.slice(insertAt)}`;
+}
+
 // Idempotently injects (or refreshes) the migration gate block into a
 // deploy.yml document. Returns the updated content, or null when neither
 // anchor step is present. Pure and unit-tested.
-export function injectMigrationGate(workflowContent, { cmd }) {
-    const content = String(workflowContent ?? '');
+export function injectMigrationGate(workflowContent, { cmd, cliVersion } = {}) {
     const taskDefRef = '${{ steps.register-task-def.outputs.task-arn }}';
-
-    const base = stripPreviousGateBlock(content);
-    const includeSetupNode = !base.includes('actions/setup-node');
-    const block = renderGateBlock({
-        includeSetupNode,
+    return injectGateBlock(workflowContent, {
         stepName: 'Pre-Deploy Database Migration',
-        runLine: `npx grada-run db migrate --cmd ${quoteShellArg(cmd)} --task-def "${taskDefRef}" --headless`,
+        runLine: `${buildRunnerInvocation(cliVersion)} db migrate --cmd ${quoteShellArg(cmd)} --task-def "${taskDefRef}" --headless`,
+        anchor: '- name: Force ECS deployment',
     });
-
-    const forceIdx = base.indexOf('- name: Force ECS deployment');
-    if (forceIdx === -1) return null;
-    const insertAt = base.lastIndexOf('\n', forceIdx) + 1;
-    return `${base.slice(0, insertAt)}${block}${base.slice(insertAt)}`;
 }
 
 // Idempotently injects (or refreshes) the migration gate block into a
 // preview.yml document (ECS only — Lambda has no migrate-gate story yet).
 // Previews have no register step, so `db migrate` resolves the workspace
 // service itself via --workspace. Returns null without the anchor.
-export function injectPreviewMigrationGate(workflowContent, { cmd }) {
-    const content = String(workflowContent ?? '');
-    const base = stripPreviousGateBlock(content);
-    const includeSetupNode = !base.includes('actions/setup-node');
-    const block = renderGateBlock({
-        includeSetupNode,
+export function injectPreviewMigrationGate(workflowContent, { cmd, cliVersion } = {}) {
+    return injectGateBlock(workflowContent, {
         stepName: 'Preview Database Migration',
-        runLine: `npx grada-run db migrate --cmd ${quoteShellArg(cmd)} --workspace "\${{ env.WORKSPACE }}" --headless`,
+        runLine: `${buildRunnerInvocation(cliVersion)} db migrate --cmd ${quoteShellArg(cmd)} --workspace "\${{ env.WORKSPACE }}" --headless`,
+        anchor: '- name: Comment PR',
     });
-
-    const commentIdx = base.indexOf('- name: Comment PR');
-    if (commentIdx === -1) return null;
-    const insertAt = base.lastIndexOf('\n', commentIdx) + 1;
-    return `${base.slice(0, insertAt)}${block}${base.slice(insertAt)}`;
 }
 
 // Builds the container override command for the migration task. When the
@@ -380,7 +385,7 @@ async function runDbMigrateMain(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
-        const updated = injectMigrationGate(workflowContent, { cmd: resolvedCmd });
+        const updated = injectMigrationGate(workflowContent, { cmd: resolvedCmd, cliVersion: getCliVersion() });
         if (updated === null) {
             return failCommand({
                 message: '\n✖ Could not find the task-definition registration or ECS deployment step in .github/workflows/deploy.yml to anchor the migration gate.\n',
@@ -403,7 +408,7 @@ async function runDbMigrateMain(input = {}) {
                 previewContent = null;
             }
             if (previewContent !== null) {
-                const previewUpdated = injectPreviewMigrationGate(previewContent, { cmd: resolvedCmd });
+                const previewUpdated = injectPreviewMigrationGate(previewContent, { cmd: resolvedCmd, cliVersion: getCliVersion() });
                 if (previewUpdated !== null) {
                     fsSync.writeFileSync(previewFile, previewUpdated, 'utf8');
                     console.log(color.green('✅ Preview migration gate installed in .github/workflows/preview.yml.'));

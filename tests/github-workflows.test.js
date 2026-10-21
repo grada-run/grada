@@ -129,6 +129,53 @@ describe('github workflow templates', () => {
         }
     });
 
+    it.each(templates)('%s never references secrets in a step if: (Actions rejects it)', (filename) => {
+        const doc = parseTemplate(filename);
+        for (const job of Object.values(doc.jobs || {})) {
+            for (const step of job.steps || []) {
+                if (typeof step.if === 'string') expect(step.if, filename).not.toContain('secrets.');
+            }
+        }
+    });
+
+    it('deploy templates serialize production deploys per branch', () => {
+        for (const filename of ['deploy.yml', 'deploy-lambda.yml', 'deploy-static.yml']) {
+            const doc = parseTemplate(filename);
+            expect(doc.concurrency, filename).toMatchObject({
+                group: 'deploy-${{ github.ref }}',
+                'cancel-in-progress': true,
+            });
+        }
+    });
+
+    it('preview and teardown share one group per PR; only teardown never cancels', () => {
+        for (const filename of ['preview.yml', 'preview-lambda.yml']) {
+            const doc = parseTemplate(filename);
+            expect(doc.concurrency, filename).toMatchObject({
+                group: 'preview-${{ github.event.pull_request.number }}',
+                'cancel-in-progress': true,
+            });
+        }
+        const teardown = parseTemplate('teardown.yml');
+        expect(teardown.concurrency.group).toBe('preview-${{ github.event.pull_request.number }}');
+        expect(teardown.concurrency, 'teardown must queue, never cancel').not.toHaveProperty('cancel-in-progress');
+    });
+
+    it('teardown exits green when the preview workspace is absent', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        expect(raw).toContain('terraform workspace list');
+        expect(raw).toContain('nothing to tear down');
+    });
+
+    it('every template terraform init is non-interactive', () => {
+        for (const filename of templates) {
+            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            for (const match of raw.matchAll(/^\s*terraform init(.*)$/gm)) {
+                expect(match[1], `${filename}: bare 'terraform init' prompts mid-CI`).toContain('-input=false');
+            }
+        }
+    });
+
     it('deploy.yml still parses after migration-gate injection', () => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
         const injected = injectMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs' });

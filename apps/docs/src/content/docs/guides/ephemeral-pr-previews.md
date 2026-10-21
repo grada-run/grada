@@ -7,7 +7,7 @@ sidebar:
 
 When enabled, `grada` automatically configures your GitHub Actions pipeline to spin up isolated, temporary AWS environments every time a developer opens a Pull Request.
 
-A bot will comment on the PR with a live URL (e.g., `http://pr-123-your-app...`), allowing your team to test features, UI changes, and API updates before merging to `main`. When the PR is closed or merged, the environment is automatically destroyed.
+A bot will comment on the PR with a live URL (e.g., `http://pr-123-your-app...`), allowing your team to test features, UI changes, and API updates before merging to `main`. When the PR is closed or merged, the environment is automatically destroyed. One runner owns each PR: rapid pushes cancel superseded previews, and closing mid-deploy queues teardown behind the in-flight run (PRs that never got a preview tear down green).
 
 ### How it works
 

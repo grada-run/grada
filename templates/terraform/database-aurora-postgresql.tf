@@ -1,15 +1,5 @@
-# 1. Isolated Subnets (No Internet Gateway routing)
-resource "aws_subnet" "db_isolated" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "${local.app_name}-db-isolated-${count.index}"
-  }
-}
-
+# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+# with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "${local.app_name}-db-subnet-group"
   subnet_ids = aws_subnet.db_isolated[*].id

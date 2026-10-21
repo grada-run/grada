@@ -809,7 +809,7 @@ async function mainStackMain(input = {}) {
     if (migrationGateEnabled && migrationCmd) {
         const deployYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'deploy.yml');
         const workflowContent = readFileSafe(deployYmlPath);
-        const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd }) : null;
+        const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION }) : null;
         if (gated) {
             atomicWriteFileSync(deployYmlPath, gated);
             console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml'));
@@ -820,7 +820,7 @@ async function mainStackMain(input = {}) {
             const previewYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'preview.yml');
             const previewContent = readFileSafe(previewYmlPath);
             if (previewContent) {
-                const previewGated = injectPreviewMigrationGate(previewContent, { cmd: migrationCmd });
+                const previewGated = injectPreviewMigrationGate(previewContent, { cmd: migrationCmd, cliVersion: CLI_VERSION });
                 if (previewGated) {
                     atomicWriteFileSync(previewYmlPath, previewGated);
                     console.log(color.green('✅ Wired the preview database migration gate into .github/workflows/preview.yml'));

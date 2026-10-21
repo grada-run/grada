@@ -99,10 +99,13 @@ jobs:
             }
 
       - name: Notify Slack
-        if: steps.plan.outputs.exitcode == '2' && secrets.SLACK_WEBHOOK_URL != ''
+        if: steps.plan.outputs.exitcode == '2'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
+          # GitHub rejects the secrets context in step-level if: expressions,
+          # so the absent-secret skip lives here instead of the condition.
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then exit 0; fi
           SUMMARY=$(head -c 1500 terraform/plan.txt)
           jq -n \
             --arg repo "$GITHUB_REPOSITORY" \

@@ -280,7 +280,7 @@ resource "aws_iam_role_policy" "secrets_policy" {
 
 # --- Outputs ---
 output "alb_direct_url" {
-  description = "Direct Load Balancer URL (Bypasses CloudFront/CDN)"
+  description = "Load Balancer origin URL (accepts CloudFront edge traffic only; direct browser access needs a temporary SG rule)"
   value       = "http://${aws_lb.main.dns_name}"
 }
 

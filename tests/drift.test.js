@@ -121,6 +121,17 @@ describe('scaffoldDriftWorkflow', () => {
         expect(steps.some((step) => step.with?.terraform_wrapper === false)).toBe(true);
     });
 
+    it('skips the Slack step via shell guard instead of secrets in if:', () => {
+        const dir = makeTmp();
+        const result = scaffoldDriftWorkflow(dir, { region: 'us-east-2', roleArn: 'arn:aws:iam::1:role/x' });
+        expect(result.ok).toBe(true);
+        const content = fs.readFileSync(path.join(dir, '.github', 'workflows', 'drift.yml'), 'utf8');
+        const steps = loadYaml(content).jobs.drift.steps;
+        const slack = steps.find((step) => step.name === 'Notify Slack');
+        expect(slack.if).toBe("steps.plan.outputs.exitcode == '2'");
+        expect(slack.run).toContain('if [ -z "$SLACK_WEBHOOK_URL" ]; then exit 0; fi');
+    });
+
     it('refuses to overwrite without --force', () => {
         const dir = makeTmp();
         scaffoldDriftWorkflow(dir, { region: 'us-east-2', roleArn: 'arn:aws:iam::1:role/x' });
