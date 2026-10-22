@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { parseCliArgs } from '../src/core/parser.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { parseCliArgs, stripGlobalOnlyFlags } from '../src/core/parser.js';
 
 describe('CLI Argument Parser', () => {
     it('safely extracts telemetry variations and prevents positional hijacking', () => {
@@ -202,5 +205,43 @@ describe('CLI Argument Parser', () => {
         const secrets = parseCliArgs(['secrets', 'push', '.env', '--region', 'us-east-2']);
         expect(secrets.positionalArgs).toEqual(['secrets', 'push', '.env']);
         expect(secrets.baseCommand).toBe('secrets push');
+    });
+});
+
+describe('stripGlobalOnlyFlags', () => {
+    it('removes --no-telemetry in bare and =forms, keeping everything else', () => {
+        expect(stripGlobalOnlyFlags(['apply', '--no-telemetry', '--auto-approve'])).toEqual(['apply', '--auto-approve']);
+        expect(stripGlobalOnlyFlags(['status', '--no-telemetry=true'])).toEqual(['status']);
+        expect(stripGlobalOnlyFlags(['db', 'migrate', '--cmd', 'x'])).toEqual(['db', 'migrate', '--cmd', 'x']);
+    });
+
+    it('coerces non-array input to []', () => {
+        expect(stripGlobalOnlyFlags(null)).toEqual([]);
+        expect(stripGlobalOnlyFlags(undefined)).toEqual([]);
+    });
+});
+
+describe('bin/cli.js dispatch contract', () => {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const cliSource = fs.readFileSync(path.resolve(__dirname, '../bin/cli.js'), 'utf8');
+    const lines = cliSource.split('\n');
+
+    it('routes per-command parsers through stripGlobalOnlyFlags, never rawArgs', () => {
+        expect(cliSource).toContain('stripGlobalOnlyFlags(rawArgs)');
+        expect(cliSource).not.toMatch(/parse(?!CliArgs)\w+Args\(rawArgs/);
+        expect(cliSource).not.toContain('runDb(rawArgs');
+    });
+
+    it.each([
+        ['Doctor', 'parseDoctorArgs'],
+        ['Logs', 'parseLogsArgs'],
+        ['Status', 'parseStatusArgs'],
+        ['Exec', 'parseExecArgs'],
+        ['Gc', 'parseGcArgs'],
+        ['Mcp', 'parseMcpArgs'],
+    ])('merges explicit --headless into run%s', (_name, parseFn) => {
+        const line = lines.find((l) => l.includes(`${parseFn}(commandArgs)`));
+        expect(line).toBeDefined();
+        expect(line).toContain('isHeadless');
     });
 });

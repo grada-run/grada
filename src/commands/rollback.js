@@ -30,7 +30,7 @@ export function parseRollbackArgs(argv = []) {
     if (args[0] === 'rollback') args.shift();
     const { options: parsed, rest, unknown } = parseFlags(args, {
         string: ['cluster', 'service', 'region', 'workspace'],
-        boolean: ['skip-wait'],
+        boolean: ['skip-wait', 'headless'],
     });
     const options = { skipWait: false, ...parsed };
     if (unknown.length > 0) options.unknownFlags = unknown;

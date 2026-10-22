@@ -138,3 +138,28 @@ describe('unknown-flag capture (per-command wiring)', () => {
         expect(parse(['--bogus-flag']).unknownFlags).toEqual(['--bogus-flag']);
     });
 });
+
+describe('honored globals are never unknown flags', () => {
+    it.each([
+        ['apply', parseApplyArgs, ['--headless', '--auto-approve', '--dry-run']],
+        ['destroy', parseDestroyArgs, ['--headless', '--yes']],
+        ['eject', parseEjectArgs, ['--headless', '--yes']],
+        ['rollback', parseRollbackArgs, ['--headless']],
+        ['wake', parseWakeArgs, ['--headless']],
+        ['alerts', parseAlertsArgs, ['--headless']],
+        ['drift', parseDriftArgs, ['--headless']],
+        ['db connect', parseDbArgs, ['--headless']],
+        ['doctor', parseDoctorArgs, ['--headless']],
+        ['logs', parseLogsArgs, ['--headless']],
+        ['status', parseStatusArgs, ['--headless']],
+        ['exec', parseExecArgs, ['--headless']],
+        ['gc', parseGcArgs, ['--headless']],
+        ['mcp', parseMcpArgs, ['--headless']],
+        ['sleep', parseSleepArgs, ['--headless', '--yes']],
+        ['add', parseAddArgs, ['--headless']],
+        ['domain', parseDomainArgs, ['--headless', '--yes']],
+        ['db import', parseDbImportArgs, ['--headless', '--yes']],
+    ])('%s accepts %j without capturing unknownFlags', (_name, parse, flags) => {
+        expect(parse(flags).unknownFlags).toBeUndefined();
+    });
+});

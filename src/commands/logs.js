@@ -88,6 +88,7 @@ export function parseLogsArgs(argv = []) {
     const { options, rest, unknown } = parseFlags(args, {
         string: ['since', 'region'],
         number: ['tail'],
+        boolean: ['headless'],
         bareBoolean: ['follow', 'error'],
         alias: { f: 'follow' },
     });

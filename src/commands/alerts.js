@@ -35,7 +35,7 @@ export function parseAlertsArgs(argv = []) {
     if (args[0] === 'alerts') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
         string: ['region', 'project-name', 'email', 'webhook', 'threshold'],
-        boolean: ['force'],
+        boolean: ['force', 'headless'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.unexpectedPositionals = positionals;

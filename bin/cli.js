@@ -23,7 +23,7 @@ import { runDrift, parseDriftArgs } from '../src/commands/drift.js';
 import { runAlerts, parseAlertsArgs } from '../src/commands/alerts.js';
 import { runMcp, parseMcpArgs } from '../src/commands/mcp.js';
 import { runTelemetry } from '../src/commands/telemetry.js';
-import { parseCliArgs } from '../src/core/parser.js';
+import { parseCliArgs, stripGlobalOnlyFlags } from '../src/core/parser.js';
 import { getCliVersion } from '../src/core/telemetry.js';
 
 const HELP_TEXT = [
@@ -77,6 +77,10 @@ const HELP_TEXT = [
 
 const rawArgs = process.argv.slice(2);
 const parsed = parseCliArgs(rawArgs);
+// Per-command parsers see everything except globally-honored flags:
+// --no-telemetry already took effect via DO_NOT_TRACK, and the
+// unknown-flag gate would otherwise reject it on every command.
+const commandArgs = stripGlobalOnlyFlags(rawArgs);
 
 if (parsed.hasNoTelemetry) {
     process.env.DO_NOT_TRACK = '1';
@@ -138,43 +142,43 @@ if (wantsVersion) {
     const projectName = path.basename(process.cwd());
     runCommand(auditSecrets(envFile, projectName, { region: parseRegionFlag(rawArgs) }));
 } else if (dispatchCommand === 'apply') {
-    runCommand(applyStack({ ...parseApplyArgs(rawArgs), isDryRun, ...(autoApprove ? { autoApprove: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(applyStack({ ...parseApplyArgs(commandArgs), isDryRun, ...(autoApprove ? { autoApprove: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'doctor') {
-    runCommand(runDoctor({ ...parseDoctorArgs(rawArgs) }));
+    runCommand(runDoctor({ ...parseDoctorArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'destroy') {
-    runCommand(destroyStack({ ...parseDestroyArgs(rawArgs), ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(destroyStack({ ...parseDestroyArgs(commandArgs), ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'eject') {
-    runCommand(ejectStack({ ...parseEjectArgs(rawArgs), ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(ejectStack({ ...parseEjectArgs(commandArgs), ...(confirmYes ? { yes: true } : {}), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'sync-ai') {
     runCommand(syncAi());
 } else if (positionalArgs[0] === 'diagnose' || positionalArgs[0] === 'wtf') {
     runCommand(runDiagnose(headlessOptions));
 } else if (positionalArgs[0] === 'logs') {
-    runCommand(runLogs(parseLogsArgs(rawArgs)));
+    runCommand(runLogs({ ...parseLogsArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'status') {
-    runCommand(runStatus(parseStatusArgs(rawArgs)));
+    runCommand(runStatus({ ...parseStatusArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'rollback') {
-    runCommand(runRollback({ ...parseRollbackArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(runRollback({ ...parseRollbackArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'exec') {
-    runCommand(runExec(parseExecArgs(rawArgs)));
+    runCommand(runExec({ ...parseExecArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'db') {
-    runCommand(runDb(rawArgs, { ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(runDb(commandArgs, { ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'gc') {
-    runCommand(runGc(parseGcArgs(rawArgs)));
+    runCommand(runGc({ ...parseGcArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'add') {
-    runCommand(runAdd(parseAddArgs(rawArgs)));
+    runCommand(runAdd(parseAddArgs(commandArgs)));
 } else if (positionalArgs[0] === 'domain') {
-    runCommand(runDomain(parseDomainArgs(rawArgs)));
+    runCommand(runDomain(parseDomainArgs(commandArgs)));
 } else if (positionalArgs[0] === 'sleep') {
-    runCommand(runSleep({ ...parseSleepArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(runSleep({ ...parseSleepArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'wake') {
-    runCommand(runWake({ ...parseWakeArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(runWake({ ...parseWakeArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'drift') {
-    runCommand(runDrift({ ...parseDriftArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(runDrift({ ...parseDriftArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'alerts') {
-    runCommand(runAlerts({ ...parseAlertsArgs(rawArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+    runCommand(runAlerts({ ...parseAlertsArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'mcp') {
-    runCommand(runMcp(parseMcpArgs(rawArgs)));
+    runCommand(runMcp({ ...parseMcpArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'telemetry') {
     runCommand(runTelemetry({ subcommand: positionalArgs[1], ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === undefined || positionalArgs[0] === 'init') {

@@ -66,10 +66,10 @@ describe('parseDriftArgs', () => {
         expect(parseDriftArgs(['drift', 'bogus']).unexpectedPositionals).toEqual(['bogus']);
     });
 
-    it('drops --headless, which drift never reads', () => {
+    it('parses --headless instead of dropping it', () => {
         const options = parseDriftArgs(['drift', '--setup', '--force', '--headless']);
-        expect(options).toMatchObject({ setup: true, force: true });
-        expect(options.headless).toBeUndefined();
+        expect(options).toMatchObject({ setup: true, force: true, headless: true });
+        expect(options.unknownFlags).toBeUndefined();
     });
 });
 

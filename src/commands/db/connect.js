@@ -48,7 +48,7 @@ export function parseDbArgs(argv = []) {
     if (args[0] === 'connect') args.shift();
     const { options, unknown } = parseFlags(args, {
         string: ['port', 'region', 'cluster', 'service', 'workspace'],
-        boolean: ['show-credentials'],
+        boolean: ['show-credentials', 'headless'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return options;

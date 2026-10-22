@@ -386,7 +386,7 @@ export function createMcpServer() {
 export function parseMcpArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'mcp') args.shift();
-    const { options, unknown } = parseFlags(args, { string: ['install', 'transport', 'host'], number: ['port'] });
+    const { options, unknown } = parseFlags(args, { string: ['install', 'transport', 'host'], number: ['port'], boolean: ['headless'] });
     if (unknown.length > 0) options.unknownFlags = unknown;
     if (options.install === undefined) {
         // parseFlags drops a trailing valueless `--install`; detect the

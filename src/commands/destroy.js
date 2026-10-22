@@ -39,7 +39,7 @@ export function treeDeclaresDataLossVar(tfDir) {
 export function parseDestroyArgs(argv = []) {
     const args = normalizeArgv(argv);
     const { options, unknown } = parseFlags(args, {
-        boolean: ['allow-data-loss', 'force'],
+        boolean: ['allow-data-loss', 'force', 'headless', 'yes'],
         string: ['force-unlock'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;

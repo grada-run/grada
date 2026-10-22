@@ -155,3 +155,13 @@ export function parseCliArgs(processArgs) {
         initOptions
     };
 }
+
+// Args for per-command parsers: --no-telemetry is honored globally via
+// DO_NOT_TRACK (see parseCliArgs), so it must not reach parseFlags —
+// otherwise the unknown-flag gate would reject a documented global
+// option on every command. Every other token passes through untouched.
+export function stripGlobalOnlyFlags(processArgs) {
+    return normalizeArgv(processArgs).filter(
+        (arg) => arg !== '--no-telemetry' && !(typeof arg === 'string' && arg.startsWith('--no-telemetry='))
+    );
+}

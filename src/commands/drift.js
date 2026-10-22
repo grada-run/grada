@@ -22,7 +22,7 @@ export function parseDriftArgs(argv = []) {
     if (args[0] === 'drift') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
         string: ['region', 'project-name'],
-        boolean: ['setup', 'force'],
+        boolean: ['setup', 'force', 'headless'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     // `drift init` is an alias for `drift --setup`.

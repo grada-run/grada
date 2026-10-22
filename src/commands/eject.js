@@ -21,7 +21,7 @@ import { runWake } from './wake.js';
 export function parseEjectArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'eject') args.shift();
-    const { options, unknown } = parseFlags(args, { boolean: ['force'] });
+    const { options, unknown } = parseFlags(args, { boolean: ['force', 'headless', 'yes'] });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return { force: false, ...options };
 }

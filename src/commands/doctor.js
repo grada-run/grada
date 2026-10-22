@@ -222,7 +222,7 @@ function checkInterruptedRun({ cwd }) {
 export function parseDoctorArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'doctor') args.shift();
-    const { options, unknown } = parseFlags(args, { boolean: ['deep'] });
+    const { options, unknown } = parseFlags(args, { boolean: ['deep', 'headless'] });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return { deep: false, ...options };
 }

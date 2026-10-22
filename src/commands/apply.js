@@ -23,7 +23,7 @@ export function parseApplyArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'apply' || args[0] === 'deploy') args.shift();
     const { options, unknown } = parseFlags(args, {
-        boolean: ['force', 'destroy-previous-target', 'force-resume', 'allow-partial-outputs'],
+        boolean: ['force', 'destroy-previous-target', 'force-resume', 'allow-partial-outputs', 'headless', 'auto-approve', 'dry-run'],
         string: ['force-unlock'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;

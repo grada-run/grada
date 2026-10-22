@@ -24,7 +24,7 @@ export function parseGcArgs(argv = []) {
     // path still prompts). --deep adds the report-only deep scan.
     const { options, unknown } = parseFlags(args, {
         string: ['region', 'project-name'],
-        boolean: ['deep', 'yes'],
+        boolean: ['deep', 'yes', 'headless'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return options;

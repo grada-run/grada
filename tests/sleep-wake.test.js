@@ -136,12 +136,11 @@ describe('parseSleepArgs / parseWakeArgs', () => {
         expect(options.env).toBeUndefined();
     });
 
-    it('drops confirmation flags that wake never reads', () => {
+    it('captures confirmation flags that wake never reads for the unknown-flag gate', () => {
         const options = parseWakeArgs(['wake', '--no-wait', '--yes', '--force', '--headless']);
         expect(options.noWait).toBe(true);
-        expect(options.yes).toBeUndefined();
-        expect(options.force).toBeUndefined();
-        expect(options.headless).toBeUndefined();
+        expect(options.headless).toBe(true);
+        expect(options.unknownFlags).toEqual(['--yes', '--force']);
     });
 
     it('collects extra positionals for the guard', () => {

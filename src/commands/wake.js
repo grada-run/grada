@@ -38,7 +38,7 @@ export function parseWakeArgs(argv = []) {
     if (args[0] === 'wake') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
         string: ['project-name', 'cluster', 'service', 'db-identifier', 'region', 'workspace'],
-        boolean: ['skip-db', 'wait', 'no-wait', 'strict'],
+        boolean: ['skip-db', 'wait', 'no-wait', 'strict', 'headless'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.env = positionals[0];

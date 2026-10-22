@@ -39,6 +39,7 @@ export function parseStatusArgs(argv = []) {
     if (args[0] === 'status') args.shift();
     const { options, unknown } = parseFlags(args, {
         string: ['region'],
+        boolean: ['headless'],
         bareBoolean: ['json', 'watch'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
