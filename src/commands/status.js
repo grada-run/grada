@@ -5,7 +5,7 @@ import { CloudFrontClient, ListDistributionsCommand } from '@aws-sdk/client-clou
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
@@ -37,10 +37,11 @@ export async function runStatusWatch(input = {}) {
 export function parseStatusArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'status') args.shift();
-    const { options } = parseFlags(args, {
+    const { options, unknown } = parseFlags(args, {
         string: ['region'],
         bareBoolean: ['json', 'watch'],
     });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -424,6 +425,8 @@ export async function runStatus(input = {}) {
 
 async function runStatusMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'status', event: 'status_run' });
+    if (unknownRefusal) return unknownRefusal;
     const noExit = isProgrammaticCall(options);
     const asJson = Boolean(options.json);
     let cwd;

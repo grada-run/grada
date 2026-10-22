@@ -3,7 +3,7 @@ import path from 'path';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import color from 'picocolors';
 import { trackEvent, flushTelemetry, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, refuseIfNonInteractive, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import {
     stripTerraformMetadata,
@@ -21,7 +21,8 @@ import { runWake } from './wake.js';
 export function parseEjectArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'eject') args.shift();
-    const { options } = parseFlags(args, { boolean: ['force'] });
+    const { options, unknown } = parseFlags(args, { boolean: ['force'] });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return { force: false, ...options };
 }
 
@@ -57,6 +58,8 @@ export async function ejectStack(input = {}) {
 
 async function ejectStackMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'eject', event: 'project_ejected' });
+    if (unknownRefusal) return unknownRefusal;
     intro(color.bgRed(color.white(' grada eject ⏏️  ')));
 
     console.log(color.yellow('This will permanently decouple your infrastructure from the grada CLI.'));

@@ -167,6 +167,20 @@ describe('github workflow templates', () => {
         expect(raw).toContain('nothing to tear down');
     });
 
+    it('teardown stays red when the workspace listing itself fails', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        expect(raw).toContain('WORKSPACES=$(terraform workspace list 2>&1) || { echo "$WORKSPACES"; exit 1; }');
+        expect(raw).not.toMatch(/workspace list 2>\/dev\/null/);
+    });
+
+    it('preview posts the CloudFront URL, never the blocked direct ALB URL', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview.yml'), 'utf8');
+        expect(raw).toContain('terraform output -raw cloudfront_url');
+        expect(raw).not.toContain('alb_direct_url');
+        const lambdaRaw = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview-lambda.yml'), 'utf8');
+        expect(lambdaRaw).toContain('terraform output -raw api_gateway_url');
+    });
+
     it('every template terraform init is non-interactive', () => {
         for (const filename of templates) {
             const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');

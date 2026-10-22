@@ -5,7 +5,7 @@ import { RDSClient, StopDBInstanceCommand, StopDBClusterCommand } from '@aws-sdk
 import color from 'picocolors';
 import { intro, outro, spinner, confirm, cancel } from '@clack/prompts';
 import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseIfNonInteractive, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
@@ -41,13 +41,14 @@ export const SLEEP_CONFIRM_MESSAGE = "Put environment to sleep? This will take t
 export function parseSleepArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'sleep') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: ['project-name', 'cluster', 'service', 'db-identifier', 'region', 'workspace'],
         boolean: ['skip-db', 'wait', 'no-wait', 'yes', 'force', 'headless', 'strict'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.env = positionals[0];
     if (positionals.length > 1) options.unexpectedPositionals = positionals.slice(1);
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -68,6 +69,8 @@ export async function runSleep(input = {}) {
 
 async function runSleepMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'sleep', event: 'sleep_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

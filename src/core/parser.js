@@ -69,10 +69,11 @@ export function parseCliArgs(processArgs) {
         return false;
     };
 
-    // 4. Parse execution flags
-    const isHeadless = args.includes('--headless');
-    const isDryRun = args.includes('--dry-run');
-    const isPreconfigured = args.includes('--preconfigured');
+    // 4. Parse execution flags (getBoolFlag like their neighbors: bare and
+    // =true both set, =false and absent both clear)
+    const isHeadless = getBoolFlag('headless') === true;
+    const isDryRun = getBoolFlag('dry-run') === true;
+    const isPreconfigured = getBoolFlag('preconfigured') === true;
 
     // Headless values are always parsed (so consumption marking is
     // mode-independent) but only exposed in headless mode.
@@ -132,7 +133,7 @@ export function parseCliArgs(processArgs) {
         projectName: getValueFlag('project-name'),
         githubRepo: getValueFlag('github-repo'),
         setupCiMigrate: getBoolOrValueFlag('setup-ci-migrate'),
-        setupCiDrift: args.includes('--setup-ci-drift'),
+        setupCiDrift: getBoolFlag('setup-ci-drift') === true,
     };
 
     // 5. Isolate positional commands (non-string elements are positionals;

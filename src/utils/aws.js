@@ -70,10 +70,10 @@ export function resolveClient(injected, ClientClass, clientOptions = {}) {
     return new ClientClass(clientOptions);
 }
 
-export function handleAwsAuthError(error, clackSpinner = null, options = {}) {
-    if (clackSpinner) {
-        clackSpinner.stop(color.red('❌ AWS session expired or invalid credentials.'));
-    }
+// Print-only half of the auth-failure branch: the credential-recovery
+// guidance without the exit, for callers (init) that own their own
+// telemetry and exit path through failCommand.
+export function printAwsAuthGuidance(options = {}) {
     if (!hasAwsCli(options)) {
         console.log(color.red('\n✖ AWS CLI not found.'));
         console.log(`  Install the AWS CLI: ${color.blue(color.underline(AWS_CLI_INSTALL_URL))}`);
@@ -83,6 +83,13 @@ export function handleAwsAuthError(error, clackSpinner = null, options = {}) {
         console.log(`Run ${color.cyan('aws sso login')} or ${color.cyan('aws configure')} to refresh your credentials.`);
     }
     console.log(color.blue(`\n📘 Troubleshooting Guide: ${color.underline(TROUBLESHOOTING_URL)}\n`));
+}
+
+export function handleAwsAuthError(error, clackSpinner = null, options = {}) {
+    if (clackSpinner) {
+        clackSpinner.stop(color.red('❌ AWS session expired or invalid credentials.'));
+    }
+    printAwsAuthGuidance(options);
     process.exit(1);
     return;
 }

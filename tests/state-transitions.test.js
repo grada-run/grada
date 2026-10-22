@@ -13,7 +13,8 @@ import { stripVTControlCharacters } from 'node:util';
 vi.mock('../src/utils/aws.js', () => ({
     handleAuthErrorBranch: () => false,
     handleAwsAuthError: vi.fn(),
-    isAuthError: () => false,
+    isAuthError: vi.fn(() => false),
+    printAwsAuthGuidance: vi.fn(),
     resolveClient: (injected) => injected,
     provisionStateBucket: vi.fn().mockResolvedValue({
         awsAccountId: '123456789012',
@@ -69,7 +70,7 @@ import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 import { mainStack } from '../src/commands/init.js';
 import * as destroyModule from '../src/commands/destroy.js';
 import { runGc, parseGcArgs } from '../src/commands/gc.js';
-import { provisionStateBucket } from '../src/utils/aws.js';
+import { provisionStateBucket, isAuthError, printAwsAuthGuidance } from '../src/utils/aws.js';
 
 const { applyStack } = applyModule;
 
@@ -1509,6 +1510,26 @@ describe('S22: provision-before-backup', () => {
         expect(result).toMatchObject({ ok: false });
         expect(fs.existsSync(path.join(dir, 'terraform', 'main.tf'))).toBe(true);
         expect(fs.readdirSync(dir).some((e) => e.startsWith('terraform.bak.'))).toBe(false);
+    }, 30000);
+
+    it('an auth failure during provision prints recovery guidance and still tracks cli-error', async () => {
+        const dir = makeTmp();
+        writeInitTree(dir);
+        fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'myapp' }));
+        backup.writeInitManifest(dir);
+        process.chdir(dir);
+        vi.mocked(provisionStateBucket).mockRejectedValueOnce(Object.assign(
+            new Error('The security token included in the request is expired'),
+            { name: 'ExpiredTokenException' },
+        ));
+        vi.mocked(isAuthError).mockReturnValueOnce(true);
+        const result = await mainStack(headlessInitOptions());
+        expect(result).toMatchObject({ ok: false });
+        expect(printAwsAuthGuidance).toHaveBeenCalledTimes(1);
+        expect(trackEvent).toHaveBeenCalledWith('cli-error', expect.objectContaining({
+            step: 'aws_provisioning',
+            error_code: 'ExpiredTokenException',
+        }));
     }, 30000);
 });
 

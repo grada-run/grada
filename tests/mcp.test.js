@@ -465,7 +465,7 @@ describe('parseMcpArgs', () => {
     it('maps a valueless --install to empty string for usage reporting', () => {
         expect(parseMcpArgs(['mcp', '--install'])).toEqual({ install: '' });
         expect(parseMcpArgs(['mcp', '--install='])).toEqual({ install: '' });
-        expect(parseMcpArgs(['mcp', '--install', '--json'])).toEqual({ install: '' });
+        expect(parseMcpArgs(['mcp', '--install', '--json'])).toEqual({ install: '', unknownFlags: ['--json'] });
     });
 
     it('parses transport, port, and host flags', () => {

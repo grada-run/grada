@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe } from '../utils/resolvers.js';
 
@@ -20,7 +20,7 @@ export const MAX_SUMMARY_LINES = 60;
 export function parseDriftArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'drift') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: ['region', 'project-name'],
         boolean: ['setup', 'force'],
     });
@@ -29,6 +29,7 @@ export function parseDriftArgs(argv = []) {
     if (positionals.includes('init') || positionals.includes('setup')) options.setup = true;
     const others = positionals.filter((positional) => positional !== 'init' && positional !== 'setup');
     if (others.length > 0) options.unexpectedPositionals = others;
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -84,6 +85,8 @@ export async function runDrift(input = {}) {
 
 async function runDriftMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'drift', event: 'drift_run' });
+    if (unknownRefusal) return unknownRefusal;
     const noExit = isProgrammaticCall(options);
     let cwd;
     let region;

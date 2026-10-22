@@ -108,6 +108,28 @@ export function findResourceBlock(content, resourceType, resourceName) {
     return { headerIdx, openIdx, closeIdx: bounds.closeIdx };
 }
 
+// Removes the `resource "type" "name" { ... }` block plus comment lines
+// directly attached above it (walking up over blanks, stopping at the
+// first line of code). Returns the content unchanged when absent. Callers
+// should normalize blank lines afterwards.
+export function removeResourceBlock(content, resourceType, resourceName) {
+    const text = String(content ?? '');
+    const found = findResourceBlock(text, resourceType, resourceName);
+    if (!found) return text;
+    const lines = text.slice(0, found.headerIdx).split('\n');
+    let firstKept = lines.length;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (line.trim() === '' || /^\s*#/.test(line)) {
+            firstKept = i;
+            continue;
+        }
+        break;
+    }
+    const start = firstKept === 0 ? 0 : lines.slice(0, firstKept).join('\n').length + 1;
+    return text.slice(0, start) + text.slice(found.closeIdx + 1);
+}
+
 // Locates a nested `blockName { ... }` (with optional quoted labels)
 // at the top level of a block slice. Returns
 // `{ startIdx, openIdx, closeIdx }` (startIdx is the keyword) or null.

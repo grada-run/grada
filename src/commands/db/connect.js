@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveAppName, resolveCwd } from '../../utils/resolvers.js';
@@ -46,10 +46,11 @@ export function parseDbArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'db') args.shift();
     if (args[0] === 'connect') args.shift();
-    const { options } = parseFlags(args, {
+    const { options, unknown } = parseFlags(args, {
         string: ['port', 'region', 'cluster', 'service', 'workspace'],
         boolean: ['show-credentials'],
     });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -104,6 +105,8 @@ export async function runDbConnect(input = {}) {
 
 async function runDbConnectMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'db connect', event: 'db_connect_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

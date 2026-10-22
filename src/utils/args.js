@@ -42,11 +42,14 @@ export function normalizeArgv(argv) {
 // - `alias`: single-dash shorthands (`{ f: 'follow' }` makes `-f` act as
 //   the bare long flag).
 //
-// Unknown `--flags` are dropped and everything else is returned in `rest`
-// so each command can apply its own positional rules.
+// Space-form values never consume a `--like` token (a following flag stays
+// a flag). Unknown `--flags` are collected in `unknown` (never silently
+// dropped) so commands can reject them loud; everything else is returned
+// in `rest` so each command can apply its own positional rules.
 export function parseFlags(args, { string = [], number = [], boolean = [], bareBoolean = [], alias = {} } = {}) {
     const options = {};
     const rest = [];
+    const unknown = [];
     const strings = normalizeEntries(string);
     const numbers = normalizeEntries(number);
     const booleans = normalizeEntries(boolean);
@@ -70,12 +73,12 @@ export function parseFlags(args, { string = [], number = [], boolean = [], bareB
         const value = eq === -1 ? undefined : arg.slice(eq + 1);
         if (strings.has(name)) {
             if (value !== undefined) options[strings.get(name)] = value;
-            else if (i + 1 < list.length) options[strings.get(name)] = list[++i];
+            else if (i + 1 < list.length && !String(list[i + 1]).startsWith('--')) options[strings.get(name)] = list[++i];
             continue;
         }
         if (numbers.has(name)) {
             if (value !== undefined) options[numbers.get(name)] = Number(value);
-            else if (i + 1 < list.length) options[numbers.get(name)] = Number(list[++i]);
+            else if (i + 1 < list.length && !String(list[i + 1]).startsWith('--')) options[numbers.get(name)] = Number(list[++i]);
             continue;
         }
         if (booleans.has(name)) {
@@ -86,6 +89,9 @@ export function parseFlags(args, { string = [], number = [], boolean = [], bareB
             if (value === undefined) options[bares.get(name)] = true;
             continue;
         }
+        // Unknown --flags are collected, never silently dropped: commands
+        // reject them loud via refuseUnknownFlags.
+        unknown.push(arg);
     }
-    return { options, rest };
+    return { options, rest, unknown };
 }

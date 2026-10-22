@@ -5,7 +5,7 @@ import color from 'picocolors';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove, refuseIfNonInteractive } from '../utils/command.js';
+import { failCommand, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { spawnSync } from 'child_process';
 import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
@@ -22,10 +22,11 @@ import { runWake } from './wake.js';
 export function parseApplyArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'apply' || args[0] === 'deploy') args.shift();
-    const { options } = parseFlags(args, {
+    const { options, unknown } = parseFlags(args, {
         boolean: ['force', 'destroy-previous-target', 'force-resume', 'allow-partial-outputs'],
         string: ['force-unlock'],
     });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return { force: false, ...options };
 }
 
@@ -188,6 +189,8 @@ export async function applyStack(input = {}) {
 
 async function applyStackMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'apply', event: 'infrastructure_applied' });
+    if (unknownRefusal) return unknownRefusal;
     intro(color.bgCyan(color.black(' grada apply ☁️  ')));
 
     const targetDir = process.cwd();

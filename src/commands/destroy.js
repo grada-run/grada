@@ -7,7 +7,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { teardownStateBucket, drainBucketObjects, resolveClient } from '../utils/aws.js';
 import { checkDependency, pollUntil } from '../utils/system.js';
 import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove, refuseIfNonInteractive } from '../utils/command.js';
+import { failCommand, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { runTerraformCommand, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, getTerraformStateBuckets, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
 import { classifyTerraformError, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { findDbTarget, dbStatusOf, resolveDbIdentifier, resolveDbClusterIdentifier, generateSnapshotId } from '../utils/rds.js';
@@ -38,10 +38,11 @@ export function treeDeclaresDataLossVar(tfDir) {
 
 export function parseDestroyArgs(argv = []) {
     const args = normalizeArgv(argv);
-    const { options } = parseFlags(args, {
+    const { options, unknown } = parseFlags(args, {
         boolean: ['allow-data-loss', 'force'],
         string: ['force-unlock'],
     });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return { allowDataLoss: false, force: false, ...options };
 }
 
@@ -145,6 +146,8 @@ export async function destroyStack(input = {}) {
 
 async function destroyStackMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'destroy', event: 'infrastructure_destroyed' });
+    if (unknownRefusal) return unknownRefusal;
     intro(color.bgRed(color.white(' grada destroy 🗑️  ')));
 
     // Ejected trees are user-owned: refuse unless --force.

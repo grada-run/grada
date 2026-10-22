@@ -5,7 +5,7 @@ import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, Start
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
@@ -36,13 +36,14 @@ export const DEFAULT_WAKE_POLL_INTERVAL_MS = 5000;
 export function parseWakeArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'wake') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: ['project-name', 'cluster', 'service', 'db-identifier', 'region', 'workspace'],
         boolean: ['skip-db', 'wait', 'no-wait', 'strict'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.env = positionals[0];
     if (positionals.length > 1) options.unexpectedPositionals = positionals.slice(1);
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -59,6 +60,8 @@ export async function runWake(input = {}) {
 
 async function runWakeMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'wake', event: 'wake_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

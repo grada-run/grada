@@ -465,6 +465,25 @@ describe('runSleep', () => {
         expect(vi.mocked(confirm)).toHaveBeenCalledWith(expect.objectContaining({ initialValue: false }));
     });
 
+    it('rejects an unknown flag before any prompting or AWS calls', async () => {
+        const dir = makeTmp();
+        const { ecsClient, rdsClient } = mockClients({
+            ecs: { 'myapp-service': activeService('myapp-service', 1) },
+        });
+        const result = await runSleep({ cwd: dir, projectName: 'myapp', region: 'us-east-2', ecsClient, rdsClient, yes: true, unknownFlags: ['--skp-db'] });
+
+        expect(result).toEqual({ ok: false, reason: 'unknown-flag' });
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(trackEvent).toHaveBeenCalledWith('sleep_run', expect.objectContaining({
+            success: false,
+            error_code: 'UNKNOWN_FLAG',
+            reason: 'unknown-flag',
+        }));
+        expect(vi.mocked(confirm)).not.toHaveBeenCalled();
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(rdsClient.send).not.toHaveBeenCalled();
+    });
+
     it('refuses loudly when headless without approval flags instead of abandoning the sleep prompt', async () => {
         const dir = makeTmp();
         const { ecsClient, rdsClient } = mockClients({

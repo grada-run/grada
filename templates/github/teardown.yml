@@ -41,8 +41,11 @@ jobs:
         run: |
           terraform init -input=false
           # PRs that never got a preview (early failure, pre-previews PR)
-          # have no workspace — exit green instead of failing the run.
-          if ! terraform workspace list 2>/dev/null | sed 's/^[* ]*//' | grep -qx "${{ env.WORKSPACE }}"; then
+          # have no workspace — exit green instead of failing the run. But
+          # a failed listing (backend outage, dead creds) must stay red:
+          # matching against empty output would leak the stack silently.
+          WORKSPACES=$(terraform workspace list 2>&1) || { echo "$WORKSPACES"; exit 1; }
+          if ! printf '%s\n' "$WORKSPACES" | sed 's/^[* ]*//' | grep -qx "${{ env.WORKSPACE }}"; then
             echo "No preview workspace ${{ env.WORKSPACE }} — nothing to tear down."
             exit 0
           fi

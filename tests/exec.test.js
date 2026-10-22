@@ -397,6 +397,36 @@ describe('Command: exec (mocked ECS + spawn)', () => {
         expect(mainTf).toMatch(/resource\s+"aws_iam_role_policy"\s+"ecs_exec"/);
         expect(mainTf).toMatch(/aws_iam_role\.task_role/);
     });
+
+    it('rejects an unknown flag before any AWS calls or spawn', async () => {
+        const ecsClient = mockEcsClient({ taskArns: [], tasks: [] });
+        const calls = [];
+        const spawnImpl = mockSpawnImpl(calls, 0);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await runExec({
+                projectName: 'myapp',
+                region: 'us-east-2',
+                ecsClient,
+                spawnImpl,
+                hasAwsCli: true,
+                hasSsmPlugin: true,
+                unknownFlags: ['--bogus'],
+            });
+            expect(result).toEqual({ ok: false, reason: 'unknown-flag' });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(trackEvent).toHaveBeenCalledWith('exec_run', expect.objectContaining({
+                success: false,
+                error_code: 'UNKNOWN_FLAG',
+                reason: 'unknown-flag',
+            }));
+            expect(ecsClient.send).not.toHaveBeenCalled();
+            expect(spawnImpl).not.toHaveBeenCalled();
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
 });
 
 describe('exec: fuzzer hardening', () => {

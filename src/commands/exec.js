@@ -4,7 +4,7 @@ import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, guardComputeTarget } from '../utils/resolvers.js';
 import {
@@ -34,12 +34,13 @@ export function resolveShellCommand(options = {}) {
 export function parseExecArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'exec') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: ['cluster', 'service', 'container', 'command', 'region'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0 && !options.service) options.service = positionals[0];
     if (positionals.length > 1) options.unexpectedPositionals = positionals.slice(1);
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -94,6 +95,8 @@ export async function runExec(input = {}) {
 
 async function runExecMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'exec', event: 'exec_run' });
+    if (unknownRefusal) return unknownRefusal;
     const noExit = isProgrammaticCall(options);
     let cwd;
     let region;

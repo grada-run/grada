@@ -4,7 +4,7 @@ import path from 'path';
 import color from 'picocolors';
 import { intro, outro, spinner, select, confirm, cancel, isCancel } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveAppName, resolveHeadless, resolveCwd } from '../../utils/resolvers.js';
@@ -24,7 +24,7 @@ export function parseDbRestoreArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'db') args.shift();
     if (args[0] === 'restore') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: [
             { name: 'project-name', key: 'projectName' },
             { name: 'region', key: 'region' },
@@ -36,6 +36,7 @@ export function parseDbRestoreArgs(argv = []) {
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.snapshotId = positionals[0];
     if (positionals.length > 1) options.unexpectedPositionals = positionals.slice(1);
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -172,6 +173,8 @@ export async function runDbRestore(input = {}) {
 
 async function runDbRestoreMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'db restore', event: 'db_restore_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

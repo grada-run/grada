@@ -6,6 +6,7 @@ import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/clien
 import { checkDependency } from '../utils/system.js';
 import { checkAwsCredentials, TROUBLESHOOTING_URL } from '../utils/aws.js';
 import { readLastRunMarker, isInterruptedMarker } from '../utils/terraform.js';
+import { refuseUnknownFlags } from '../utils/command.js';
 import { readTerraformOidcTrust } from '../utils/resolvers.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
@@ -221,7 +222,8 @@ function checkInterruptedRun({ cwd }) {
 export function parseDoctorArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'doctor') args.shift();
-    const { options } = parseFlags(args, { boolean: ['deep'] });
+    const { options, unknown } = parseFlags(args, { boolean: ['deep'] });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return { deep: false, ...options };
 }
 
@@ -278,6 +280,8 @@ export async function runDoctor(input = {}) {
 
 async function runDoctorMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'doctor', event: 'doctor_run' });
+    if (unknownRefusal) return unknownRefusal;
     const cwd = options.cwd ? path.resolve(String(options.cwd)) : process.cwd();
     const deep = options.deep === true || options.deep === 'true';
     const ctx = { cwd, s3Client: options.s3Client ?? null, deep };

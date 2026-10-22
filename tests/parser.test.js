@@ -21,6 +21,18 @@ describe('CLI Argument Parser', () => {
         expect(result.headlessOptions.needsDatabase).toBe(true);
     });
 
+    it('honors =true on execution flags (bare, =false, and absent unchanged)', () => {
+        expect(parseCliArgs(['apply', '--dry-run=true']).isDryRun).toBe(true);
+        expect(parseCliArgs(['apply', '--dry-run']).isDryRun).toBe(true);
+        expect(parseCliArgs(['apply', '--dry-run=false']).isDryRun).toBe(false);
+        expect(parseCliArgs(['apply']).isDryRun).toBe(false);
+        expect(parseCliArgs(['--headless=true']).isHeadless).toBe(true);
+        expect(parseCliArgs(['--headless=false']).isHeadless).toBe(false);
+        expect(parseCliArgs(['--preconfigured=true']).isPreconfigured).toBe(true);
+        expect(parseCliArgs(['init', '--setup-ci-drift=true']).initOptions.setupCiDrift).toBe(true);
+        expect(parseCliArgs(['init', '--setup-ci-drift=false']).initOptions.setupCiDrift).toBe(false);
+    });
+
     it('correctly maps headless assignment flags', () => {
         // Simulating: npx deploy-stack --headless --framework=django --region=us-east-2
         const args = ['--headless', '--framework=django', '--region=us-east-2'];

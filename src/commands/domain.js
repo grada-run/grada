@@ -6,7 +6,7 @@ import { intro, outro, confirm, cancel, isCancel } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { resolveProjectName, resolveHeadless, resolveCwd } from '../utils/resolvers.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { getTerraformOutputs } from '../utils/terraform.js';
 import {
     findResourceBlock,
@@ -319,7 +319,7 @@ export function isCloudFrontWired(cloudfrontTfContent, domain) {
 export function parseDomainArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'domain') args.shift();
-    const { options: parsed, rest } = parseFlags(args, {
+    const { options: parsed, rest, unknown } = parseFlags(args, {
         string: ['zone-id'],
         boolean: ['force', 'activate', 'yes', { name: 'headless', key: 'isHeadless' }],
     });
@@ -332,6 +332,7 @@ export function parseDomainArgs(argv = []) {
         force: parsed.force === true,
         yes: parsed.yes === true,
         isHeadless: parsed.isHeadless === true,
+        ...(unknown.length > 0 ? { unknownFlags: unknown } : {}),
     };
 }
 
@@ -377,6 +378,8 @@ export async function runDomain(input = {}) {
 
 async function runDomainMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'domain', event: 'domain_run' });
+    if (unknownRefusal) return unknownRefusal;
     const noExit = isProgrammaticCall(options);
     const subcommand = typeof options.subcommand === 'string' ? options.subcommand.trim().toLowerCase() : undefined;
 

@@ -28,7 +28,7 @@ import { scaffoldDriftWorkflow } from './drift.js';
 import { trackEvent, flushTelemetry, getCliVersion, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 import { getFrameworkWarning } from '../utils/warnings.js';
-import { provisionStateBucket, formatStateBucketName } from '../utils/aws.js';
+import { provisionStateBucket, formatStateBucketName, isAuthError, printAwsAuthGuidance } from '../utils/aws.js';
 import { generateTemplates } from '../utils/generator.js';
 import { planExistingFiles, executeBackup, preserveManagedFiles, restoreManagedFiles, refusalResultForPlan, writeInitManifest } from '../utils/backup.js';
 import { checkStateAdoption } from '../utils/state-adoption.js';
@@ -746,6 +746,9 @@ async function mainStackMain(input = {}) {
             projectName: dirConfig.actualProjectName,
             plan: existingFilesPlan.decision,
         });
+        // Auth failures print the shared credential-recovery guidance;
+        // init keeps its own telemetry + exit path through failCommand.
+        if (isAuthError(error)) printAwsAuthGuidance(initOptions);
         return failCommand({
             message: `AWS Error: ${error.message}`,
             useErrorStream: true,

@@ -3,7 +3,7 @@ import path from 'path';
 import color from 'picocolors';
 import { intro, outro, select, text, cancel, isCancel } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failProjectNotInitialized, refuseIfNonInteractive } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, resolveHeadless, readFileSafe, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { findNestedBlock } from '../utils/hcl.js';
@@ -33,12 +33,13 @@ const TARGET_ANCHORS = {
 export function parseAlertsArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'alerts') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: ['region', 'project-name', 'email', 'webhook', 'threshold'],
         boolean: ['force'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.unexpectedPositionals = positionals;
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -396,6 +397,8 @@ export async function runAlerts(input = {}) {
 
 async function runAlertsMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'alerts', event: 'alerts_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

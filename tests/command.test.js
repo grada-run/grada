@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
 import { mockConsoleTrio } from './helpers/console.js';
-import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive } from '../src/utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags } from '../src/utils/command.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
 
@@ -262,6 +262,40 @@ describe('refuseIfNonInteractive', () => {
             if (saved === undefined) delete process.env.CI;
             else process.env.CI = saved;
         }
+    });
+});
+
+describe('refuseUnknownFlags', () => {
+    let spies;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        spies = mockConsoleTrio();
+    });
+
+    afterEach(() => {
+        spies.restore();
+    });
+
+    it.each([
+        [{}],
+        [{ unknownFlags: [] }],
+        [{ unknownFlags: [''] }],
+    ])('returns null (proceed) for %j', async (options) => {
+        await expect(refuseUnknownFlags(options, { command: 'sleep', event: 'sleep_run' })).resolves.toBeNull();
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses naming the first unknown flag', async () => {
+        const result = await refuseUnknownFlags({ unknownFlags: ['--skp-db', '--bogus'] }, { command: 'sleep', event: 'sleep_run' });
+
+        expect(result).toMatchObject({ ok: false, reason: 'unknown-flag' });
+        expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining('--skp-db'));
+        expect(trackEvent).toHaveBeenCalledWith('sleep_run', expect.objectContaining({
+            success: false,
+            error_code: 'UNKNOWN_FLAG',
+        }));
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
     });
 });
 

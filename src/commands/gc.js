@@ -12,7 +12,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, shouldAutoApprove } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 
 export const CONFIRM_MESSAGE = 'Are you sure you want to permanently delete these orphaned resources? (y/N)';
@@ -22,10 +22,11 @@ export function parseGcArgs(argv = []) {
     if (args[0] === 'gc') args.shift();
     // --yes auto-confirms the delete prompt (explicit opt-in; the default
     // path still prompts). --deep adds the report-only deep scan.
-    const { options } = parseFlags(args, {
+    const { options, unknown } = parseFlags(args, {
         string: ['region', 'project-name'],
         boolean: ['deep', 'yes'],
     });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -459,6 +460,8 @@ export async function runGc(input = {}) {
 
 async function runGcMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'gc', event: 'gc_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

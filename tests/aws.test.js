@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { provisionStateBucket, ensureStateBucketExists, formatStateBucketName, handleAwsAuthError, isAuthError, handleAuthErrorBranch, resolveClient, hasAwsCli, resetAwsCliCache } from '../src/utils/aws.js';
+import { provisionStateBucket, ensureStateBucketExists, formatStateBucketName, handleAwsAuthError, isAuthError, handleAuthErrorBranch, printAwsAuthGuidance, resolveClient, hasAwsCli, resetAwsCliCache } from '../src/utils/aws.js';
 
 const { mockSpawnSync } = vi.hoisted(() => ({ mockSpawnSync: vi.fn() }));
 
@@ -209,6 +209,39 @@ describe('handleAwsAuthError', () => {
     ).not.toThrow();
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('aws sso login'));
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+});
+
+describe('printAwsAuthGuidance', () => {
+  let exitSpy;
+  let consoleSpy;
+
+  beforeEach(() => {
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    consoleSpy.mockRestore();
+  });
+
+  it('prints install guidance without exiting when the AWS CLI is missing', () => {
+    printAwsAuthGuidance({
+      spawnSyncImpl: () => {
+        throw new Error('ENOENT');
+      },
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('AWS CLI not found'));
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('prints sso login guidance without exiting when the AWS CLI is present', () => {
+    printAwsAuthGuidance({ spawnSyncImpl: () => ({ status: 0 }) });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('aws sso login'));
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 });
 

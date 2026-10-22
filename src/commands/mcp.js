@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { getCliVersion, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { safeHomedir } from '../core/homedir.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand } from '../utils/command.js';
+import { failCommand, refuseUnknownFlags } from '../utils/command.js';
 import { runStatus } from './status.js';
 import { runLogs } from './logs.js';
 import { auditSecrets } from './secrets.js';
@@ -386,7 +386,8 @@ export function createMcpServer() {
 export function parseMcpArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'mcp') args.shift();
-    const { options } = parseFlags(args, { string: ['install', 'transport', 'host'], number: ['port'] });
+    const { options, unknown } = parseFlags(args, { string: ['install', 'transport', 'host'], number: ['port'] });
+    if (unknown.length > 0) options.unknownFlags = unknown;
     if (options.install === undefined) {
         // parseFlags drops a trailing valueless `--install`; detect the
         // flag's presence so runMcp reports usage instead of starting
@@ -651,6 +652,8 @@ export function installMcpConfig(editor, { homeDir = safeHomedir(), platform = o
 // until the client disconnects or receives SIGINT/SIGTERM.
 export async function runMcp(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'mcp', event: 'mcp_install' });
+    if (unknownRefusal) return unknownRefusal;
     if (options.install !== undefined) {
         const installed = installMcpConfig(options.install, { homeDir: options.homeDir, platform: options.platform });
         if (!installed.ok) {

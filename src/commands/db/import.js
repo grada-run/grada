@@ -8,7 +8,7 @@ import zlib from 'node:zlib';
 import color from 'picocolors';
 import { intro, outro, spinner, select, text, password, confirm, cancel, isCancel } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
@@ -49,7 +49,7 @@ export function parseDbImportArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'db') args.shift();
     if (args[0] === 'import') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: [
             { name: 'file', key: 'file' },
             { name: 'from', key: 'from' },
@@ -62,6 +62,7 @@ export function parseDbImportArgs(argv = []) {
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.unexpectedPositionals = positionals;
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -165,6 +166,8 @@ export async function runDbImport(input = {}) {
 
 async function runDbImportMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'db import', event: 'db_import_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

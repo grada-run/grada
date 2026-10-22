@@ -8,7 +8,7 @@ import {
 import color from 'picocolors';
 import { intro, outro, spinner, select, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, failAwsError, failProjectNotInitialized, refuseIfNonInteractive } from '../utils/command.js';
+import { failCommand, failAwsError, failProjectNotInitialized, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
@@ -28,11 +28,12 @@ export const DEFAULT_TIMEOUT_MS = 300000;
 export function parseRollbackArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'rollback') args.shift();
-    const { options: parsed, rest } = parseFlags(args, {
+    const { options: parsed, rest, unknown } = parseFlags(args, {
         string: ['cluster', 'service', 'region', 'workspace'],
         boolean: ['skip-wait'],
     });
     const options = { skipWait: false, ...parsed };
+    if (unknown.length > 0) options.unknownFlags = unknown;
     for (const arg of rest) {
         if (typeof arg === 'string' && !arg.startsWith('-') && options.revision === undefined) {
             options.revision = arg;
@@ -73,6 +74,8 @@ export async function runRollback(input = {}) {
 
 async function runRollbackMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'rollback', event: 'rollback_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

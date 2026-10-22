@@ -11,8 +11,8 @@ import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars, addonTargetDisp
 import { stripTerraformMetadata, readEjectedMarker } from '../utils/terraform-metadata.js';
 import { normalizeDomain, isValidDomain, normalizeZoneId, isValidFromEmail, parseDomainTf } from '../utils/domains.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive } from '../utils/command.js';
-import { findArrayBounds, findMapBounds, findNestedBlock, findResourceBlock, enclosingBraceBounds, normalizeBlankLines, realignAssignmentRuns } from '../utils/hcl.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
+import { findArrayBounds, findMapBounds, findNestedBlock, findResourceBlock, removeResourceBlock, enclosingBraceBounds, normalizeBlankLines, realignAssignmentRuns } from '../utils/hcl.js';
 import { syncDocCostEstimate } from '../utils/visualizer.js';
 import { withProjectLock } from '../utils/file-lock.js';
 import { guardSleepingEnv, resolveSleepTarget } from '../utils/sleep-state.js';
@@ -76,7 +76,7 @@ export const DB_ADD_ENGINES = {
 export function parseAddArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'add') args.shift();
-    const { options: parsed, rest } = parseFlags(args, {
+    const { options: parsed, rest, unknown } = parseFlags(args, {
         string: ['region', 'project-name', 'partition-key', 'model', 'domain', 'from-email', 'zone-id', 'schedule', { name: 'cmd', key: 'cronCommand' }, { name: 'cron-command', key: 'cronCommand' }, 'name', 'timezone'],
         boolean: ['force', { name: 'headless', key: 'isHeadless' }],
         bareBoolean: ['list-models', 'refresh'],
@@ -92,6 +92,7 @@ export function parseAddArgs(argv = []) {
         ...parsed,
     };
     if (parsed.model !== undefined) options.modelProvided = true;
+    if (unknown.length > 0) options.unknownFlags = unknown;
     for (const arg of rest) {
         if (typeof arg === 'string' && !arg.startsWith('-') && options.capability === undefined) {
             options.capability = arg;
@@ -478,21 +479,34 @@ resource "aws_subnet" "db_isolated" {
 }`;
 
 // Idempotently appends the isolated-subnet block to network.tf content.
-// Returns the content unchanged when the block already exists.
+// Returns the content unchanged when the block already exists. Uses the
+// HCL-aware lookup so a comment quoting the header never false-positives.
 export function ensureIsolatedSubnets(networkTfContent) {
     const content = String(networkTfContent ?? '');
-    if (content.includes('resource "aws_subnet" "db_isolated"')) return content;
+    if (findResourceBlock(content, 'aws_subnet', 'db_isolated')) return content;
     const prefix = content.endsWith('\n') ? content : `${content}\n`;
     return `${prefix}\n${ISOLATED_SUBNETS_BLOCK}\n`;
 }
 
 // Backfills the isolated-subnet block into a tree whose network.tf predates
-// it. No-op when network.tf is missing (static) or already has the block.
-// Returns true when the file was written.
+// it. Legacy trees carry the block in database.tf instead: it is migrated
+// (same state address — no state move needed), never duplicated. No-op
+// when network.tf is missing (static), already has the block, or an
+// unexpected file declares it. Returns true when network.tf was written.
 async function backfillIsolatedSubnets(projectDir) {
-    const networkTfPath = path.join(projectDir, 'terraform', 'network.tf');
+    const tfDir = path.join(projectDir, 'terraform');
+    const networkTfPath = path.join(tfDir, 'network.tf');
     if (!fsSync.existsSync(networkTfPath)) return false;
     const before = await fs.readFile(networkTfPath, 'utf-8');
+    if (findResourceBlock(before, 'aws_subnet', 'db_isolated')) return false;
+    for (const file of fsSync.readdirSync(tfDir).filter((f) => f.endsWith('.tf'))) {
+        if (file === 'network.tf') continue;
+        const filePath = path.join(tfDir, file);
+        const content = await fs.readFile(filePath, 'utf-8');
+        if (!findResourceBlock(content, 'aws_subnet', 'db_isolated')) continue;
+        if (file !== 'database.tf') return false;
+        await atomicWriteFile(filePath, normalizeBlankLines(removeResourceBlock(content, 'aws_subnet', 'db_isolated')));
+    }
     const after = ensureIsolatedSubnets(before);
     if (after === before) return false;
     await atomicWriteFile(networkTfPath, normalizeBlankLines(after));
@@ -1244,6 +1258,8 @@ export async function runAdd(input = {}) {
 
 async function runAddMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'add', event: 'add_run' });
+    if (unknownRefusal) return unknownRefusal;
     const noExit = isProgrammaticCall(options);
     let cwd;
     let projectName;

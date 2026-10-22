@@ -2086,6 +2086,69 @@ describe('ensureIsolatedSubnets', () => {
         expect(result.ok).toBe(true);
         expect(fs.readFileSync(networkTfPath, 'utf-8')).toBe(before);
     });
+
+    it.each([
+        ['redis on a dbless tree', 'db:redis', false],
+        ['redis on a tree with a legacy database.tf', 'db:redis', true],
+        ['postgres on a dbless tree', 'db:postgres', false],
+        ['postgres on a tree with a legacy database.tf', 'db:postgres', true],
+    ])('leaves exactly one db_isolated block: %s', async (_label, capability, withDb) => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'network.tf'), OLD_NETWORK_TF);
+        if (withDb) {
+            fs.writeFileSync(
+                path.join(dir, 'terraform', 'database.tf'),
+                [
+                    '# 1. Isolated Subnets (No Internet Gateway routing)',
+                    'resource "aws_subnet" "db_isolated" {',
+                    '  count = 2',
+                    '}',
+                    '',
+                    'resource "aws_db_subnet_group" "main" {',
+                    '  name = "myapp-db-subnet-group"',
+                    '}',
+                    '',
+                ].join('\n')
+            );
+        }
+        const result = await runAdd({ cwd: dir, capability, ...(withDb ? { force: true } : {}) });
+        expect(result.ok).toBe(true);
+        const declarations = fs.readdirSync(path.join(dir, 'terraform'))
+            .filter((f) => f.endsWith('.tf'))
+            .map((f) => fs.readFileSync(path.join(dir, 'terraform', f), 'utf-8'))
+            .join('\n')
+            .match(/resource "aws_subnet" "db_isolated"/g) || [];
+        expect(declarations).toHaveLength(1);
+        expect(fs.readFileSync(path.join(dir, 'terraform', 'network.tf'), 'utf-8')).toContain(
+            'resource "aws_subnet" "db_isolated"'
+        );
+    });
+});
+
+describe('removeResourceBlock', () => {
+    it('excises the block plus attached comments and nothing else', async () => {
+        const { removeResourceBlock } = await import('../src/utils/hcl.js');
+        const content = [
+            'resource "aws_vpc" "main" {}',
+            '',
+            '# 1. Isolated Subnets (No Internet Gateway routing)',
+            'resource "aws_subnet" "db_isolated" {',
+            '  count = 2',
+            '}',
+            '',
+            'resource "aws_db_subnet_group" "main" {}',
+            '',
+        ].join('\n');
+        const removed = removeResourceBlock(content, 'aws_subnet', 'db_isolated');
+        expect(removed).not.toContain('db_isolated');
+        expect(removed).not.toContain('Isolated Subnets');
+        expect(removed).toContain('resource "aws_vpc" "main" {}');
+        expect(removed).toContain('resource "aws_db_subnet_group" "main" {}');
+        expect(removeResourceBlock('resource "aws_vpc" "main" {}\n', 'aws_subnet', 'db_isolated')).toBe(
+            'resource "aws_vpc" "main" {}\n'
+        );
+    });
 });
 
 describe('lambda generated terraform', () => {

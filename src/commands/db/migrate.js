@@ -3,7 +3,7 @@ import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner, text, isCancel } from '@clack/prompts';
 import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName, getCliVersion } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
@@ -58,7 +58,7 @@ export function parseDbMigrateArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'db') args.shift();
     if (args[0] === 'migrate') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: [
             { name: 'cmd', key: 'cmd' },
             { name: 'task-def', key: 'taskDef' },
@@ -74,6 +74,7 @@ export function parseDbMigrateArgs(argv = []) {
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.unexpectedPositionals = positionals;
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -260,6 +261,8 @@ export async function runDbMigrate(input = {}) {
 
 async function runDbMigrateMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'db migrate', event: 'db_migrate_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

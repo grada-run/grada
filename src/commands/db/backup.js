@@ -2,7 +2,7 @@ import { RDSClient, CreateDBSnapshotCommand, DescribeDBSnapshotsCommand, CreateD
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized } from '../../utils/command.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveAppName, resolveCwd } from '../../utils/resolvers.js';
@@ -22,7 +22,7 @@ export function parseDbBackupArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'db') args.shift();
     if (args[0] === 'backup') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: [
             { name: 'id', key: 'snapshotId' },
             { name: 'timeout', key: 'timeout' },
@@ -35,6 +35,7 @@ export function parseDbBackupArgs(argv = []) {
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.unexpectedPositionals = positionals;
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -51,6 +52,8 @@ export async function runDbBackup(input = {}) {
 
 async function runDbBackupMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'db backup', event: 'db_backup_run' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let projectName;

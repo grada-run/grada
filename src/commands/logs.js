@@ -4,7 +4,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, isComputeTarget } from '../utils/resolvers.js';
-import { failCommand, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
+import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { sleep } from '../utils/system.js';
 
 export const DEFAULT_TAIL_LINES = 50;
@@ -85,7 +85,7 @@ export const formatLogEvent = formatLogLine;
 export function parseLogsArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'logs') args.shift();
-    const { options, rest } = parseFlags(args, {
+    const { options, rest, unknown } = parseFlags(args, {
         string: ['since', 'region'],
         number: ['tail'],
         bareBoolean: ['follow', 'error'],
@@ -93,6 +93,7 @@ export function parseLogsArgs(argv = []) {
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
     if (positionals.length > 0) options.service = positionals[0];
+    if (unknown.length > 0) options.unknownFlags = unknown;
     return options;
 }
 
@@ -134,6 +135,8 @@ export async function runLogs(input = {}) {
 
 async function runLogsMain(input = {}) {
     const options = normalizeOptions(input);
+    const unknownRefusal = await refuseUnknownFlags(options, { command: 'logs', event: 'logs_streamed' });
+    if (unknownRefusal) return unknownRefusal;
     let cwd;
     let region;
     let service;

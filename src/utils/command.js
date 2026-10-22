@@ -52,6 +52,26 @@ export async function refuseIfNonInteractive(options = {}, spec = {}) {
     });
 }
 
+// Unknown flags fail loud at the gate: a typo like --skp-db must never
+// silently widen a command. Parse functions surface parseFlags' unknown
+// list as options.unknownFlags; run functions call this first.
+export async function refuseUnknownFlags(options = {}, spec = {}) {
+    const opts = normalizeOptions(options);
+    const unknown = Array.isArray(opts.unknownFlags) ? opts.unknownFlags.filter((f) => typeof f === 'string' && f !== '') : [];
+    if (unknown.length === 0) return null;
+    const { command, event, telemetry } = spec;
+    return failCommand({
+        noExit: isProgrammaticCall(opts),
+        message: `\n✖ Unknown flag "${unknown[0]}" for ${command}.\n`,
+        hint: '  Check the spelling or run "grada --help" for usage.\n',
+        event,
+        telemetry,
+        errorCode: 'UNKNOWN_FLAG',
+        reason: 'unknown-flag',
+        exitCode: 1,
+    });
+}
+
 function paint(tone, fallback) {
     return typeof color[tone] === 'function' ? color[tone] : fallback;
 }
