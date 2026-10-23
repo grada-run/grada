@@ -3,8 +3,8 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import { ECRClient, DescribeRepositoriesCommand, DescribeImagesCommand, BatchDeleteImageCommand } from '@aws-sdk/client-ecr';
 import { CloudWatchLogsClient, DescribeLogGroupsCommand, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { ECSClient, ListServicesCommand } from '@aws-sdk/client-ecs';
-import { EC2Client, DescribeAddressesCommand, ReleaseAddressCommand, DescribeVpcsCommand } from '@aws-sdk/client-ec2';
+import { ECSClient, ListServicesCommand, DescribeServicesCommand } from '@aws-sdk/client-ecs';
+import { EC2Client, DescribeAddressesCommand, ReleaseAddressCommand, DescribeVpcsCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import { SecretsManagerClient, ListSecretsCommand } from '@aws-sdk/client-secrets-manager';
 import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
@@ -230,26 +230,75 @@ async function discoverUnattachedEips({ ec2Client, projectName }) {
 // predicate — exact project tag only. Foreign and untagged VPCs land in
 // reportOnly, never in deletable, so prefix lookalikes (`myapp-evil`)
 // and legacy resources can never enter the deletion set.
-async function discoverDeepVpcs({ ec2Client, projectName }) {
+// Live VPC ids behind running (or desired) ECS services: services →
+// awsvpc subnets → VPCs. Fail-closed like the preview-log-group
+// liveness: any client error resolves `unknown` instead of guessing.
+export async function discoverLiveVpcIds({ ecsClient = null, cluster = null, ec2Client = null } = {}) {
+    const vpcIds = new Set();
+    try {
+        if (!ecsClient || !cluster || !ec2Client) return { vpcIds, unknown: false };
+        let nextToken;
+        const arns = [];
+        do {
+            const resp = await ecsClient.send(new ListServicesCommand({ cluster, nextToken, maxResults: 100 }));
+            arns.push(...(resp.serviceArns || []));
+            nextToken = resp.nextToken;
+        } while (nextToken);
+        const subnetIds = new Set();
+        for (const batch of chunkArray(arns, 10)) {
+            const desc = await ecsClient.send(new DescribeServicesCommand({ cluster, services: batch }));
+            for (const svc of desc.services || []) {
+                // Desired counts: a crash-looping preview runs nothing
+                // yet is unambiguously live.
+                if ((svc.desiredCount ?? 0) <= 0 && (svc.runningCount ?? 0) <= 0) continue;
+                for (const id of svc.networkConfiguration?.awsvpcConfiguration?.subnets || []) subnetIds.add(id);
+            }
+        }
+        if (subnetIds.size > 0) {
+            const subs = await ec2Client.send(new DescribeSubnetsCommand({ SubnetIds: [...subnetIds] }));
+            for (const sn of subs.Subnets || []) if (sn.VpcId) vpcIds.add(sn.VpcId);
+        }
+    } catch {
+        return { vpcIds, unknown: true };
+    }
+    return { vpcIds, unknown: false };
+}
+
+async function discoverDeepVpcs({ ec2Client, ecsClient = null, cluster = null, projectName, resourceSuffix = '', isLambda = false }) {
     const deletable = [];
     const reportOnly = [];
+    // The stack's own default-workspace VPC is live by construction —
+    // asleep stacks run nothing, so task liveness alone would propose
+    // deleting the slept network. (Lambda trees create no VPCs, so the
+    // Name check is the whole liveness story there.)
+    const defaultVpcName = `${projectName}${resourceSuffix}-vpc`;
+    const live = isLambda
+        ? { vpcIds: new Set(), unknown: false }
+        : await discoverLiveVpcIds({ ecsClient, cluster, ec2Client });
     let nextToken;
     do {
         const resp = await ec2Client.send(new DescribeVpcsCommand({ NextToken: nextToken }));
         for (const vpc of resp.Vpcs || []) {
             const entry = { kind: 'vpc', id: vpc.VpcId };
-            if (hasExactProjectTag(vpc.Tags, projectName)) {
-                deletable.push(entry);
-            } else {
+            if (!hasExactProjectTag(vpc.Tags, projectName)) {
                 reportOnly.push({
                     ...entry,
                     reason: Array.isArray(vpc.Tags) && vpc.Tags.length > 0 ? 'foreign-project' : 'unscoped',
                 });
+                continue;
+            }
+            const name = (vpc.Tags || []).find((tag) => tag?.Key === 'Name')?.Value;
+            if (name === defaultVpcName || live.vpcIds.has(vpc.VpcId)) {
+                reportOnly.push({ ...entry, reason: 'live-excluded' });
+            } else if (live.unknown) {
+                reportOnly.push({ ...entry, reason: 'liveness-unknown' });
+            } else {
+                deletable.push(entry);
             }
         }
         nextToken = resp.NextToken;
     } while (nextToken);
-    return { deletable, reportOnly };
+    return { deletable, reportOnly, unknown: live.unknown };
 }
 
 // Deep target discovery: secrets are report-only, never deletable —
@@ -348,12 +397,14 @@ export async function discoverOrphanedResources(ctx) {
 export async function discoverDeepOrphans(ctx) {
     const deletable = [];
     const reportOnly = [];
+    let unknown = false;
     for (const target of GC_TARGETS.filter((entry) => entry.scope === 'deep')) {
         const found = await target.discover(ctx);
         deletable.push(...(found.deletable || []));
         reportOnly.push(...(found.reportOnly || []));
+        if (found.unknown === true) unknown = true;
     }
-    return { deletable, reportOnly };
+    return { deletable, reportOnly, unknown };
 }
 
 export const ECR_BATCH_DELETE_LIMIT = 100;
@@ -441,7 +492,11 @@ function printDeepReport(deep, projectName) {
                     ? 'owned — secrets are never auto-deleted'
                     : entry.reason === 'prefix-report-only'
                         ? 'name-prefix match — review before acting'
-                        : 'never deleted by gc';
+                        : entry.reason === 'live-excluded'
+                            ? 'live — excluded'
+                            : entry.reason === 'liveness-unknown'
+                                ? 'liveness unverifiable — review before acting'
+                                : 'never deleted by gc';
         console.log(`    ${color.dim('-')} ${entry.kind}/${entry.id} ${color.dim(`(${why})`)}`);
     }
     console.log('');
@@ -536,16 +591,24 @@ async function runGcMain(input = {}) {
     console.log(color.dim(`Total orphaned resources: ${discovered.totalCount}`));
 
     // Deep scan (opt-in): report-only audit of tag-keyed orphans (VPCs,
-    // secrets, state bucket). Never prompts, never deletes — the
-    // deletable partition only admits exact project tags, but even those
-    // need orphan verification (a live project's VPC matches too) before
-    // any future deletion acts on them.
+    // secrets, state bucket). Never prompts, never deletes — VPC
+    // candidates additionally pass ECS liveness plus the stack-VPC name
+    // check, so live networks land in report-only, never deletable.
     if (deep) {
         const ds = spinner();
         ds.start('Deep scanning tag-keyed orphans...');
         let deepResult;
         try {
-            deepResult = await discoverDeepOrphans({ ec2Client, secretsClient, cwd, projectName });
+            deepResult = await discoverDeepOrphans({
+                ec2Client,
+                secretsClient,
+                cwd,
+                projectName,
+                ecsClient,
+                cluster: resolveCluster(options, cwd),
+                resourceSuffix: readResourceSuffix(cwd),
+                isLambda: isComputeTarget(cwd, 'lambda'),
+            });
         } catch (error) {
             ds.stop(color.red('❌ Deep discovery failed.'));
             await trackFailure('gc_run', { projectName, deep: true, error_message: error?.message });
@@ -557,10 +620,14 @@ async function runGcMain(input = {}) {
             });
         }
         ds.stop('Deep discovery complete.');
+        if (deepResult.unknown === true) {
+            console.log(color.yellow('⚠ VPC liveness could not be verified — no VPCs will be proposed. Check credentials (ECS/EC2) and retry.'));
+        }
         printDeepReport(deepResult, projectName);
         const deepCounts = {
             vpc_deletable: deepResult.deletable.filter((entry) => entry.kind === 'vpc').length,
             vpc_report_only: deepResult.reportOnly.filter((entry) => entry.kind === 'vpc').length,
+            vpc_liveness_unknown: deepResult.unknown === true,
             secret_report_only: deepResult.reportOnly.filter((entry) => entry.kind === 'secret').length,
             state_bucket_report_only: deepResult.reportOnly.filter((entry) => entry.kind === 'state-bucket').length,
         };

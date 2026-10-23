@@ -209,6 +209,19 @@ async function runDriftMain(input = {}) {
             encoding: 'utf8',
             maxBuffer: 32 * 1024 * 1024,
         });
+        if (planResult?.error?.code === 'ENOBUFS') {
+            s.stop(color.red('Terraform plan output too large.'));
+            return failCommand({
+                noExit,
+                message: '\n✖ terraform plan output exceeded the 32MB buffer.\n',
+                hint: '  Narrow the plan with -target, or run terraform plan directly for the full output.\n',
+                event: 'drift_run',
+                telemetry: { projectName, action: 'check' },
+                errorCode: 'TERRAFORM_PLAN_TOO_LARGE',
+                reason: 'terraform-plan-too-large',
+                resultExtra: { region },
+            });
+        }
         const status = planResult?.status;
         if (status === 0) {
             s.stop(color.green('No drift.'));

@@ -109,7 +109,7 @@ describe('ensureStateBucketExists', () => {
   it('creates, tags, and versions the exact bucket passed in', async () => {
     const result = await ensureStateBucketExists({ region: 'us-east-2', bucket: 'myapp-a1b2c3-tfstate-123456789012' });
 
-    expect(result).toEqual({ bucket: 'myapp-a1b2c3-tfstate-123456789012' });
+    expect(result).toEqual({ bucket: 'myapp-a1b2c3-tfstate-123456789012', created: true });
     expect(MockCreateBucketCommand).toHaveBeenCalledWith(
       expect.objectContaining({
         Bucket: 'myapp-a1b2c3-tfstate-123456789012',
@@ -137,7 +137,17 @@ describe('ensureStateBucketExists', () => {
 
     const result = await ensureStateBucketExists({ region: 'us-east-2', bucket: 'myapp-tfstate-123456789012' });
 
-    expect(result).toEqual({ bucket: 'myapp-tfstate-123456789012' });
+    expect(result).toEqual({ bucket: 'myapp-tfstate-123456789012', created: false });
+  });
+
+  it('uses an injected client instead of constructing one', async () => {
+    const s3Client = { send: vi.fn(async () => ({})) };
+
+    const result = await ensureStateBucketExists({ region: 'us-east-2', bucket: 'myapp-tfstate-123456789012', s3Client });
+
+    expect(result).toEqual({ bucket: 'myapp-tfstate-123456789012', created: true });
+    expect(s3Client.send).toHaveBeenCalledTimes(3);
+    expect(mockS3Send).not.toHaveBeenCalled();
   });
 });
 

@@ -112,6 +112,7 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - `secrets` fails with `SECRETS_NON_INTERACTIVE` before prompts it cannot answer — `push` with no `.env` file (generate it first), `push` restart approval (pass `--headless` to defer to the next deploy), `pull` overwrite approval (pass `--headless` to overwrite).
 - `sleep` fails with `SLEEP_NON_INTERACTIVE` before putting the default environment to sleep without confirmation (pass `--yes`).
 - Every command rejects a misspelled or unsupported flag with `UNKNOWN_FLAG` — naming the offending flag — instead of silently ignoring it (a typo like `sleep --skp-db` exits 1 before touching anything; check the spelling or run `grada <command> --help`).
+- `apply` fails with `RECONCILE_NON_INTERACTIVE` on an unreconciled `--offline` tree without approval (pass `--auto-approve` to rewrite the placeholders and create the state bucket non-interactively).
 - Anything that escapes all of the above (an SDK-internal failure, a bug) is caught by a last-resort handler: exit 1 with a one-line report on stderr — or a parseable `{ok: false, exitCode: 1, error, reason}` envelope on stdout under `--json` — so even unanticipated failures stay machine-readable.
 
 ## Exit codes

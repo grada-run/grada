@@ -11,6 +11,8 @@ import {
     filterUntaggedImages,
     filterUnattachedAddresses,
     discoverOrphanedResources,
+    discoverDeepOrphans,
+    discoverLiveVpcIds,
     deleteDiscoveredResources,
     chunkArray,
     ECR_BATCH_DELETE_LIMIT,
@@ -69,7 +71,7 @@ vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
 }));
 
 // --- Mock AWS SDK: EC2 ---
-const { mockEc2Send, MockEC2Client, MockDescribeAddressesCommand, MockReleaseAddressCommand, MockDescribeVpcsCommand } = vi.hoisted(() => {
+const { mockEc2Send, MockEC2Client, MockDescribeAddressesCommand, MockReleaseAddressCommand, MockDescribeVpcsCommand, MockDescribeSubnetsCommand } = vi.hoisted(() => {
     const send = vi.fn();
     const makeCommand = (name) =>
         vi.fn(function (input) {
@@ -84,6 +86,7 @@ const { mockEc2Send, MockEC2Client, MockDescribeAddressesCommand, MockReleaseAdd
         MockDescribeAddressesCommand: makeCommand('DescribeAddressesCommand'),
         MockReleaseAddressCommand: makeCommand('ReleaseAddressCommand'),
         MockDescribeVpcsCommand: makeCommand('DescribeVpcsCommand'),
+        MockDescribeSubnetsCommand: makeCommand('DescribeSubnetsCommand'),
     };
 });
 
@@ -92,10 +95,11 @@ vi.mock('@aws-sdk/client-ec2', () => ({
     DescribeAddressesCommand: MockDescribeAddressesCommand,
     ReleaseAddressCommand: MockReleaseAddressCommand,
     DescribeVpcsCommand: MockDescribeVpcsCommand,
+    DescribeSubnetsCommand: MockDescribeSubnetsCommand,
 }));
 
 // --- Mock AWS SDK: ECS (preview liveness only) ---
-const { mockEcsSend, MockECSClient, MockListServicesCommand } = vi.hoisted(() => {
+const { mockEcsSend, MockECSClient, MockListServicesCommand, MockDescribeServicesCommand } = vi.hoisted(() => {
     const send = vi.fn();
     const makeCommand = (name) =>
         vi.fn(function (input) {
@@ -108,12 +112,14 @@ const { mockEcsSend, MockECSClient, MockListServicesCommand } = vi.hoisted(() =>
             this.send = send;
         }),
         MockListServicesCommand: makeCommand('ListServicesCommand'),
+        MockDescribeServicesCommand: makeCommand('DescribeServicesCommand'),
     };
 });
 
 vi.mock('@aws-sdk/client-ecs', () => ({
     ECSClient: MockECSClient,
     ListServicesCommand: MockListServicesCommand,
+    DescribeServicesCommand: MockDescribeServicesCommand,
 }));
 
 // --- Mock AWS SDK: Secrets Manager (deep scan only) ---
@@ -833,5 +839,150 @@ describe('gc: AWS failure wrapping', () => {
         const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: true });
         expect(result).toEqual(expect.objectContaining({ ok: false, exitCode: 1 }));
         expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('warns and reports VPCs as liveness-unknown when the deep ECS walk fails', async () => {
+        mockEcsSend.mockImplementationOnce(async (cmd) => {
+            if (cmd instanceof MockListServicesCommand) return { serviceArns: [] };
+            throw new Error(`Unexpected ECS command: ${cmd?.commandName}`);
+        });
+        mockEcsSend.mockImplementation(async () => {
+            const failure = new Error('socket hang up');
+            failure.name = 'NetworkingError';
+            throw failure;
+        });
+        mockEc2Send.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockDescribeAddressesCommand) return { Addresses: [] };
+            if (cmd instanceof MockDescribeVpcsCommand) {
+                return {
+                    Vpcs: [{
+                        VpcId: 'vpc-maybe',
+                        Tags: [
+                            { Key: 'GradaProject', Value: PROJECT },
+                            { Key: 'Name', Value: `${PROJECT}-pr-3-vpc` },
+                        ],
+                    }],
+                };
+            }
+            throw new Error(`Unexpected EC2 command: ${cmd?.commandName}`);
+        });
+        mockSecretsSend.mockResolvedValue({ SecretList: [] });
+
+        const result = await runGc({ projectName: PROJECT, region: 'us-east-2', deep: true });
+        expect(result.ok).not.toBe(false);
+        const text = output.join('\n');
+        expect(text).toContain('VPC liveness could not be verified');
+        expect(result.deep.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-maybe', reason: 'liveness-unknown' });
+        expect(trackEvent).toHaveBeenCalledWith('gc_deep_report', expect.objectContaining({
+            vpc_liveness_unknown: true,
+            vpc_deletable: 0,
+        }));
+    });
+});
+
+describe('gc: deep VPC liveness', () => {
+    const tagged = (vpcId, name) => ({
+        VpcId: vpcId,
+        Tags: [
+            { Key: 'GradaProject', Value: PROJECT },
+            { Key: 'Name', Value: name },
+        ],
+    });
+
+    function deepCtx({ vpcs, services = [], subnets = [], isLambda = false, ecsImpl = null } = {}) {
+        const ecsSend = ecsImpl ?? (async (cmd) => {
+            if (cmd.commandName === 'ListServicesCommand') {
+                return { serviceArns: services.map((s) => s.arn) };
+            }
+            if (cmd.commandName === 'DescribeServicesCommand') {
+                return { services: services.filter((s) => cmd.services.includes(s.arn)).map((s) => s.detail) };
+            }
+            throw new Error(`Unexpected ECS command: ${cmd?.commandName}`);
+        });
+        return {
+            ec2Client: {
+                send: vi.fn(async (cmd) => {
+                    if (cmd.commandName === 'DescribeVpcsCommand') return { Vpcs: vpcs };
+                    if (cmd.commandName === 'DescribeSubnetsCommand') {
+                        return { Subnets: subnets.filter((s) => cmd.SubnetIds.includes(s.SubnetId)) };
+                    }
+                    throw new Error(`Unexpected EC2 command: ${cmd?.commandName}`);
+                }),
+            },
+            ecsClient: { send: vi.fn(ecsSend) },
+            secretsClient: { send: vi.fn(async () => ({ SecretList: [] })) },
+            cluster: `${PROJECT}-cluster`,
+            projectName: PROJECT,
+            resourceSuffix: '',
+            isLambda,
+        };
+    }
+
+    it('excludes the stack VPC by Name with zero running services (asleep safe)', async () => {
+        const found = await discoverDeepOrphans(deepCtx({
+            vpcs: [tagged('vpc-stack', `${PROJECT}-vpc`), tagged('vpc-orphan', `${PROJECT}-pr-9-vpc`)],
+        }));
+
+        expect(found.unknown).toBe(false);
+        expect(found.deletable).toEqual([{ kind: 'vpc', id: 'vpc-orphan' }]);
+        expect(found.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-stack', reason: 'live-excluded' });
+    });
+
+    it('treats desired-but-not-running services as live (crash loops count)', async () => {
+        const found = await discoverDeepOrphans(deepCtx({
+            vpcs: [tagged('vpc-preview', `${PROJECT}-pr-12-vpc`)],
+            services: [{
+                arn: 'arn:svc/pr-12',
+                detail: {
+                    desiredCount: 1,
+                    runningCount: 0,
+                    networkConfiguration: { awsvpcConfiguration: { subnets: ['sub-1'] } },
+                },
+            }],
+            subnets: [{ SubnetId: 'sub-1', VpcId: 'vpc-preview' }],
+        }));
+
+        expect(found.deletable).toEqual([]);
+        expect(found.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-preview', reason: 'live-excluded' });
+    });
+
+    it('skips zero-desired zero-running services', async () => {
+        const { vpcIds, unknown } = await discoverLiveVpcIds({
+            ecsClient: {
+                send: vi.fn(async (cmd) => {
+                    if (cmd.commandName === 'ListServicesCommand') return { serviceArns: ['arn:svc/idle'] };
+                    return { services: [{ desiredCount: 0, runningCount: 0, networkConfiguration: { awsvpcConfiguration: { subnets: ['sub-9'] } } }] };
+                }),
+            },
+            cluster: `${PROJECT}-cluster`,
+            ec2Client: { send: vi.fn(async () => ({ Subnets: [] })) },
+        });
+
+        expect(unknown).toBe(false);
+        expect([...vpcIds]).toEqual([]);
+    });
+
+    it('fails closed to report-only with unknown on ECS errors', async () => {
+        const found = await discoverDeepOrphans(deepCtx({
+            vpcs: [tagged('vpc-maybe', `${PROJECT}-pr-3-vpc`)],
+            ecsImpl: async () => { throw new Error('socket hang up'); },
+        }));
+
+        expect(found.unknown).toBe(true);
+        expect(found.deletable).toEqual([]);
+        expect(found.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-maybe', reason: 'liveness-unknown' });
+    });
+
+    it('on lambda skips the ECS walk: Name check only, no ECS calls', async () => {
+        const ctx = deepCtx({
+            vpcs: [tagged('vpc-stack', `${PROJECT}-vpc`), tagged('vpc-leftover', `${PROJECT}-pr-9-vpc`)],
+            isLambda: true,
+        });
+        const found = await discoverDeepOrphans(ctx);
+
+        expect(ctx.ecsClient.send).not.toHaveBeenCalled();
+        expect(found.unknown).toBe(false);
+        expect(found.deletable).toEqual([{ kind: 'vpc', id: 'vpc-leftover' }]);
+        expect(found.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-stack', reason: 'live-excluded' });
     });
 });

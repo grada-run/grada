@@ -480,7 +480,8 @@ resource "aws_subnet" "db_isolated" {
 
 // Idempotently appends the isolated-subnet block to network.tf content.
 // Returns the content unchanged when the block already exists. Uses the
-// HCL-aware lookup so a comment quoting the header never false-positives.
+// line-anchored lookup so a `#` comment quoting the header never
+// false-positives.
 export function ensureIsolatedSubnets(networkTfContent) {
     const content = String(networkTfContent ?? '');
     if (findResourceBlock(content, 'aws_subnet', 'db_isolated')) return content;

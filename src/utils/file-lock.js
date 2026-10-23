@@ -127,25 +127,3 @@ export async function withProjectLock(cwd, fn, options = {}) {
         releaseLock(lockDir);
     }
 }
-
-// Synchronous single-attempt variant for sync-only call sites (domain
-// provider injection). Never waits: takes over stale locks, otherwise
-// throws FILE_LOCK_TIMEOUT immediately.
-export function withProjectLockSync(cwd, fn, options = {}) {
-    const { scope = 'project', staleMs = DEFAULT_LOCK_STALE_MS } = options || {};
-    const lockDir = lockDirFor(cwd, scope);
-    fs.mkdirSync(path.dirname(lockDir), { recursive: true });
-    if (!tryAcquire(lockDir)) {
-        if (lockAgeMs(lockDir) > staleMs) {
-            releaseLock(lockDir);
-            if (!tryAcquire(lockDir)) throw timeoutError(scope, 0);
-        } else {
-            throw timeoutError(scope, 0);
-        }
-    }
-    try {
-        return fn();
-    } finally {
-        releaseLock(lockDir);
-    }
-}

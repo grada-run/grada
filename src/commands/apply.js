@@ -5,18 +5,20 @@ import color from 'picocolors';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
+import { failCommand, isProgrammaticCall, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { spawnSync } from 'child_process';
 import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
 import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { readInitManifest, recordAppliedTarget } from '../utils/backup.js';
-import { requireManagedTree } from '../utils/terraform-metadata.js';
-import { readTerraformComputeTarget } from '../utils/resolvers.js';
+import { requireManagedTree, parseStateBucketBackend } from '../utils/terraform-metadata.js';
+import { readTerraformComputeTarget, resolveRegion } from '../utils/resolvers.js';
 import { requireAwakeEnvironment, resolveSleepTarget, guardSleepingEnv } from '../utils/sleep-state.js';
 import { promptStateBucketRecovery, recreateStateBucket } from '../utils/recovery.js';
 import { resolveProjectName, readResourceSuffix } from '../utils/resolvers.js';
 import { ensureLambdaSeedImage } from '../utils/lambda-ecr.js';
+import { checkAwsCredentials, ensureStateBucketExists, printAwsAuthGuidance } from '../utils/aws.js';
+import { findUnreconciledFiles, isValidAccountId, PLACEHOLDER_ACCOUNT_ID } from '../utils/reconcile.js';
 import { runWake } from './wake.js';
 
 export function parseApplyArgs(argv = []) {
@@ -24,10 +26,104 @@ export function parseApplyArgs(argv = []) {
     if (args[0] === 'apply' || args[0] === 'deploy') args.shift();
     const { options, unknown } = parseFlags(args, {
         boolean: ['force', 'destroy-previous-target', 'force-resume', 'allow-partial-outputs', 'headless', 'auto-approve', 'dry-run'],
-        string: ['force-unlock'],
+        string: ['force-unlock', 'account-id'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return { force: false, ...options };
+}
+
+// Offline reconcile: an `init --offline` tree carries
+// YOUR_AWS_ACCOUNT_ID placeholders instead of an account id and has no
+// state bucket. Resolve the account (explicit flag, else STS ground
+// truth), confirm once, rewrite the files, and ensure the bucket —
+// afterwards the normal flow sees a reconciled tree. Returns
+// { proceed: true } or { proceed: false, result } carrying the
+// refusal/failure for the caller to return.
+export async function reconcileOfflineTree({ targetDir, options = {}, projectName }) {
+    const files = findUnreconciledFiles(targetDir);
+    let accountId;
+    let source;
+    const flag = options.accountId;
+    if (flag !== undefined && flag !== null) {
+        if (!isValidAccountId(flag)) {
+            return {
+                proceed: false,
+                result: await failCommand({
+                    noExit: isProgrammaticCall(options),
+                    message: `\n✖ Invalid --account-id "${flag}": ${describeAccountIdShape(flag)}.\n`,
+                    event: 'infrastructure_applied',
+                    telemetry: { projectName },
+                    errorCode: 'INVALID_ACCOUNT_ID',
+                    reason: 'invalid-account-id',
+                }),
+            };
+        }
+        accountId = flag;
+        source = 'flag';
+    } else {
+        try {
+            accountId = (await checkAwsCredentials(resolveRegion(options, targetDir))).accountId;
+            source = 'sts';
+        } catch {
+            printAwsAuthGuidance(options);
+            return {
+                proceed: false,
+                result: await failCommand({
+                    noExit: isProgrammaticCall(options),
+                    message: '\n✖ Could not resolve the AWS account: configure credentials first — apply cannot provision without them.\n',
+                    event: 'infrastructure_applied',
+                    telemetry: { projectName },
+                    errorCode: 'AWS_CREDENTIALS_MISSING',
+                    reason: 'aws-credentials-missing',
+                }),
+            };
+        }
+    }
+    const from = source === 'flag' ? '--account-id' : 'AWS credentials';
+    log.message(`Reconciling ${files.length} offline placeholder file(s) with account ${color.cyan(accountId)} (from ${from}):`);
+    for (const file of files) log.message(`  ${color.dim('-')} ${file}`);
+    const refused = await refuseIfNonInteractive(options, {
+        message: '\n✖ apply needs approval to reconcile offline placeholders.',
+        hint: '  Re-run with --auto-approve to reconcile non-interactively.\n',
+        event: 'infrastructure_applied',
+        telemetry: { projectName },
+        errorCode: 'RECONCILE_NON_INTERACTIVE',
+    });
+    if (refused) return { proceed: false, result: refused };
+    if (!shouldAutoApprove(options)) {
+        const confirmed = await confirm({
+            message: 'Rewrite the placeholders and ensure the state bucket?',
+            initialValue: false,
+        });
+        if (confirmed !== true) {
+            cancel('Reconcile aborted.');
+            process.exit(0);
+        }
+    }
+    for (const file of files) {
+        const abs = path.join(targetDir, file);
+        fs.writeFileSync(abs, fs.readFileSync(abs, 'utf8').split(PLACEHOLDER_ACCOUNT_ID).join(accountId));
+    }
+    log.message(color.green(`Rewrote ${files.length} file(s).`));
+    const backend = fs.readFileSync(path.join(targetDir, 'terraform', 'backend.tf'), 'utf8');
+    const { bucket, region: backendRegion } = parseStateBucketBackend(backend);
+    const ensured = await ensureStateBucketExists({
+        region: backendRegion ?? resolveRegion(options, targetDir),
+        bucket,
+    });
+    trackEvent('apply_reconciled', {
+        projectName,
+        account_source: source,
+        file_count: files.length,
+        bucket_created: ensured.created,
+    });
+    return { proceed: true };
+}
+
+function describeAccountIdShape(value) {
+    const text = String(value);
+    if (!/^\d+$/.test(text)) return 'expected exactly 12 digits, got non-digit characters';
+    return `expected exactly 12 digits, got ${text.length}`;
 }
 
 // Unlock-and-retry flow for a stale Terraform state lock. Headless
@@ -213,14 +309,26 @@ async function applyStackMain(input = {}) {
         });
     }
 
-    // 1a. Surface an interrupted previous run. Informational only — the
+    // 1a. Offline reconcile: an `init --offline` tree still carries
+    // account placeholders and has no state bucket — resolve, confirm,
+    // rewrite, and ensure it before anything reads the files. Dry runs
+    // only warn: previews change nothing.
+    const unreconciled = findUnreconciledFiles(targetDir);
+    if (unreconciled.length > 0 && !options.isDryRun) {
+        const reconciled = await reconcileOfflineTree({ targetDir, options, projectName: path.basename(targetDir) });
+        if (!reconciled.proceed) return reconciled.result;
+    } else if (unreconciled.length > 0) {
+        log.warn(color.yellow('⚠ This tree still carries offline account placeholders. Run a real apply to reconcile it.'));
+    }
+
+    // 1b. Surface an interrupted previous run. Informational only — the
     // new run overwrites the marker when it starts.
     const lastRun = readLastRunMarker(targetDir);
     if (isInterruptedMarker(lastRun)) {
         log.warn(color.yellow(`⚠ Previous ${lastRun.command || 'terraform'} run was interrupted (started ${lastRun.startedAt || 'unknown'}). If it died mid-apply, review with ${color.green('cd terraform && terraform plan')} before trusting this run.`));
     }
 
-    // 1b. Refuse to apply against an asleep environment: apply resets
+    // 1c. Refuse to apply against an asleep environment: apply resets
     // the app desired count while the database stays stopped, so fresh
     // tasks would crash-loop. Dry runs change nothing, so they keep the
     // historical advisory warning instead of the shared gate.

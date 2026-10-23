@@ -138,6 +138,18 @@ describe('hcl: findResourceBlock', () => {
         expect(findResourceBlock('', 'aws_x', 'y')).toBeNull();
     });
 
+    it('never matches a header quoted inside a # comment', () => {
+        const content = [
+            '# resource "aws_subnet" "db_isolated" was here before the move',
+            'resource "aws_vpc" "main" {',
+            '  cidr_block = "10.0.0.0/16"',
+            '}',
+            '',
+        ].join('\n');
+        expect(findResourceBlock(content, 'aws_subnet', 'db_isolated')).toBeNull();
+        expect(findResourceBlock(content, 'aws_vpc', 'main')).not.toBeNull();
+    });
+
     it('ignores braces inside strings and comments', () => {
         const content = [
             'resource "aws_x" "y" {',

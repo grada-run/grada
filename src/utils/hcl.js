@@ -92,11 +92,14 @@ function escapeRegExp(raw) {
 
 // Locates `resource "<type>" "<name>" { ... }`. Returns
 // `{ headerIdx, openIdx, closeIdx }` or null when the resource or its
-// braces cannot be found.
+// braces cannot be found. The header anchors to a line start (resource
+// blocks are top-level), so a `#` comment quoting the header never
+// false-positives.
 export function findResourceBlock(content, resourceType, resourceName) {
     const text = String(content ?? '');
     const pattern = new RegExp(
-        `resource\\s+"${escapeRegExp(resourceType)}"\\s+"${escapeRegExp(resourceName)}"`
+        `^\\s*resource\\s+"${escapeRegExp(resourceType)}"\\s+"${escapeRegExp(resourceName)}"`,
+        'm'
     );
     const match = pattern.exec(text);
     if (!match) return null;

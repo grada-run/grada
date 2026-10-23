@@ -41,11 +41,13 @@ import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-ru
 import { readFileSafe, COMPUTE_TARGETS, resolveHeadless, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust } from '../utils/resolvers.js';
 import { readGitHubRepoFromRemote, isValidGitHubRepoSlug } from '../utils/git.js';
 import { parseDomainTf } from '../utils/domains.js';
+import { PLACEHOLDER_ACCOUNT_ID } from '../utils/reconcile.js';
 
 // Greppable, invalid-as-real placeholder stamped into backend.tf and
 // workflow role ARNs by `init --offline`. Uppercase by design: S3 rejects
-// it, so an unreconciled tree fails loud at `terraform init`.
-export const OFFLINE_ACCOUNT_PLACEHOLDER = 'YOUR_AWS_ACCOUNT_ID';
+// it, so an unreconciled tree fails loud at `terraform init`. Single
+// source lives in reconcile.js; this alias keeps the init-facing name.
+export const OFFLINE_ACCOUNT_PLACEHOLDER = PLACEHOLDER_ACCOUNT_ID;
 
 // Reconciliation checklist for offline scaffolds. console.log (not clack)
 // so it lands in CI logs as well as terminals. Mirrors every call

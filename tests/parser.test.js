@@ -15,6 +15,11 @@ describe('CLI Argument Parser', () => {
         expect(result.baseCommand).toBe('secrets push');
     });
 
+    it('treats =false as telemetry-on and =garbage as not-a-global', () => {
+        expect(parseCliArgs(['status', '--no-telemetry=false']).hasNoTelemetry).toBe(false);
+        expect(parseCliArgs(['status', '--no-telemetry=yes']).hasNoTelemetry).toBe(false);
+    });
+
     it('correctly parses headless boolean flags without assignments', () => {
         // Simulating: npx deploy-stack --headless --needsDatabase
         const args = ['--headless', '--needsDatabase'];
@@ -212,7 +217,12 @@ describe('stripGlobalOnlyFlags', () => {
     it('removes --no-telemetry in bare and =forms, keeping everything else', () => {
         expect(stripGlobalOnlyFlags(['apply', '--no-telemetry', '--auto-approve'])).toEqual(['apply', '--auto-approve']);
         expect(stripGlobalOnlyFlags(['status', '--no-telemetry=true'])).toEqual(['status']);
+        expect(stripGlobalOnlyFlags(['status', '--no-telemetry=false'])).toEqual(['status']);
         expect(stripGlobalOnlyFlags(['db', 'migrate', '--cmd', 'x'])).toEqual(['db', 'migrate', '--cmd', 'x']);
+    });
+
+    it('passes flag-like values through instead of eating them', () => {
+        expect(stripGlobalOnlyFlags(['db', 'migrate', '--cmd', '--no-telemetry=x'])).toEqual(['db', 'migrate', '--cmd', '--no-telemetry=x']);
     });
 
     it('coerces non-array input to []', () => {

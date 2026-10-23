@@ -228,6 +228,19 @@ describe('runDrift check mode', () => {
         expect(initFailed.reason).toBe('terraform-init-failed');
     });
 
+    it('names buffer overflow distinctly instead of an empty plan-failed tail', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        const result = await runDrift(checkOptions(dir, { status: null, stdout: '', stderr: '', error: { code: 'ENOBUFS' } }));
+        expect(result).toMatchObject({ ok: false, reason: 'terraform-plan-too-large' });
+        expect(trackEvent).toHaveBeenCalledWith('drift_run', expect.objectContaining({
+            success: false,
+            error_code: 'TERRAFORM_PLAN_TOO_LARGE',
+        }));
+        const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(output).toContain('32MB');
+    });
+
     it('guides when terraform is missing or the project is uninitialized', async () => {
         const dir = makeTmp();
         writeMainTf(dir);

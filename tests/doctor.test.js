@@ -622,6 +622,56 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('surfaces a stuck preview lock with its workspace instead of a false no-lock', async () => {
+        writeProjectWithBackend();
+        const s3Client = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'ListObjectsV2Command') {
+                    if (command.input?.Prefix === 'env:/') {
+                        return { Contents: [{ Key: 'env:/pr-12/terraform.tfstate.tflock' }] };
+                    }
+                    return { Contents: [] };
+                }
+                throw new Error(`unexpected S3 command: ${command.constructor.name}`);
+            }),
+        };
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir, s3Client });
+            expect(output.join('\n')).toMatch(/env:\/pr-12\/terraform\.tfstate\.tflock/);
+            expect(output.join('\n')).toMatch(/workspace pr-12/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_state_lock: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('reports default and workspace locks together, each once', async () => {
+        writeProjectWithBackend();
+        const s3Client = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'ListObjectsV2Command') {
+                    if (command.input?.Prefix === 'env:/') {
+                        return { Contents: [{ Key: 'env:/pr-12/terraform.tfstate.tflock' }] };
+                    }
+                    return { Contents: [{ Key: 'terraform.tfstate.tflock' }] };
+                }
+                throw new Error(`unexpected S3 command: ${command.constructor.name}`);
+            }),
+        };
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir, s3Client });
+            const text = output.join('\n');
+            expect(text.match(/terraform\.tfstate\.tflock/g).length).toBe(2);
+            expect(text).toMatch(/workspace pr-12/);
+        } finally {
+            restore();
+        }
+    });
+
     it('warns (without failing) on an interrupted terraform run marker', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.mkdirSync(path.join(tmpDir, '.grada'), { recursive: true });

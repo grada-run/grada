@@ -1,12 +1,19 @@
 import { normalizeArgv } from '../utils/args.js';
 
+// The only meaningful --no-telemetry spellings (bare, =true, =false —
+// the getBoolFlag convention). Anything else (=garbage, or a flag-like
+// *value* such as --cmd "--no-telemetry=x") is not a global: it flows
+// through to per-command parsing, where the unknown-flag gate rejects
+// it loudly instead of this layer silently eating a command value.
+const GLOBAL_ONLY_FLAGS = new Set(['--no-telemetry', '--no-telemetry=true', '--no-telemetry=false']);
+
 export function parseCliArgs(processArgs) {
     const argv = normalizeArgv(processArgs);
     // 1. Extract telemetry flag safely
-    const hasNoTelemetry = argv.some(arg => arg === '--no-telemetry' || (typeof arg === 'string' && arg.startsWith('--no-telemetry=')));
+    const hasNoTelemetry = argv.some(arg => arg === '--no-telemetry' || arg === '--no-telemetry=true');
 
     // 2. Filter out telemetry flag
-    const args = argv.filter(arg => arg !== '--no-telemetry' && !(typeof arg === 'string' && arg.startsWith('--no-telemetry=')));
+    const args = argv.filter(arg => !GLOBAL_ONLY_FLAGS.has(arg));
 
     // 3. Flag readers. Every value flag supports both `--flag=value` and
     // `--flag value` spellings; space-form values are recorded in
@@ -159,9 +166,9 @@ export function parseCliArgs(processArgs) {
 // Args for per-command parsers: --no-telemetry is honored globally via
 // DO_NOT_TRACK (see parseCliArgs), so it must not reach parseFlags —
 // otherwise the unknown-flag gate would reject a documented global
-// option on every command. Every other token passes through untouched.
+// option on every command. Only meaningful spellings are stripped; a
+// flag-like value (e.g. --cmd "--no-telemetry=x") passes through to the
+// command untouched.
 export function stripGlobalOnlyFlags(processArgs) {
-    return normalizeArgv(processArgs).filter(
-        (arg) => arg !== '--no-telemetry' && !(typeof arg === 'string' && arg.startsWith('--no-telemetry='))
-    );
+    return normalizeArgv(processArgs).filter((arg) => !GLOBAL_ONLY_FLAGS.has(arg));
 }

@@ -132,9 +132,10 @@ export async function provisionStateBucket(region, projectName) {
     // 2. Format Bucket Name
     const stateBucketName = formatStateBucketName(projectName, awsAccountId);
 
-    // 3. Create S3 Bucket & Enable Versioning
+    // 3. Create S3 Bucket & Enable Versioning (shared helper, so init,
+    // recovery, and apply reconcile create identical buckets).
     const s3Client = new S3Client({ region });
-    await createVersionedBucket(s3Client, stateBucketName, region);
+    await ensureStateBucketExists({ region, bucket: stateBucketName, s3Client });
 
     return { awsAccountId, stateBucketName, s3Client };
 }
@@ -142,14 +143,16 @@ export async function provisionStateBucket(region, projectName) {
 // Creates (or re-creates) one explicitly named state bucket with the same
 // tagging + versioning provisionStateBucket applies. Recovery reads the
 // bucket from backend.tf and lands here instead of re-deriving the name,
-// which would miss on suffixed trees.
-export async function ensureStateBucketExists({ region, bucket }) {
+// which would miss on suffixed trees. `created` reports whether this
+// call made the bucket (vs finding it already owned) so callers can
+// tell creation from adoption without an extra HeadBucket round trip.
+export async function ensureStateBucketExists({ region, bucket, s3Client = null }) {
     if (process.env.CI_MOCK_AWS === 'true') {
-        return { bucket, mocked: true };
+        return { bucket, mocked: true, created: false };
     }
-    const s3Client = new S3Client({ region });
-    await createVersionedBucket(s3Client, bucket, region);
-    return { bucket };
+    const client = s3Client ?? new S3Client({ region });
+    const { created } = await createVersionedBucket(client, bucket, region);
+    return { bucket, created };
 }
 
 async function createVersionedBucket(s3Client, bucket, region) {
@@ -158,26 +161,28 @@ async function createVersionedBucket(s3Client, bucket, region) {
             Bucket: bucket,
             CreateBucketConfiguration: region === 'us-east-1' ? undefined : { LocationConstraint: region }
         }));
-
-        await s3Client.send(new PutBucketTaggingCommand({
-            Bucket: bucket,
-            Tagging: {
-                TagSet: [
-                    { Key: "ManagedBy", Value: "grada" }
-                ]
-            }
-        }));
-
-        await s3Client.send(new PutBucketVersioningCommand({
-            Bucket: bucket,
-            VersioningConfiguration: { Status: 'Enabled' }
-        }));
     } catch (error) {
         // Ignore if the bucket already exists and is owned by the user
         if (error.name !== 'BucketAlreadyOwnedByYou') {
             throw error;
         }
+        return { created: false };
     }
+
+    await s3Client.send(new PutBucketTaggingCommand({
+        Bucket: bucket,
+        Tagging: {
+            TagSet: [
+                { Key: "ManagedBy", Value: "grada" }
+            ]
+        }
+    }));
+
+    await s3Client.send(new PutBucketVersioningCommand({
+        Bucket: bucket,
+        VersioningConfiguration: { Status: 'Enabled' }
+    }));
+    return { created: true };
 }
 
 export async function teardownStateBucket(region, bucketName, options = {}) {

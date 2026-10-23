@@ -155,40 +155,52 @@ async function checkStateLock({ cwd, s3Client, deep }) {
     const keyMatch = backend.match(/key\s*=\s*"([^"]+)"/);
     const stateKey = keyMatch ? keyMatch[1] : 'terraform.tfstate';
     const client = s3Client ?? new S3Client({ region: region ?? 'us-east-2' });
-    let contents;
+    // Workspace states live under `env:/<name>/`, outside the default key
+    // prefix — list both so a stuck preview lock surfaces with its
+    // workspace instead of reporting a false "no lock".
+    const lockKeys = [];
     try {
-        const resp = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: stateKey }));
-        contents = resp.Contents || [];
+        for (const prefix of [stateKey, 'env:/']) {
+            const resp = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));
+            for (const entry of resp.Contents || []) {
+                if (typeof entry.Key === 'string' && entry.Key.endsWith('.tflock')) lockKeys.push(entry.Key);
+            }
+        }
     } catch (error) {
         if (error?.name === 'NoSuchBucket') return { ok: true, note: 'state bucket absent' };
         return { ok: true, skipped: 'state bucket unreachable' };
     }
-    const lockKey = contents
-        .map((entry) => entry.Key)
-        .find((key) => typeof key === 'string' && key.endsWith('.tflock'));
-    if (!lockKey) return { ok: true };
-    const detailLines = [`Lock file ${lockKey} is present in the state bucket.`];
-    if (deep) {
-        try {
-            const obj = await client.send(new GetObjectCommand({ Bucket: bucket, Key: lockKey }));
-            const text = typeof obj.Body?.transformToString === 'function'
-                ? await obj.Body.transformToString()
-                : '';
-            const info = JSON.parse(text);
-            const who = info.Who ?? info.who ?? 'unknown holder';
-            const operation = info.Operation ?? info.operation ?? 'unknown operation';
-            const created = info.Created ?? info.created ?? 'unknown time';
-            detailLines.push(`Held by ${who} (${operation}, since ${created}).`);
-        } catch {
-            // The lock itself is the finding; holder detail is best-effort.
+    const uniqueLocks = [...new Set(lockKeys)];
+    if (uniqueLocks.length === 0) return { ok: true };
+    const detailLines = [];
+    for (const lockKey of uniqueLocks) {
+        detailLines.push(`Lock file ${lockKey} is present in the state bucket${workspaceSuffix(lockKey)}.`);
+        if (deep) {
+            try {
+                const obj = await client.send(new GetObjectCommand({ Bucket: bucket, Key: lockKey }));
+                const text = typeof obj.Body?.transformToString === 'function'
+                    ? await obj.Body.transformToString()
+                    : '';
+                const info = JSON.parse(text);
+                const who = info.Who ?? info.who ?? 'unknown holder';
+                const operation = info.Operation ?? info.operation ?? 'unknown operation';
+                const created = info.Created ?? info.created ?? 'unknown time';
+                detailLines.push(`Held by ${who} (${operation}, since ${created}).`);
+            } catch {
+                // The lock itself is the finding; holder detail is best-effort.
+            }
         }
     }
     return { ok: false, detailLines };
 }
 
-// Project check: a leftover interrupted/running marker means the last
-// Terraform run never settled. Warning-grade (apply proceeds with its own
-// warning): surfaces yellow without flipping the verdict red.
+// `env:/pr-12/terraform.tfstate.tflock` → ` (workspace pr-12)`; the
+// default key reports bare, as before.
+function workspaceSuffix(lockKey) {
+    const match = /^env:\/([^/]+)\//.exec(lockKey);
+    return match ? ` (workspace ${match[1]})` : '';
+}
+
 // Project check: an open `repo:*` OIDC trust lets any GitHub repo's
 // Actions assume the deploy role. Warning-grade (pre-fix trees render it
 // by default): surfaces yellow without flipping the verdict red. List
@@ -208,6 +220,9 @@ function checkOidcTrustScope({ cwd }) {
     };
 }
 
+// Project check: a leftover interrupted/running marker means the last
+// Terraform run never settled. Warning-grade (apply proceeds with its own
+// warning): surfaces yellow without flipping the verdict red.
 function checkInterruptedRun({ cwd }) {
     const marker = readLastRunMarker(cwd);
     if (!isInterruptedMarker(marker)) return { ok: true };
