@@ -153,7 +153,9 @@ describe('reconcileOfflineTree', () => {
 
         const out = await reconcileOfflineTree({
             targetDir: dir,
-            options: { accountId: ACCOUNT, autoApprove: true },
+            // spawnSyncImpl keeps the guidance hermetic: no real `aws`
+            // spawn, which stalls this test on loaded CI runners.
+            options: { accountId: ACCOUNT, autoApprove: true, spawnSyncImpl: () => ({ status: 0 }) },
             projectName: 'myapp',
         });
 
@@ -173,7 +175,7 @@ describe('reconcileOfflineTree', () => {
 
         const out = await reconcileOfflineTree({
             targetDir: dir,
-            options: { accountId: ACCOUNT, autoApprove: true },
+            options: { accountId: ACCOUNT, autoApprove: true, spawnSyncImpl: () => ({ status: 0 }) },
             projectName: 'myapp',
         });
 

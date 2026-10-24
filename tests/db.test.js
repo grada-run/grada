@@ -1790,7 +1790,7 @@ describe('buildVectorExtensionCommand', () => {
     });
 });
 
-function mockImportSpawn({ exitCode = 0 } = {}) {
+function mockImportSpawn({ exitCode = 0, awaitPipe = false } = {}) {
     const calls = [];
     const spawnImpl = (bin, args, opts) => {
         const child = new EventEmitter();
@@ -1813,8 +1813,15 @@ function mockImportSpawn({ exitCode = 0 } = {}) {
             child.emit('close', exitCode);
         };
         child.stdin.once('finish', close);
-        const timer = setTimeout(close, 25);
-        if (typeof timer.unref === 'function') timer.unref();
+        child.stdin.once('close', close);
+        // Wall-clock fallback for spawns with no finite input (tunnel,
+        // pg_restore, never-ending mock pipes). Tests asserting piped
+        // content pass awaitPipe: a timer close races slow streams
+        // (gunzip under CI load) and resolves with truncated stdinBytes.
+        if (!awaitPipe) {
+            const timer = setTimeout(close, 25);
+            if (typeof timer.unref === 'function') timer.unref();
+        }
         return child;
     };
     return { calls, spawnImpl };
@@ -1951,7 +1958,7 @@ describe('Command: db import (mocked AWS + spawn)', () => {
     it('streams a .sql file into psql with env-only secrets', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
         const sqlFile = writeSqlFile(dir);
-        const { calls, spawnImpl } = mockImportSpawn();
+        const { calls, spawnImpl } = mockImportSpawn({ awaitPipe: true });
         const result = await runDbImport(importOptions({ file: sqlFile, spawnImpl }));
         expect(result).toEqual(expect.objectContaining({ ok: true, source: 'file' }));
 
@@ -1985,7 +1992,7 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         const { gzipSync } = await import('node:zlib');
         const filePath = path.join(dir, 'seed.sql.gz');
         fs.writeFileSync(filePath, gzipSync('INSERT INTO t VALUES (1);\n'));
-        const { calls, spawnImpl } = mockImportSpawn();
+        const { calls, spawnImpl } = mockImportSpawn({ awaitPipe: true });
         const result = await runDbImport(importOptions({ file: filePath, spawnImpl }));
         expect(result.ok).toBe(true);
         expect(calls[1].bin).toBe('psql');
