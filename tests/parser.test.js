@@ -242,6 +242,11 @@ describe('bin/cli.js dispatch contract', () => {
         expect(cliSource).not.toContain('runDb(rawArgs');
     });
 
+    it('documents the = form for dash-leading values in global help', () => {
+        expect(cliSource).toContain('--flag=value');
+        expect(cliSource).toContain('--cmd=--dry-run');
+    });
+
     it.each([
         ['Doctor', 'parseDoctorArgs'],
         ['Logs', 'parseLogsArgs'],

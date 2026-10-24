@@ -53,10 +53,6 @@ export function isInterruptedMarker(marker) {
 // output would otherwise replace them.
 const SUMMARY_LINE_RE = /^(Plan:|Apply complete!|Destroy complete!|No changes\.)/;
 
-function notify(spin, text) {
-    if (spin && typeof spin.message === 'function') spin.message(text);
-}
-
 // Runs a terraform command while piping the latest stdout line into a
 // @clack spinner. Resolves on exit 0; rejects with a structured error
 // (`{ code, stderr, lockId? }` classified via terraform-errors.js)
@@ -68,8 +64,27 @@ function notify(spin, text) {
 // last-run marker records running/completed/failed/interrupted for the
 // next command to report. `onStdoutLine` observes raw lines (used by
 // getTerraformOutputs); listeners and timers are always released.
+//
+// Progress display: a live terminal rewrites one spinner line, but the
+// spinner re-renders every ~80ms — wherever cursor movement isn't
+// honored (piped output, log viewers) each tick becomes a line and
+// quiet stretches repeat the same message dozens of times. Non-TTY
+// runs therefore get deduped plain lines instead, and the caller's
+// spinner is cleared so its tick doesn't spam behind them (the
+// caller's later stop then becomes a silent no-op). `isTTY` overrides
+// the terminal sniff for tests.
 export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}) {
-    const { markerDir = null, timeoutMs = 0, onStdoutLine = null } = options || {};
+    const { markerDir = null, timeoutMs = 0, onStdoutLine = null, isTTY = process.stdout?.isTTY } = options || {};
+    const wantsProgress = spin && typeof spin.message === 'function';
+    const live = isTTY === true && wantsProgress;
+    let lastEmitted;
+    const emit = (text) => {
+        if (lastEmitted === text) return;
+        lastEmitted = text;
+        if (live) spin.message(text);
+        else if (wantsProgress) console.log(text);
+    };
+    if (wantsProgress && !live && typeof spin.clear === 'function') spin.clear();
     return new Promise((resolve, reject) => {
         const child = spawn('terraform', args, { cwd });
         let errorOutput = '';
@@ -191,13 +206,13 @@ export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}
             for (const line of lines) {
                 const trimmed = line.trim();
                 if (SUMMARY_LINE_RE.test(trimmed)) {
-                    notify(spin, `${loadingPrefix} - ${color.dim(trimmed)}`);
+                    emit(`${loadingPrefix} - ${color.dim(trimmed)}`);
                 }
             }
             if (lines.length > 0) {
                 const latestLine = lines[lines.length - 1].trim();
                 const display = latestLine.length > 120 ? latestLine.substring(0, 117) + '...' : latestLine;
-                notify(spin, `${loadingPrefix} - ${color.dim(display)}`);
+                emit(`${loadingPrefix} - ${color.dim(display)}`);
             }
         });
 

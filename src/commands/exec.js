@@ -35,7 +35,7 @@ export function parseExecArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'exec') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
-        string: ['cluster', 'service', 'container', 'command', 'region'],
+        string: ['cluster', 'service', 'container', { name: 'command', greedy: true }, 'region'],
         boolean: ['headless'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));

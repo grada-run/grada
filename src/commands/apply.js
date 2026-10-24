@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { intro, outro, spinner, log, cancel, confirm } from '@clack/prompts';
+import { intro, outro, spinner, log, cancel, confirm, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
@@ -11,13 +11,13 @@ import { spawnSync } from 'child_process';
 import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
 import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { readInitManifest, recordAppliedTarget } from '../utils/backup.js';
-import { requireManagedTree, parseStateBucketBackend } from '../utils/terraform-metadata.js';
+import { requireManagedTree, parseStateBucketBackend, upsertAutoTfvar } from '../utils/terraform-metadata.js';
 import { readTerraformComputeTarget, resolveRegion } from '../utils/resolvers.js';
 import { requireAwakeEnvironment, resolveSleepTarget, guardSleepingEnv } from '../utils/sleep-state.js';
 import { promptStateBucketRecovery, recreateStateBucket } from '../utils/recovery.js';
 import { resolveProjectName, readResourceSuffix } from '../utils/resolvers.js';
 import { ensureLambdaSeedImage } from '../utils/lambda-ecr.js';
-import { checkAwsCredentials, ensureStateBucketExists, printAwsAuthGuidance } from '../utils/aws.js';
+import { checkAwsCredentials, ensureStateBucketExists, isAuthError, printAwsAuthGuidance } from '../utils/aws.js';
 import { findUnreconciledFiles, isValidAccountId, PLACEHOLDER_ACCOUNT_ID } from '../utils/reconcile.js';
 import { runWake } from './wake.js';
 
@@ -58,6 +58,19 @@ export async function reconcileOfflineTree({ targetDir, options = {}, projectNam
                 }),
             };
         }
+        // Ping first: the flag resolves the account, but reconciling and
+        // provisioning both need live credentials — fail guided with
+        // nothing written rather than stamping files and crashing.
+        try {
+            await checkAwsCredentials(resolveRegion(options, targetDir));
+        } catch {
+            return {
+                proceed: false,
+                result: await failCredentialsMissing(options, projectName, {
+                    message: '\n✖ Could not verify AWS credentials: configure them first — apply cannot reconcile or provision without them.\n',
+                }),
+            };
+        }
         accountId = flag;
         source = 'flag';
     } else {
@@ -65,16 +78,10 @@ export async function reconcileOfflineTree({ targetDir, options = {}, projectNam
             accountId = (await checkAwsCredentials(resolveRegion(options, targetDir))).accountId;
             source = 'sts';
         } catch {
-            printAwsAuthGuidance(options);
             return {
                 proceed: false,
-                result: await failCommand({
-                    noExit: isProgrammaticCall(options),
+                result: await failCredentialsMissing(options, projectName, {
                     message: '\n✖ Could not resolve the AWS account: configure credentials first — apply cannot provision without them.\n',
-                    event: 'infrastructure_applied',
-                    telemetry: { projectName },
-                    errorCode: 'AWS_CREDENTIALS_MISSING',
-                    reason: 'aws-credentials-missing',
                 }),
             };
         }
@@ -107,10 +114,34 @@ export async function reconcileOfflineTree({ targetDir, options = {}, projectNam
     log.message(color.green(`Rewrote ${files.length} file(s).`));
     const backend = fs.readFileSync(path.join(targetDir, 'terraform', 'backend.tf'), 'utf8');
     const { bucket, region: backendRegion } = parseStateBucketBackend(backend);
-    const ensured = await ensureStateBucketExists({
-        region: backendRegion ?? resolveRegion(options, targetDir),
-        bucket,
-    });
+    let ensured;
+    try {
+        ensured = await ensureStateBucketExists({
+            region: backendRegion ?? resolveRegion(options, targetDir),
+            bucket,
+        });
+    } catch (error) {
+        if (isAuthError(error) || error?.name === 'CredentialsProviderError') {
+            return {
+                proceed: false,
+                result: await failCredentialsMissing(options, projectName, {
+                    message: '\n✖ AWS credentials expired during reconciliation.\n',
+                    hint: '  Placeholders are already rewritten; fix credentials and re-run apply to converge.\n',
+                }),
+            };
+        }
+        return {
+            proceed: false,
+            result: await failCommand({
+                noExit: isProgrammaticCall(options),
+                message: `\n✖ Could not ensure the state bucket "${bucket}": ${error?.message ?? error}.\n`,
+                event: 'infrastructure_applied',
+                telemetry: { projectName },
+                errorCode: 'RECONCILE_BUCKET_FAILED',
+                reason: 'reconcile-bucket-failed',
+            }),
+        };
+    }
     trackEvent('apply_reconciled', {
         projectName,
         account_source: source,
@@ -124,6 +155,22 @@ function describeAccountIdShape(value) {
     const text = String(value);
     if (!/^\d+$/.test(text)) return 'expected exactly 12 digits, got non-digit characters';
     return `expected exactly 12 digits, got ${text.length}`;
+}
+
+// Shared credential-failure exit for every reconcile path: the recovery
+// guidance plus a named code, so the shape can't drift between the
+// resolution ping, the STS fallback, and the bucket ensure.
+async function failCredentialsMissing(options, projectName, { message, hint = null }) {
+    printAwsAuthGuidance(options);
+    return failCommand({
+        noExit: isProgrammaticCall(options),
+        message,
+        ...(hint === null ? {} : { hint }),
+        event: 'infrastructure_applied',
+        telemetry: { projectName },
+        errorCode: 'AWS_CREDENTIALS_MISSING',
+        reason: 'aws-credentials-missing',
+    });
 }
 
 // Unlock-and-retry flow for a stale Terraform state lock. Headless
@@ -620,14 +667,44 @@ async function applyStackMain(input = {}) {
             });
         }
 
+        if (code === 'OIDC_PROVIDER_CONFLICT' && options._oidcAdopted !== true) {
+            // Adopt the shared provider instead of hand-editing: the
+            // GitHub provider URL is account-singleton, so the existing
+            // provider IS the match — flip the var and retry.
+            const refused = await refuseIfNonInteractive(options, {
+                message: '\n✖ apply needs approval to adopt the existing GitHub OIDC provider.',
+                hint: '  Re-run with --auto-approve to adopt non-interactively.\n',
+                event: 'infrastructure_applied',
+                telemetry: { projectName: actualProjectName },
+                errorCode: 'OIDC_ADOPT_NON_INTERACTIVE',
+            });
+            if (refused) return refused;
+            let adopt = shouldAutoApprove(options);
+            if (!adopt) {
+                const confirmed = await confirm({
+                    message: 'Adopt the existing GitHub OIDC provider (writes create_oidc_provider = false) and retry?',
+                    initialValue: true,
+                });
+                adopt = !isCancel(confirmed) && confirmed === true;
+            }
+            if (adopt) {
+                upsertAutoTfvar(tfDir, 'create_oidc_provider', false);
+                trackEvent('oidc_provider_adopted', { projectName: actualProjectName });
+                log.message(color.cyan('Adopted the existing OIDC provider — retrying apply...'));
+                return applyStack({ ...options, _skipPreview: true, _oidcAdopted: true });
+            }
+            // Declined: fall through to the manual guidance below.
+        }
+
         if (code === 'OIDC_PROVIDER_CONFLICT') {
+            // The override lives in grada.auto.tfvars (machine-owned,
+            // survives regeneration) — never in the oidc.tf default.
             log.error(color.red('GitHub OIDC Provider Conflict Detected'));
             log.message('AWS only allows one GitHub Actions provider per account, and you already have one configured.');
             log.message('');
             log.message(`${color.bold('How to fix this:')}`);
-            log.message(`1. Open ${color.cyan('terraform/oidc.tf')}`);
-            log.message(`2. Change ${color.green('create_oidc_provider = true')} to ${color.green('create_oidc_provider = false')}`);
-            log.message(`3. Run ${color.cyan('npx grada-run apply')} again.`);
+            log.message(`1. Adopt the shared provider: ${color.cyan(`echo 'create_oidc_provider = false' >> terraform/grada.auto.tfvars`)}`);
+            log.message(`2. Run ${color.cyan('npx grada-run apply')} again.`);
         } else if (code === 'BACKEND_RECONFIGURE_REQUIRED' || code === 'CLOUDFRONT_IN_PROGRESS' || code === 'DELETION_PROTECTION_ACTIVE') {
             // Named but flow-neutral: runbook guidance with a coded
             // failure. (RECREATE_COLLISION has its dedicated branch

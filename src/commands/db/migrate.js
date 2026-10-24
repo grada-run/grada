@@ -60,7 +60,7 @@ export function parseDbMigrateArgs(argv = []) {
     if (args[0] === 'migrate') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
         string: [
-            { name: 'cmd', key: 'cmd' },
+            { name: 'cmd', key: 'cmd', greedy: true },
             { name: 'task-def', key: 'taskDef' },
             { name: 'timeout', key: 'timeout' },
             { name: 'project-name', key: 'projectName' },

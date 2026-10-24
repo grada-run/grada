@@ -99,8 +99,8 @@ const RUNBOOKS = {
     },
     OIDC_PROVIDER_CONFLICT: {
         message: 'GitHub OIDC provider already exists in this account.',
-        headless: 'Set create_oidc_provider = false in terraform/oidc.tf and re-run apply.',
-        interactive: 'Set create_oidc_provider = false in terraform/oidc.tf and re-run apply.',
+        headless: 'Re-run with --auto-approve to adopt it, or set create_oidc_provider = false in terraform/grada.auto.tfvars.',
+        interactive: 'Adopt it when prompted, or set create_oidc_provider = false in terraform/grada.auto.tfvars.',
     },
     CLOUDFRONT_IN_PROGRESS: {
         message: 'CloudFront is still converging a previous change.',

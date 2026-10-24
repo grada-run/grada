@@ -41,12 +41,9 @@ Once live, manage the stack without opening the AWS console:
 * `npx grada-run destroy --yes` — tear down the bucket and distribution
 
 ### ⚠️ Troubleshooting: OIDC Provider Already Exists
-If `terraform apply` fails with `EntityAlreadyExists` for the OIDC provider, this AWS account already has a GitHub Actions provider (AWS permits one per account). Set `create_oidc_provider` to `false` in `terraform/oidc.tf`:
+If `terraform apply` fails with `EntityAlreadyExists` for the OIDC provider, this AWS account already has a GitHub Actions provider (AWS permits one per account). `npx grada-run apply` offers to adopt it (one confirm, zero hand-edits); to do it manually instead, add one line to `terraform/grada.auto.tfvars`:
 ```hcl
-variable "create_oidc_provider" {
-  type    = bool
-  default = false # <--- Change this from true to false
-}
+create_oidc_provider = false
 ```
 Re-run `npx grada-run apply` to link directly to your existing provider.
 

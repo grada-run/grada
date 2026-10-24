@@ -115,7 +115,7 @@ describe('S13 mechanics: lifecycle wrapper (R6)', () => {
         const child = makeChild();
         mockSpawn.mockReturnValueOnce(child);
         const s = spin();
-        const pending = runTerraformCommand(['apply'], tmpDir, s, 'P', { markerDir: tmpDir });
+        const pending = runTerraformCommand(['apply'], tmpDir, s, 'P', { markerDir: tmpDir, isTTY: true });
         child.stdout.emit('data', Buffer.from('some noise\nPlan: 3 to add, 0 to change, 1 to destroy.\nmore noise\n'));
         child.emit('close', 0);
         await pending;

@@ -98,7 +98,7 @@ function escapeRegExp(raw) {
 export function findResourceBlock(content, resourceType, resourceName) {
     const text = String(content ?? '');
     const pattern = new RegExp(
-        `^\\s*resource\\s+"${escapeRegExp(resourceType)}"\\s+"${escapeRegExp(resourceName)}"`,
+        `^[ \t]*resource\\s+"${escapeRegExp(resourceType)}"\\s+"${escapeRegExp(resourceName)}"`,
         'm'
     );
     const match = pattern.exec(text);

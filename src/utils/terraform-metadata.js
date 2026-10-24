@@ -133,6 +133,42 @@ export function parseStateBucketBackend(content) {
     };
 }
 
+// Machine-owned variable overrides live in terraform/grada.auto.tfvars
+// (auto-loaded by Terraform, gitignored, never regenerated) — never in
+// generated .tf defaults, which regeneration would wipe.
+export const GRADA_AUTO_TFVARS_FILENAME = 'grada.auto.tfvars';
+
+// Idempotently sets one `key = value` override in grada.auto.tfvars,
+// creating the file with a managed header when absent. Values are
+// booleans only (the file holds machine flags, not secrets). Returns
+// `{ path, created, changed }`.
+export function upsertAutoTfvar(tfDir, key, value) {
+    if (typeof value !== 'boolean') throw new Error(`upsertAutoTfvar only supports booleans (got ${typeof value} for ${key})`);
+    if (!/^\w+$/.test(key)) throw new Error(`upsertAutoTfvar rejects non-identifier keys (got ${JSON.stringify(key)})`);
+    const filePath = path.join(tfDir, GRADA_AUTO_TFVARS_FILENAME);
+    let content = '';
+    try {
+        content = fs.readFileSync(filePath, 'utf8');
+    } catch {
+        content = '';
+    }
+    const created = content === '';
+    const line = `${key} = ${value ? 'true' : 'false'}`;
+    const pattern = new RegExp(`^${key}\\s*=.*$`, 'm');
+    let changed;
+    if (pattern.test(content)) {
+        const next = content.replace(pattern, line);
+        changed = next !== content;
+        content = next;
+    } else {
+        const header = '# Managed by grada: machine-written variable overrides. Safe to delete an entry to restore its default.\n';
+        content = `${created ? header : content.replace(/\n*$/, '\n')}${line}\n`;
+        changed = true;
+    }
+    atomicWriteFileSync(filePath, content);
+    return { path: filePath, created, changed };
+}
+
 // Central managed-tree gate: mutating commands refuse on ejected trees
 // unless --force (headless fails, interactive confirms once);
 // read-only callers pass `mode: 'warn'` to warn and proceed. Returns

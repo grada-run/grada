@@ -125,7 +125,7 @@ describe('reconcileOfflineTree', () => {
         else process.env.CI_MOCK_AWS = savedMockAws;
     });
 
-    it('an explicit --account-id beats STS without touching it', async () => {
+    it('an explicit --account-id beats STS: ping verifies, flag resolves', async () => {
         const dir = tmp.makeTmp('reconcile-');
         writeOfflineTree(dir);
 
@@ -136,12 +136,72 @@ describe('reconcileOfflineTree', () => {
         });
 
         expect(out).toEqual({ proceed: true });
-        expect(checkAwsCredentials).not.toHaveBeenCalled();
+        // The ping verifies credentials (CI_MOCK would resolve ...010);
+        // the stamped files prove the flag's ...012 won.
+        expect(checkAwsCredentials).toHaveBeenCalledTimes(1);
         expect(trackEvent).toHaveBeenCalledWith('apply_reconciled', expect.objectContaining({
             account_source: 'flag',
             file_count: 2,
         }));
-        expect(fs.readFileSync(path.join(dir, 'terraform', 'backend.tf'), 'utf8')).not.toContain(PLACEHOLDER_ACCOUNT_ID);
+        expect(fs.readFileSync(path.join(dir, 'terraform', 'backend.tf'), 'utf8')).toContain(`myapp-tfstate-${ACCOUNT}`);
+    });
+
+    it('fails guided with nothing written when the flag-path ping fails', async () => {
+        const dir = tmp.makeTmp('reconcile-');
+        writeOfflineTree(dir);
+        vi.mocked(checkAwsCredentials).mockRejectedValueOnce(Object.assign(new Error('no creds'), { name: 'CredentialsProviderError' }));
+
+        const out = await reconcileOfflineTree({
+            targetDir: dir,
+            options: { accountId: ACCOUNT, autoApprove: true },
+            projectName: 'myapp',
+        });
+
+        expect(out.proceed).toBe(false);
+        expect(trackEvent).toHaveBeenCalledWith('infrastructure_applied', expect.objectContaining({
+            success: false,
+            error_code: 'AWS_CREDENTIALS_MISSING',
+        }));
+        expect(findUnreconciledFiles(dir)).toHaveLength(2);
+        expect(ensureStateBucketExists).not.toHaveBeenCalled();
+    });
+
+    it('an expired-credentials ensure failure stays guided and names convergence', async () => {
+        const dir = tmp.makeTmp('reconcile-');
+        writeOfflineTree(dir);
+        vi.mocked(ensureStateBucketExists).mockRejectedValueOnce(Object.assign(new Error('expired'), { name: 'ExpiredTokenException' }));
+
+        const out = await reconcileOfflineTree({
+            targetDir: dir,
+            options: { accountId: ACCOUNT, autoApprove: true },
+            projectName: 'myapp',
+        });
+
+        expect(out.proceed).toBe(false);
+        expect(trackEvent).toHaveBeenCalledWith('infrastructure_applied', expect.objectContaining({
+            success: false,
+            error_code: 'AWS_CREDENTIALS_MISSING',
+        }));
+        expect(findUnreconciledFiles(dir)).toEqual([]);
+    });
+
+    it('a non-credential ensure failure fails loud with context, not a raw throw', async () => {
+        const dir = tmp.makeTmp('reconcile-');
+        writeOfflineTree(dir);
+        vi.mocked(ensureStateBucketExists).mockRejectedValueOnce(Object.assign(new Error('AccessDenied'), { name: 'AccessDenied' }));
+
+        const out = await reconcileOfflineTree({
+            targetDir: dir,
+            options: { accountId: ACCOUNT, autoApprove: true },
+            projectName: 'myapp',
+        });
+
+        expect(out.proceed).toBe(false);
+        expect(out.result).toMatchObject({ ok: false });
+        expect(trackEvent).toHaveBeenCalledWith('infrastructure_applied', expect.objectContaining({
+            success: false,
+            error_code: 'RECONCILE_BUCKET_FAILED',
+        }));
     });
 
     it('rejects an invalid --account-id with INVALID_ACCOUNT_ID and writes nothing', async () => {

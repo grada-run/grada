@@ -77,7 +77,7 @@ export function parseAddArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'add') args.shift();
     const { options: parsed, rest, unknown } = parseFlags(args, {
-        string: ['region', 'project-name', 'partition-key', 'model', 'domain', 'from-email', 'zone-id', 'schedule', { name: 'cmd', key: 'cronCommand' }, { name: 'cron-command', key: 'cronCommand' }, 'name', 'timezone'],
+        string: ['region', 'project-name', 'partition-key', 'model', 'domain', 'from-email', 'zone-id', 'schedule', { name: 'cmd', key: 'cronCommand', greedy: true }, { name: 'cron-command', key: 'cronCommand', greedy: true }, 'name', 'timezone'],
         boolean: ['force', { name: 'headless', key: 'isHeadless' }],
         bareBoolean: ['list-models', 'refresh'],
     });

@@ -73,6 +73,7 @@ const HELP_TEXT = [
     'Global options:',
     '  --version, -v  Print the CLI version and exit',
     '  --no-telemetry  Disable telemetry for this run only (persistent: grada telemetry off; every run: DO_NOT_TRACK=1)',
+    '  --flag=value  Use the = form when a flag value itself starts with a dash (e.g. --cmd=--dry-run)',
 ];
 
 const rawArgs = process.argv.slice(2);

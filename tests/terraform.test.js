@@ -36,9 +36,63 @@ describe('runTerraformCommand', () => {
         mockSpawn.mockReturnValue(makeChild({ stdout: 'first\nsecond\n' }));
         const spin = { message: vi.fn() };
 
-        await expect(runTerraformCommand(['apply'], '/tmp', spin, 'Applying')).resolves.toBeUndefined();
+        await expect(runTerraformCommand(['apply'], '/tmp', spin, 'Applying', { isTTY: true })).resolves.toBeUndefined();
         expect(mockSpawn).toHaveBeenCalledWith('terraform', ['apply'], { cwd: '/tmp' });
         expect(spin.message).toHaveBeenCalledWith(expect.stringContaining('second'));
+    });
+
+    it('dedups consecutive identical lines on a live terminal', async () => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        mockSpawn.mockReturnValue(child);
+        const spin = { message: vi.fn() };
+
+        const pending = runTerraformCommand(['apply'], '/tmp', spin, 'Applying', { isTTY: true });
+        child.stdout.emit('data', Buffer.from('same\n'));
+        child.stdout.emit('data', Buffer.from('same\n'));
+        child.stdout.emit('data', Buffer.from('different\n'));
+        child.emit('close', 0);
+        await pending;
+
+        expect(spin.message).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to deduped plain lines and clears the spinner when not a TTY', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            const child = new EventEmitter();
+            child.stdout = new EventEmitter();
+            child.stderr = new EventEmitter();
+            mockSpawn.mockReturnValue(child);
+            const spin = { message: vi.fn(), clear: vi.fn() };
+
+            const pending = runTerraformCommand(['apply'], '/tmp', spin, 'Applying', { isTTY: false });
+            child.stdout.emit('data', Buffer.from('same\n'));
+            child.stdout.emit('data', Buffer.from('same\n'));
+            child.stdout.emit('data', Buffer.from('different\n'));
+            child.emit('close', 0);
+            await pending;
+
+            expect(spin.clear).toHaveBeenCalledTimes(1);
+            expect(spin.message).not.toHaveBeenCalled();
+            expect(logSpy).toHaveBeenCalledTimes(2);
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('different'));
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('stays silent without a spinner even when not a TTY', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            mockSpawn.mockReturnValue(makeChild({ stdout: '{"url":"https://x"}\n' }));
+
+            await expect(runTerraformCommand(['output', '-json'], '/tmp', null, 'Reading', { isTTY: false })).resolves.toBeUndefined();
+            expect(logSpy).not.toHaveBeenCalled();
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 
     it('rejects with the captured stderr on non-zero exit', async () => {

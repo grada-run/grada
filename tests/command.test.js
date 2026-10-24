@@ -297,6 +297,12 @@ describe('refuseUnknownFlags', () => {
         }));
         expect(spies.exitSpy).toHaveBeenCalledWith(1);
     });
+
+    it('names the unsupported bare -- separator and points at the = form', async () => {
+        await refuseUnknownFlags({ unknownFlags: ['--'] }, { command: 'sleep', event: 'sleep_run' });
+
+        expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining('--flag=value'));
+    });
 });
 
 describe('isProgrammaticCall', () => {

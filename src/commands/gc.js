@@ -3,14 +3,14 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import { ECRClient, DescribeRepositoriesCommand, DescribeImagesCommand, BatchDeleteImageCommand } from '@aws-sdk/client-ecr';
 import { CloudWatchLogsClient, DescribeLogGroupsCommand, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { ECSClient, ListServicesCommand, DescribeServicesCommand } from '@aws-sdk/client-ecs';
+import { ECSClient, ListClustersCommand, ListServicesCommand, DescribeServicesCommand } from '@aws-sdk/client-ecs';
 import { EC2Client, DescribeAddressesCommand, ReleaseAddressCommand, DescribeVpcsCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import { SecretsManagerClient, ListSecretsCommand } from '@aws-sdk/client-secrets-manager';
 import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
@@ -138,15 +138,51 @@ function defaultListLambdaFunctionNames({ region, spawnSyncImpl } = {}) {
 // trees, Lambda functions for serverless ones. Never throws — any scan
 // failure resolves to `unknown` so discovery fails closed instead of
 // proposing live-preview groups.
+// One enumeration feeding every ECS liveness consumer: each workspace
+// provisions its own `<app>-cluster`, so liveness must scan the
+// default cluster AND every preview cluster — never just one.
+// Returns service ARNs per project cluster; any client error resolves
+// `unknown` (fail closed) instead of a partial set.
+export async function listProjectClusterServices({ ecsClient = null, projectName, resourceSuffix = '' } = {}) {
+    const byCluster = new Map();
+    try {
+        if (!ecsClient) return { byCluster, unknown: false };
+        const clusterPattern = new RegExp(`^${escapeRegExp(projectName)}(-pr-\\d+)?${escapeRegExp(resourceSuffix)}-cluster$`);
+        let nextToken;
+        const clusters = [];
+        do {
+            const resp = await ecsClient.send(new ListClustersCommand({ nextToken, maxResults: 100 }));
+            for (const arn of resp.clusterArns || []) {
+                const name = String(arn).split('/').pop();
+                if (clusterPattern.test(name)) clusters.push(name);
+            }
+            nextToken = resp.nextToken;
+        } while (nextToken);
+        for (const cluster of clusters) {
+            let svcToken;
+            const arns = [];
+            do {
+                const resp = await ecsClient.send(new ListServicesCommand({ cluster, nextToken: svcToken, maxResults: 100 }));
+                arns.push(...(resp.serviceArns || []));
+                svcToken = resp.nextToken;
+            } while (svcToken);
+            byCluster.set(cluster, arns);
+        }
+    } catch {
+        return { byCluster, unknown: true };
+    }
+    return { byCluster, unknown: false };
+}
+
 export async function discoverLivePreviewLogGroups({
     ecsClient = null,
-    cluster = null,
     projectName,
     resourceSuffix = '',
     isLambda = false,
     listFunctionsImpl = defaultListLambdaFunctionNames,
     spawnSyncImpl = null,
     region = null,
+    clusterServices = null,
 } = {}) {
     const live = new Set();
     try {
@@ -158,17 +194,15 @@ export async function discoverLivePreviewLogGroups({
                 if (typeof name === 'string' && fnPattern.test(name)) live.add(`/aws/lambda/${name}`);
             }
         } else {
-            if (!ecsClient || !cluster) return { groups: live, unknown: false };
+            const enumeration = clusterServices ?? await listProjectClusterServices({ ecsClient, projectName, resourceSuffix });
+            if (enumeration.unknown) return { groups: live, unknown: true };
             const servicePattern = new RegExp(`^${base}-service$`);
-            let nextToken;
-            do {
-                const resp = await ecsClient.send(new ListServicesCommand({ cluster, nextToken, maxResults: 100 }));
-                for (const arn of resp.serviceArns || []) {
+            for (const arns of enumeration.byCluster.values()) {
+                for (const arn of arns || []) {
                     const name = String(arn).split('/').pop();
                     if (servicePattern.test(name)) live.add(`/ecs/${name.slice(0, -'-service'.length)}`);
                 }
-                nextToken = resp.nextToken;
-            } while (nextToken);
+            }
         }
     } catch {
         return { groups: live, unknown: true };
@@ -227,31 +261,31 @@ async function discoverUnattachedEips({ ec2Client, projectName }) {
 }
 
 // Deep target discovery: VPCs partitioned by the STRICT deletion
-// predicate — exact project tag only. Foreign and untagged VPCs land in
-// reportOnly, never in deletable, so prefix lookalikes (`myapp-evil`)
-// and legacy resources can never enter the deletion set.
+// predicate — exact project tag only, minus live networks. Foreign and
+// untagged VPCs land in reportOnly, never in deletable, so prefix
+// lookalikes (`myapp-evil`) and legacy resources can never enter the
+// deletion set.
 // Live VPC ids behind running (or desired) ECS services: services →
-// awsvpc subnets → VPCs. Fail-closed like the preview-log-group
-// liveness: any client error resolves `unknown` instead of guessing.
-export async function discoverLiveVpcIds({ ecsClient = null, cluster = null, ec2Client = null } = {}) {
+// awsvpc subnets → VPCs, across every project cluster (each preview
+// workspace runs its own cluster in its own VPC). Fail-closed like the
+// preview-log-group liveness: any client error resolves `unknown`
+// instead of guessing.
+export async function discoverLiveVpcIds({ ecsClient = null, ec2Client = null, projectName, resourceSuffix = '', clusterServices = null } = {}) {
     const vpcIds = new Set();
     try {
-        if (!ecsClient || !cluster || !ec2Client) return { vpcIds, unknown: false };
-        let nextToken;
-        const arns = [];
-        do {
-            const resp = await ecsClient.send(new ListServicesCommand({ cluster, nextToken, maxResults: 100 }));
-            arns.push(...(resp.serviceArns || []));
-            nextToken = resp.nextToken;
-        } while (nextToken);
+        if (!ecsClient || !ec2Client) return { vpcIds, unknown: false };
+        const enumeration = clusterServices ?? await listProjectClusterServices({ ecsClient, projectName, resourceSuffix });
+        if (enumeration.unknown) return { vpcIds, unknown: true };
         const subnetIds = new Set();
-        for (const batch of chunkArray(arns, 10)) {
-            const desc = await ecsClient.send(new DescribeServicesCommand({ cluster, services: batch }));
-            for (const svc of desc.services || []) {
-                // Desired counts: a crash-looping preview runs nothing
-                // yet is unambiguously live.
-                if ((svc.desiredCount ?? 0) <= 0 && (svc.runningCount ?? 0) <= 0) continue;
-                for (const id of svc.networkConfiguration?.awsvpcConfiguration?.subnets || []) subnetIds.add(id);
+        for (const [cluster, arns] of enumeration.byCluster.entries()) {
+            for (const batch of chunkArray(arns, 10)) {
+                const desc = await ecsClient.send(new DescribeServicesCommand({ cluster, services: batch }));
+                for (const svc of desc.services || []) {
+                    // Desired counts: a crash-looping preview runs nothing
+                    // yet is unambiguously live.
+                    if ((svc.desiredCount ?? 0) <= 0 && (svc.runningCount ?? 0) <= 0) continue;
+                    for (const id of svc.networkConfiguration?.awsvpcConfiguration?.subnets || []) subnetIds.add(id);
+                }
             }
         }
         if (subnetIds.size > 0) {
@@ -264,7 +298,7 @@ export async function discoverLiveVpcIds({ ecsClient = null, cluster = null, ec2
     return { vpcIds, unknown: false };
 }
 
-async function discoverDeepVpcs({ ec2Client, ecsClient = null, cluster = null, projectName, resourceSuffix = '', isLambda = false }) {
+async function discoverDeepVpcs({ ec2Client, ecsClient = null, projectName, resourceSuffix = '', isLambda = false, clusterServices = null }) {
     const deletable = [];
     const reportOnly = [];
     // The stack's own default-workspace VPC is live by construction —
@@ -274,7 +308,7 @@ async function discoverDeepVpcs({ ec2Client, ecsClient = null, cluster = null, p
     const defaultVpcName = `${projectName}${resourceSuffix}-vpc`;
     const live = isLambda
         ? { vpcIds: new Set(), unknown: false }
-        : await discoverLiveVpcIds({ ecsClient, cluster, ec2Client });
+        : await discoverLiveVpcIds({ ecsClient, ec2Client, projectName, resourceSuffix, clusterServices });
     let nextToken;
     do {
         const resp = await ec2Client.send(new DescribeVpcsCommand({ NextToken: nextToken }));
@@ -542,17 +576,23 @@ async function runGcMain(input = {}) {
 
     let discovered;
     let previewLivenessUnknown = false;
+    let previewClusterServices = null;
     try {
         const isLambda = isComputeTarget(cwd, 'lambda');
         const suffix = readResourceSuffix(cwd);
+        // One cluster-service enumeration shared by the log-group and
+        // (deep) VPC liveness consumers — fetched once, not per scan.
+        previewClusterServices = isLambda
+            ? null
+            : await listProjectClusterServices({ ecsClient, projectName, resourceSuffix: suffix });
         const liveness = await discoverLivePreviewLogGroups({
             ecsClient,
-            cluster: resolveCluster(options, cwd),
             projectName,
             resourceSuffix: suffix,
             isLambda,
             spawnSyncImpl: options.spawnSyncImpl,
             region,
+            clusterServices: previewClusterServices,
         });
         previewLivenessUnknown = liveness.unknown;
         discovered = await discoverOrphanedResources({
@@ -605,9 +645,9 @@ async function runGcMain(input = {}) {
                 cwd,
                 projectName,
                 ecsClient,
-                cluster: resolveCluster(options, cwd),
                 resourceSuffix: readResourceSuffix(cwd),
                 isLambda: isComputeTarget(cwd, 'lambda'),
+                clusterServices: previewClusterServices,
             });
         } catch (error) {
             ds.stop(color.red('❌ Deep discovery failed.'));

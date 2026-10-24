@@ -99,7 +99,7 @@ vi.mock('@aws-sdk/client-ec2', () => ({
 }));
 
 // --- Mock AWS SDK: ECS (preview liveness only) ---
-const { mockEcsSend, MockECSClient, MockListServicesCommand, MockDescribeServicesCommand } = vi.hoisted(() => {
+const { mockEcsSend, MockECSClient, MockListClustersCommand, MockListServicesCommand, MockDescribeServicesCommand } = vi.hoisted(() => {
     const send = vi.fn();
     const makeCommand = (name) =>
         vi.fn(function (input) {
@@ -111,6 +111,7 @@ const { mockEcsSend, MockECSClient, MockListServicesCommand, MockDescribeService
         MockECSClient: vi.fn(function () {
             this.send = send;
         }),
+        MockListClustersCommand: makeCommand('ListClustersCommand'),
         MockListServicesCommand: makeCommand('ListServicesCommand'),
         MockDescribeServicesCommand: makeCommand('DescribeServicesCommand'),
     };
@@ -118,6 +119,7 @@ const { mockEcsSend, MockECSClient, MockListServicesCommand, MockDescribeService
 
 vi.mock('@aws-sdk/client-ecs', () => ({
     ECSClient: MockECSClient,
+    ListClustersCommand: MockListClustersCommand,
     ListServicesCommand: MockListServicesCommand,
     DescribeServicesCommand: MockDescribeServicesCommand,
 }));
@@ -201,6 +203,9 @@ function setupMixedDiscoveryFixtures() {
     });
 
     mockEcsSend.mockImplementation(async (cmd) => {
+        if (cmd instanceof MockListClustersCommand) {
+            return { clusterArns: [`arn:aws:ecs:us-east-2:123:cluster/${PROJECT}-cluster`] };
+        }
         if (cmd instanceof MockListServicesCommand) return { serviceArns: [] };
         throw new Error(`Unexpected ECS command: ${cmd?.commandName}`);
     });
@@ -426,9 +431,19 @@ describe('gc: dry-run discovery', () => {
 
     it('excludes log groups of running preview services end to end', async () => {
         mockEcsSend.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockListClustersCommand) {
+                return {
+                    clusterArns: [
+                        `arn:aws:ecs:us-east-2:123:cluster/${PROJECT}-cluster`,
+                        `arn:aws:ecs:us-east-2:123:cluster/${PROJECT}-pr-123-cluster`,
+                    ],
+                };
+            }
             if (cmd instanceof MockListServicesCommand) {
-                expect(cmd.cluster).toBe(`${PROJECT}-cluster`);
-                return { serviceArns: [`arn:aws:ecs:us-east-2:123:service/${PROJECT}-cluster/${PROJECT}-pr-123-service`] };
+                if (cmd.cluster === `${PROJECT}-pr-123-cluster`) {
+                    return { serviceArns: [`arn:aws:ecs:us-east-2:123:service/${PROJECT}-pr-123-cluster/${PROJECT}-pr-123-service`] };
+                }
+                return { serviceArns: [] };
             }
             throw new Error('unexpected');
         });
@@ -841,15 +856,14 @@ describe('gc: AWS failure wrapping', () => {
         expect(exitSpy).not.toHaveBeenCalled();
     });
 
-    it('warns and reports VPCs as liveness-unknown when the deep ECS walk fails', async () => {
-        mockEcsSend.mockImplementationOnce(async (cmd) => {
-            if (cmd instanceof MockListServicesCommand) return { serviceArns: [] };
+    it('warns and reports VPCs as liveness-unknown when the shared enumeration fails', async () => {
+        mockEcsSend.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockListClustersCommand) {
+                const failure = new Error('socket hang up');
+                failure.name = 'NetworkingError';
+                throw failure;
+            }
             throw new Error(`Unexpected ECS command: ${cmd?.commandName}`);
-        });
-        mockEcsSend.mockImplementation(async () => {
-            const failure = new Error('socket hang up');
-            failure.name = 'NetworkingError';
-            throw failure;
         });
         mockEc2Send.mockImplementation(async (cmd) => {
             if (cmd instanceof MockDescribeAddressesCommand) return { Addresses: [] };
@@ -878,6 +892,19 @@ describe('gc: AWS failure wrapping', () => {
             vpc_deletable: 0,
         }));
     });
+
+    it('enumerates clusters once and shares it between log-group and VPC liveness', async () => {
+        mockEc2Send.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockDescribeAddressesCommand) return { Addresses: [] };
+            if (cmd instanceof MockDescribeVpcsCommand) return { Vpcs: [] };
+            throw new Error(`Unexpected EC2 command: ${cmd?.commandName}`);
+        });
+        mockSecretsSend.mockResolvedValue({ SecretList: [] });
+
+        await runGc({ projectName: PROJECT, region: 'us-east-2', deep: true });
+        const clusterCalls = mockEcsSend.mock.calls.filter(([cmd]) => cmd instanceof MockListClustersCommand);
+        expect(clusterCalls).toHaveLength(1);
+    });
 });
 
 describe('gc: deep VPC liveness', () => {
@@ -889,10 +916,14 @@ describe('gc: deep VPC liveness', () => {
         ],
     });
 
-    function deepCtx({ vpcs, services = [], subnets = [], isLambda = false, ecsImpl = null } = {}) {
+    function deepCtx({ vpcs, clusters = null, services = [], subnets = [], isLambda = false, ecsImpl = null } = {}) {
+        const clusterNames = clusters ?? [`${PROJECT}-cluster`];
         const ecsSend = ecsImpl ?? (async (cmd) => {
+            if (cmd.commandName === 'ListClustersCommand') {
+                return { clusterArns: clusterNames.map((c) => `arn:aws:ecs:us-east-2:123:cluster/${c}`) };
+            }
             if (cmd.commandName === 'ListServicesCommand') {
-                return { serviceArns: services.map((s) => s.arn) };
+                return { serviceArns: services.filter((s) => s.cluster === cmd.cluster).map((s) => s.arn) };
             }
             if (cmd.commandName === 'DescribeServicesCommand') {
                 return { services: services.filter((s) => cmd.services.includes(s.arn)).map((s) => s.detail) };
@@ -911,7 +942,6 @@ describe('gc: deep VPC liveness', () => {
             },
             ecsClient: { send: vi.fn(ecsSend) },
             secretsClient: { send: vi.fn(async () => ({ SecretList: [] })) },
-            cluster: `${PROJECT}-cluster`,
             projectName: PROJECT,
             resourceSuffix: '',
             isLambda,
@@ -931,8 +961,10 @@ describe('gc: deep VPC liveness', () => {
     it('treats desired-but-not-running services as live (crash loops count)', async () => {
         const found = await discoverDeepOrphans(deepCtx({
             vpcs: [tagged('vpc-preview', `${PROJECT}-pr-12-vpc`)],
+            clusters: [`${PROJECT}-cluster`, `${PROJECT}-pr-12-cluster`],
             services: [{
                 arn: 'arn:svc/pr-12',
+                cluster: `${PROJECT}-pr-12-cluster`,
                 detail: {
                     desiredCount: 1,
                     runningCount: 0,
@@ -946,16 +978,30 @@ describe('gc: deep VPC liveness', () => {
         expect(found.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-preview', reason: 'live-excluded' });
     });
 
+    it('proposes stale preview VPCs whose cluster runs nothing', async () => {
+        const found = await discoverDeepOrphans(deepCtx({
+            vpcs: [tagged('vpc-stale', `${PROJECT}-pr-9-vpc`)],
+            clusters: [`${PROJECT}-cluster`, `${PROJECT}-pr-9-cluster`],
+            services: [],
+        }));
+
+        expect(found.unknown).toBe(false);
+        expect(found.deletable).toEqual([{ kind: 'vpc', id: 'vpc-stale' }]);
+    });
+
     it('skips zero-desired zero-running services', async () => {
         const { vpcIds, unknown } = await discoverLiveVpcIds({
             ecsClient: {
                 send: vi.fn(async (cmd) => {
+                    if (cmd.commandName === 'ListClustersCommand') {
+                        return { clusterArns: [`arn:aws:ecs:us-east-2:123:cluster/${PROJECT}-cluster`] };
+                    }
                     if (cmd.commandName === 'ListServicesCommand') return { serviceArns: ['arn:svc/idle'] };
                     return { services: [{ desiredCount: 0, runningCount: 0, networkConfiguration: { awsvpcConfiguration: { subnets: ['sub-9'] } } }] };
                 }),
             },
-            cluster: `${PROJECT}-cluster`,
             ec2Client: { send: vi.fn(async () => ({ Subnets: [] })) },
+            projectName: PROJECT,
         });
 
         expect(unknown).toBe(false);

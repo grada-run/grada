@@ -53,6 +53,19 @@ describe('parseFlags', () => {
         });
     });
 
+    it('lets greedy string entries consume dash-leading values', () => {
+        expect(parseFlags(['--cmd', '--dry-run'], { string: [{ name: 'cmd', greedy: true }] })).toEqual({
+            options: { cmd: '--dry-run' },
+            rest: [],
+            unknown: [],
+        });
+        expect(parseFlags(['--cmd'], { string: [{ name: 'cmd', greedy: true }] })).toEqual({
+            options: {},
+            rest: [],
+            unknown: [],
+        });
+    });
+
     it('coerces number flags in both forms', () => {
         expect(parseFlags(['--tail', '50'], { number: ['tail'] }).options).toEqual({ tail: 50 });
         expect(parseFlags(['--tail=25'], { number: ['tail'] }).options).toEqual({ tail: 25 });
@@ -161,5 +174,17 @@ describe('honored globals are never unknown flags', () => {
         ['db import', parseDbImportArgs, ['--headless', '--yes']],
     ])('%s accepts %j without capturing unknownFlags', (_name, parse, flags) => {
         expect(parse(flags).unknownFlags).toBeUndefined();
+    });
+});
+
+describe('greedy shell-text flags', () => {
+    it.each([
+        ['db migrate', parseDbMigrateArgs, '--cmd', 'cmd'],
+        ['exec', parseExecArgs, '--command', 'command'],
+        ['add', parseAddArgs, '--cmd', 'cronCommand'],
+    ])('%s %s consumes a dash-leading value', (_name, parse, flag, key) => {
+        const out = parse([flag, '--dry-run']);
+        expect(out[key]).toBe('--dry-run');
+        expect(out.unknownFlags).toBeUndefined();
     });
 });

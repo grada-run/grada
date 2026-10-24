@@ -19,6 +19,19 @@ function normalizeEntries(entries) {
     return map;
 }
 
+// String entries marked `{ name, greedy: true }` consume the next token
+// even when it starts with `--`: flags taking arbitrary shell text
+// (`--cmd`, `--command`) must accept values like `--dry-run`.
+function greedyEntries(entries) {
+    const set = new Set();
+    for (const entry of entries || []) {
+        if (entry && typeof entry === 'object' && typeof entry.name === 'string' && entry.greedy === true) {
+            set.add(entry.name);
+        }
+    }
+    return set;
+}
+
 // Guards module entry points against non-object options (direct programmatic
 // misuse or automated fuzzing): anything that is not an object behaves like
 // `{}`, so callers always reach structured validation instead of TypeErrors.
@@ -43,7 +56,8 @@ export function normalizeArgv(argv) {
 //   the bare long flag).
 //
 // Space-form values never consume a `--like` token (a following flag stays
-// a flag). Unknown `--flags` are collected in `unknown` (never silently
+// a flag) — except `greedy` string entries, which take arbitrary shell
+// text. Unknown `--flags` are collected in `unknown` (never silently
 // dropped) so commands can reject them loud; everything else is returned
 // in `rest` so each command can apply its own positional rules.
 export function parseFlags(args, { string = [], number = [], boolean = [], bareBoolean = [], alias = {} } = {}) {
@@ -51,6 +65,7 @@ export function parseFlags(args, { string = [], number = [], boolean = [], bareB
     const rest = [];
     const unknown = [];
     const strings = normalizeEntries(string);
+    const greedyStrings = greedyEntries(string);
     const numbers = normalizeEntries(number);
     const booleans = normalizeEntries(boolean);
     const bares = normalizeEntries(bareBoolean);
@@ -73,7 +88,7 @@ export function parseFlags(args, { string = [], number = [], boolean = [], bareB
         const value = eq === -1 ? undefined : arg.slice(eq + 1);
         if (strings.has(name)) {
             if (value !== undefined) options[strings.get(name)] = value;
-            else if (i + 1 < list.length && !String(list[i + 1]).startsWith('--')) options[strings.get(name)] = list[++i];
+            else if (i + 1 < list.length && (greedyStrings.has(name) || !String(list[i + 1]).startsWith('--'))) options[strings.get(name)] = list[++i];
             continue;
         }
         if (numbers.has(name)) {

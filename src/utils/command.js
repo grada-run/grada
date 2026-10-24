@@ -63,7 +63,9 @@ export async function refuseUnknownFlags(options = {}, spec = {}) {
     return failCommand({
         noExit: isProgrammaticCall(opts),
         message: `\n✖ Unknown flag "${unknown[0]}" for ${command}.\n`,
-        hint: '  Check the spelling or run "grada --help" for usage.\n',
+        hint: unknown[0] === '--'
+            ? '  Bare "--" end-of-flags is not supported; use --flag=value when the value itself starts with a dash.\n'
+            : '  Check the spelling or run "grada --help" for usage.\n',
         event,
         telemetry,
         errorCode: 'UNKNOWN_FLAG',

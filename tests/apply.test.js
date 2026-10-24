@@ -49,6 +49,7 @@ vi.mock('../src/utils/visualizer.js', async (importOriginal) => {
 import { applyStack } from '../src/commands/apply.js';
 import { renderDryRunPreview } from '../src/utils/visualizer.js';
 import { provisionStateBucket, ensureStateBucketExists } from '../src/utils/aws.js';
+import { upsertAutoTfvar } from '../src/utils/terraform-metadata.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
 
 const COST_PROPS_SHAPE = {
@@ -295,6 +296,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
         stderr: 'EntityAlreadyExists: token.actions.githubusercontent.com provider exists',
       });
     });
+    clack.mockConfirm.mockResolvedValue(false); // decline adoption
 
     await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
     expect(clack.mockLogError).toHaveBeenCalledWith(
@@ -304,6 +306,72 @@ describe('Command: apply (mocked terraform spawn)', () => {
       'infrastructure_applied',
       expect.objectContaining({ success: false })
     );
+    expect(fs.existsSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'))).toBe(false);
+  });
+
+  it('adopts the existing OIDC provider on confirm and retries the apply', async () => {
+    writeProject();
+    let applies = 0;
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      if (args[0] === 'apply') {
+        applies += 1;
+        if (applies === 1) {
+          return makeChild({ code: 1, stderr: 'EntityAlreadyExists: token.actions.githubusercontent.com provider exists' });
+        }
+        return makeChild({ code: 0, stdout: 'Apply complete!' });
+      }
+      return makeChild({ code: 0 });
+    });
+
+    await applyStack({ isHeadless: false }).catch((error) => error);
+
+    expect(applies).toBe(2);
+    expect(fs.readFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toContain('create_oidc_provider = false');
+    expect(trackEvent).toHaveBeenCalledWith('oidc_provider_adopted', expect.objectContaining({ projectName: expect.any(String) }));
+  });
+
+  it('refuses OIDC adoption headless without approval and writes nothing', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({
+        code: 1,
+        stderr: 'EntityAlreadyExists: token.actions.githubusercontent.com provider exists',
+      });
+    });
+
+    // _skipPreview bypasses the provision confirm (internal retries do
+    // this after the user already confirmed), isolating the adoption
+    // gate: inferred-headless (vitest) with no approval flag refuses.
+    await expect(applyStack({ _skipPreview: true })).rejects.toMatchObject({ exitCode: 1 });
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'OIDC_ADOPT_NON_INTERACTIVE' })
+    );
+    expect(fs.existsSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'))).toBe(false);
+  });
+
+  it('adopts without prompting under --auto-approve', async () => {
+    writeProject();
+    let applies = 0;
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      if (args[0] === 'apply') {
+        applies += 1;
+        if (applies === 1) {
+          return makeChild({ code: 1, stderr: 'EntityAlreadyExists: token.actions.githubusercontent.com provider exists' });
+        }
+        return makeChild({ code: 0, stdout: 'Apply complete!' });
+      }
+      return makeChild({ code: 0 });
+    });
+
+    await applyStack({ isHeadless: true, autoApprove: true }).catch((error) => error);
+
+    expect(applies).toBe(2);
+    expect(clack.mockConfirm).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toContain('create_oidc_provider = false');
   });
 
   it('treats spawn errors (missing binary) as apply failure without AWS calls', async () => {
@@ -501,6 +569,59 @@ describe('Command: apply on --target lambda projects', () => {
     } finally {
       logSpy.mockRestore();
       errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('upsertAutoTfvar', () => {
+  it('creates the file with a managed header', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfvars-'));
+    try {
+      const out = upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      expect(out).toMatchObject({ created: true, changed: true });
+      expect(fs.readFileSync(out.path, 'utf8')).toBe(
+        '# Managed by grada: machine-written variable overrides. Safe to delete an entry to restore its default.\ncreate_oidc_provider = false\n'
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces an existing entry and reports idempotent rewrites as unchanged', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfvars-'));
+    try {
+      upsertAutoTfvar(dir, 'create_oidc_provider', true);
+      const flipped = upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      expect(flipped).toMatchObject({ created: false, changed: true });
+      expect(fs.readFileSync(flipped.path, 'utf8')).toContain('create_oidc_provider = false\n');
+      expect(fs.readFileSync(flipped.path, 'utf8')).not.toContain('true');
+      const same = upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      expect(same).toMatchObject({ created: false, changed: false });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('appends new keys while preserving existing entries', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfvars-'));
+    try {
+      upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      upsertAutoTfvar(dir, 'asleep', true);
+      const content = fs.readFileSync(path.join(dir, 'grada.auto.tfvars'), 'utf8');
+      expect(content).toContain('create_oidc_provider = false\n');
+      expect(content).toContain('asleep = true\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects non-boolean values and non-identifier keys', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfvars-'));
+    try {
+      expect(() => upsertAutoTfvar(dir, 'create_oidc_provider', 'false')).toThrow('booleans');
+      expect(() => upsertAutoTfvar(dir, 'a\nb = true', true)).toThrow('identifier');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
