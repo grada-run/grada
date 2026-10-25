@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath, resolveDistinctId, resetTelemetrySaltCache, defaultTelemetryIdPath, defaultTelemetrySaltPath } from '../src/core/telemetry.js';
+import { trackEvent, trackSuccess, trackFailure, detectCiProvider, resetTelemetryIdentityCache, migrateLegacyTelemetryId, getCliVersion, resolveCliVersion, setActiveCommandName, resetActiveCommandName, isRunningUnderVitest, telemetryState, readTelemetryPreference, writeTelemetryPreference, resetTelemetryPreferenceCache, resolveConfigPath, defaultConfigPath, resolveDistinctId, resetTelemetrySaltCache, defaultTelemetryIdPath, defaultTelemetrySaltPath, currentRunId, rotateRunId, isCliEntry } from '../src/core/telemetry.js';
 
 // This file tests the real telemetry module: opt out of the suite-wide
 // mock registered in tests/setup.js.
@@ -817,6 +817,66 @@ describe('trackEvent capture', () => {
             expect(props.cli_version).toBe(expectedVersion);
             expect(props.os).toBe(process.platform);
             expect(props.success).toBe(true);
+        });
+    });
+
+    describe('isCliEntry', () => {
+        it.each([
+            ['cli.js', ['node', '/repo/bin/cli.js']],
+            ['grada', ['node', '/usr/local/bin/grada']],
+            ['grada-run', ['node', '/opt/grada-run']],
+            ['deploy-stack', ['node', '/opt/deploy-stack']],
+        ])('recognizes the %s entry basename', (_name, argv) => {
+            expect(isCliEntry(argv)).toBe(true);
+        });
+
+        it.each([
+            ['vitest runner', ['node', '/repo/node_modules/vitest/vitest.mjs']],
+            ['bare node', ['node']],
+            ['empty argv', []],
+        ])('rejects %s', (_name, argv) => {
+            expect(isCliEntry(argv)).toBe(false);
+        });
+    });
+
+    describe('run_id correlation', () => {
+        const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+        it('stamps a uuid run_id on every event', () => {
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { projectName: 'test' });
+            trackEvent('cli-error', { error_code: 'BOOM' });
+            expect(fetchMock).toHaveBeenCalledTimes(2);
+            for (const [, { body }] of fetchMock.mock.calls) {
+                expect(JSON.parse(body).properties.run_id).toMatch(UUID_V4);
+            }
+        });
+
+        it('keeps one stable run_id across events in a process', () => {
+            const fetchMock = mockFetch();
+            trackEvent('drift_run', { projectName: 'test' });
+            trackEvent('cli-error', { error_code: 'BOOM' });
+            const ids = fetchMock.mock.calls.map(([, { body }]) => JSON.parse(body).properties.run_id);
+            expect(ids).toHaveLength(2);
+            expect(ids[1]).toBe(ids[0]);
+        });
+
+        it('rotates the run_id for subsequent events on demand', () => {
+            const fetchMock = mockFetch();
+            const before = currentRunId();
+            const rotated = rotateRunId();
+            expect(rotated).toMatch(UUID_V4);
+            expect(rotated).not.toBe(before);
+            trackEvent('exec_run', { projectName: 'test' });
+            expect(lastPayload(fetchMock).properties.run_id).toBe(rotated);
+        });
+
+        it('lets an explicit run_id override win but ignores undefined', () => {
+            const fetchMock = mockFetch();
+            trackEvent('exec_run', { run_id: 'pinned-run' });
+            expect(lastPayload(fetchMock).properties.run_id).toBe('pinned-run');
+            trackEvent('exec_run', { run_id: undefined });
+            expect(lastPayload(fetchMock).properties.run_id).toMatch(UUID_V4);
         });
     });
 

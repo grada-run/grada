@@ -128,8 +128,24 @@ describe('scaffoldDriftWorkflow', () => {
         const content = fs.readFileSync(path.join(dir, '.github', 'workflows', 'drift.yml'), 'utf8');
         const steps = loadYaml(content).jobs.drift.steps;
         const slack = steps.find((step) => step.name === 'Notify Slack');
-        expect(slack.if).toBe("steps.plan.outputs.exitcode == '2'");
+        expect(slack.if).toBe("steps.plan.outputs.exitcode == '2' && steps.state.outputs.empty != 'true'");
         expect(slack.run).toContain('if [ -z "$SLACK_WEBHOOK_URL" ]; then exit 0; fi');
+    });
+
+    it('skips the drift alarm when the state tracks no resources yet', () => {
+        const dir = makeTmp();
+        const result = scaffoldDriftWorkflow(dir, { region: 'us-east-2', roleArn: 'arn:aws:iam::1:role/x' });
+        expect(result.ok).toBe(true);
+        const steps = loadYaml(fs.readFileSync(path.join(dir, '.github', 'workflows', 'drift.yml'), 'utf8')).jobs.drift.steps;
+        const names = steps.map((step) => step.name);
+        expect(names.indexOf('Check provisioned state')).toBeGreaterThan(names.indexOf('Terraform Plan'));
+        expect(names.indexOf('Report drift as GitHub Issue')).toBeGreaterThan(names.indexOf('Check provisioned state'));
+        const guard = steps.find((step) => step.name === 'Check provisioned state');
+        expect(guard.id).toBe('state');
+        expect(guard.run).toContain('terraform state list');
+        expect(guard.run).toContain('empty=true');
+        const report = steps.find((step) => step.name === 'Report drift as GitHub Issue');
+        expect(report.if).toContain("steps.state.outputs.empty != 'true'");
     });
 
     it('refuses to overwrite without --force', () => {
@@ -184,11 +200,12 @@ describe('runDrift --setup', () => {
 });
 
 describe('runDrift check mode', () => {
-    function checkOptions(dir, planResult, initResult = { status: 0, stdout: '', stderr: '' }) {
+    function checkOptions(dir, planResult, initResult = { status: 0, stdout: '', stderr: '' }, stateResult = { status: 0, stdout: 'aws_lb.main\n', stderr: '' }) {
         return {
             cwd: dir,
             spawnSyncImpl: vi.fn((bin, args) => {
                 if (args[0] === 'init') return initResult;
+                if (args[0] === 'state') return stateResult;
                 return planResult;
             }),
         };
@@ -211,11 +228,43 @@ describe('runDrift check mode', () => {
             stdout: '# aws_lb.main will be updated\n  ~ x = 1\nPlan: 0 to add, 1 to change, 0 to destroy.',
             stderr: '',
         }));
-        expect(result).toMatchObject({ ok: false, reason: 'drift-detected' });
+        expect(result).toMatchObject({ ok: false, reason: 'drift-detected', provisioned: true });
         expect(exitSpy).toHaveBeenCalledWith(2);
         const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
         expect(output).toContain('Infrastructure drift detected');
         expect(output).toContain('Plan: 0 to add, 1 to change, 0 to destroy.');
+        expect(trackEvent).toHaveBeenCalledWith('drift_run', expect.objectContaining({ drift: true, provisioned: true }));
+    });
+
+    it('reports not-provisioned instead of drift when the state is empty', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        const options = checkOptions(dir, {
+            status: 2,
+            stdout: '# aws_lb.main will be created\nPlan: 1 to add, 0 to change, 0 to destroy.',
+            stderr: '',
+        }, undefined, { status: 0, stdout: '\n', stderr: '' });
+        const result = await runDrift(options);
+        expect(result).toMatchObject({ ok: true, action: 'check', drift: false, provisioned: false });
+        expect(exitSpy).not.toHaveBeenCalled();
+        const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(output).toContain('Nothing provisioned yet');
+        expect(output).not.toContain('drift detected');
+        expect(trackEvent).toHaveBeenCalledWith('drift_run', expect.objectContaining({ action: 'check', drift: false, provisioned: false, success: true }));
+        expect(options.spawnSyncImpl).toHaveBeenCalledWith('terraform', ['state', 'list', '-no-color'], expect.objectContaining({ cwd: path.join(dir, 'terraform') }));
+    });
+
+    it('still reports drift when the state lookup itself fails', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        const result = await runDrift(checkOptions(dir, {
+            status: 2,
+            stdout: '# aws_lb.main will be updated\nPlan: 0 to add, 1 to change, 0 to destroy.',
+            stderr: '',
+        }, undefined, { status: 1, stdout: '', stderr: 'backend boom' }));
+        expect(result).toMatchObject({ ok: false, reason: 'drift-detected' });
+        expect(result).not.toHaveProperty('provisioned');
+        expect(exitSpy).toHaveBeenCalledWith(2);
     });
 
     it('fails on exit code 1 and on init failures', async () => {

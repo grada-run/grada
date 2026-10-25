@@ -33,6 +33,7 @@ npx grada-run eject --yes
 - Headless runs refuse asleep stacks with `EJECT_WHILE_ASLEEP` unless `--force` is passed, migrating the ledger to a committed `SLEEPING.md` handoff (recorded desired counts, database state, wake-without-grada commands). Non-interactive runs without `--yes` fail with `EJECT_NON_INTERACTIVE`. Full catalog: [Headless Mode](/grada/guides/headless/).
 - Removed metadata: the `# grada generated infrastructure` header and `ManagedBy`/`GradaProject` tag block from `terraform/main.tf`, the `# grada backups` block from `.gitignore`, and every Grada backup (`*.bak.<timestamp>` shape only — your own lookalike files survive; skipping `node_modules` and `.git`). Tag blocks you extended stay untouched.
 - Ejection is recorded in gitignored `.grada/ejected.json` plus a committed `.grada-ejected` sentinel, so fresh clones refuse to silently re-manage the tree.
+- Adopted trees keep their OIDC adoption: when `terraform/grada.auto.tfvars` exists, eject appends a `!terraform/grada.auto.tfvars` negation after the scaffolded `*.auto.tfvars` ignore, so fresh clones apply without the provider collision (other auto.tfvars files stay ignored).
 
 ## See also
 

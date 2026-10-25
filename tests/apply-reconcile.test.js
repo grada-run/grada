@@ -263,6 +263,25 @@ describe('reconcileOfflineTree', () => {
         expect(findUnreconciledFiles(dir)).toEqual([]);
     });
 
+    it('declining the reconcile confirm returns cancelled without exiting', async () => {
+        const dir = tmp.makeTmp('reconcile-');
+        writeOfflineTree(dir);
+        vi.mocked(confirm).mockResolvedValueOnce(false);
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+        try {
+            const out = await reconcileOfflineTree({
+                targetDir: dir,
+                options: { isHeadless: false },
+                projectName: 'myapp',
+            });
+            expect(out).toEqual({ proceed: false, result: { ok: false, reason: 'cancelled' } });
+            expect(exitSpy).not.toHaveBeenCalled();
+            expect(findUnreconciledFiles(dir)).toHaveLength(2);
+        } finally {
+            exitSpy.mockRestore();
+        }
+    });
+
     it('rewrite is idempotent: a second pass finds nothing and files are byte-identical', async () => {
         const dir = tmp.makeTmp('reconcile-');
         writeOfflineTree(dir);

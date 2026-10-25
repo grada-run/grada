@@ -9,7 +9,7 @@ vi.mock('child_process', () => ({
     spawn: mockSpawn,
 }));
 
-import { runTerraformCommand, getTerraformOutputs, getTerraformStateBuckets } from '../src/utils/terraform.js';
+import { runTerraformCommand, getTerraformOutputs, getTerraformStateBuckets, PROGRESS_MODES } from '../src/utils/terraform.js';
 
 function makeChild({ code = 0, stdout = '', stderr = '', error = null } = {}) {
     const child = new EventEmitter();
@@ -81,6 +81,119 @@ describe('runTerraformCommand', () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+
+    it('forces deduped plain lines with progress=lines even on a TTY', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            const child = new EventEmitter();
+            child.stdout = new EventEmitter();
+            child.stderr = new EventEmitter();
+            mockSpawn.mockReturnValue(child);
+            const spin = { message: vi.fn(), clear: vi.fn() };
+
+            const pending = runTerraformCommand(['apply'], '/tmp', spin, 'Applying', { isTTY: true, progress: 'lines' });
+            child.stdout.emit('data', Buffer.from('same\n'));
+            child.stdout.emit('data', Buffer.from('same\n'));
+            child.stdout.emit('data', Buffer.from('different\n'));
+            child.emit('close', 0);
+            await pending;
+
+            expect(spin.message).not.toHaveBeenCalled();
+            expect(spin.clear).toHaveBeenCalledTimes(1);
+            expect(logSpy).toHaveBeenCalledTimes(2);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('forces spinner animation with progress=spinner even when not a TTY', async () => {
+        mockSpawn.mockReturnValue(makeChild({ stdout: 'first\nsecond\n' }));
+        const spin = { message: vi.fn(), clear: vi.fn() };
+
+        await expect(runTerraformCommand(['apply'], '/tmp', spin, 'Applying', { isTTY: false, progress: 'spinner' })).resolves.toBeUndefined();
+        expect(spin.message).toHaveBeenCalledWith(expect.stringContaining('second'));
+        expect(spin.clear).not.toHaveBeenCalled();
+    });
+
+    it('pins exactly the lines|spinner progress modes', () => {
+        expect(PROGRESS_MODES).toEqual(['lines', 'spinner']);
+    });
+
+    describe('default terminal sniff', () => {
+        function stubStdoutTTY(value) {
+            const stdout = process.stdout;
+            const descriptor = Object.getOwnPropertyDescriptor(stdout, 'isTTY');
+            Object.defineProperty(stdout, 'isTTY', { value, configurable: true });
+            return () => {
+                if (descriptor) Object.defineProperty(stdout, 'isTTY', descriptor);
+                else delete stdout.isTTY;
+            };
+        }
+
+        function withSniffEnv({ ci, term }, fn) {
+            const savedCI = process.env.CI;
+            const savedTerm = process.env.TERM;
+            if (ci === undefined) delete process.env.CI;
+            else process.env.CI = ci;
+            if (term === undefined) delete process.env.TERM;
+            else process.env.TERM = term;
+            const restoreTTY = stubStdoutTTY(true);
+            return (async () => {
+                try {
+                    return await fn();
+                } finally {
+                    restoreTTY();
+                    if (savedCI === undefined) delete process.env.CI;
+                    else process.env.CI = savedCI;
+                    if (savedTerm === undefined) delete process.env.TERM;
+                    else process.env.TERM = savedTerm;
+                }
+            })();
+        }
+
+        async function runSniffed() {
+            const child = new EventEmitter();
+            child.stdout = new EventEmitter();
+            child.stderr = new EventEmitter();
+            mockSpawn.mockReturnValue(child);
+            const spin = { message: vi.fn(), clear: vi.fn() };
+            const pending = runTerraformCommand(['apply'], '/tmp', spin, 'Applying');
+            child.stdout.emit('data', Buffer.from('line\n'));
+            child.emit('close', 0);
+            await pending;
+            return spin;
+        }
+
+        it('animates on a TTY outside CI with a capable TERM', async () => {
+            const spin = await withSniffEnv({ term: 'xterm-256color' }, runSniffed);
+            expect(spin.message).toHaveBeenCalledTimes(1);
+            expect(spin.clear).not.toHaveBeenCalled();
+        });
+
+        it('uses plain lines on CI even when stdout is a TTY', async () => {
+            const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            try {
+                const spin = await withSniffEnv({ ci: 'true', term: 'xterm-256color' }, runSniffed);
+                expect(spin.message).not.toHaveBeenCalled();
+                expect(spin.clear).toHaveBeenCalledTimes(1);
+                expect(logSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                logSpy.mockRestore();
+            }
+        });
+
+        it('uses plain lines with TERM=dumb even when stdout is a TTY', async () => {
+            const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            try {
+                const spin = await withSniffEnv({ term: 'dumb' }, runSniffed);
+                expect(spin.message).not.toHaveBeenCalled();
+                expect(spin.clear).toHaveBeenCalledTimes(1);
+                expect(logSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                logSpy.mockRestore();
+            }
+        });
     });
 
     it('stays silent without a spinner even when not a TTY', async () => {

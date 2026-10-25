@@ -154,7 +154,7 @@ export function upsertAutoTfvar(tfDir, key, value) {
     }
     const created = content === '';
     const line = `${key} = ${value ? 'true' : 'false'}`;
-    const pattern = new RegExp(`^${key}\\s*=.*$`, 'm');
+    const pattern = new RegExp(`^[ \\t]*${key}\\s*=.*$`, 'm');
     let changed;
     if (pattern.test(content)) {
         const next = content.replace(pattern, line);

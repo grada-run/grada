@@ -231,6 +231,20 @@ async function runDriftMain(input = {}) {
             return { ok: true, action: 'check', drift: false, region };
         }
         if (status === 2) {
+            // A plan on never-applied infrastructure also exits 2
+            // (everything "to add"). Empty state means nothing exists yet —
+            // report that instead of crying drift. A failed state lookup
+            // falls through to DRIFT_DETECTED: never mask real drift
+            // behind a broken check.
+            const stateResult = runSync('terraform', ['state', 'list', '-no-color'], { cwd: tfDir, encoding: 'utf8' });
+            const stateOk = stateResult?.status === 0;
+            if (stateOk && String(stateResult?.stdout ?? '').trim() === '') {
+                s.stop(color.green('Not provisioned yet.'));
+                console.log(color.green('\n✅ Nothing provisioned yet — run "npx grada-run apply" first, then check drift.\n'));
+                await trackSuccess('drift_run', { projectName, action: 'check', drift: false, provisioned: false });
+                outro(color.green('Done.'));
+                return { ok: true, action: 'check', drift: false, provisioned: false, region };
+            }
             s.stop(color.yellow('Drift detected.'));
             const summary = extractPlanSummary(planResult?.stdout);
             return failCommand({
@@ -241,10 +255,10 @@ async function runDriftMain(input = {}) {
                     console.log(`  Reconcile with ${color.green('npx grada-run apply')}, or adopt the live resource with ${color.green('terraform import')}.\n`);
                 },
                 event: 'drift_run',
-                telemetry: { projectName, action: 'check', drift: true },
+                telemetry: { projectName, action: 'check', drift: true, ...(stateOk ? { provisioned: true } : {}) },
                 errorCode: 'DRIFT_DETECTED',
                 reason: 'drift-detected',
-                resultExtra: { region },
+                resultExtra: { region, ...(stateOk ? { provisioned: true } : {}) },
                 exitCode: 2,
             });
         }

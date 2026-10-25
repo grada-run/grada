@@ -30,6 +30,7 @@ npx grada-run destroy --yes --allow-data-loss
 | `--force-unlock <lock-id>` | Force-unlock a stuck Terraform state lock and retry (only when no other run holds it). |
 | `--force` | Skip database discovery and the data-loss gate; escape hatch for wedged states. |
 | `--headless` | Global automation flag; implies `--yes` for this command. |
+| `--progress <lines\|spinner>` | Force Terraform progress as deduped plain lines (`lines`, for viewers that split animation frames into lines such as harness PTYs) or as the animated spinner (`spinner`). Default sniffs the terminal (TTY outside CI with a capable `TERM`). |
 
 ## Automation & edge cases
 

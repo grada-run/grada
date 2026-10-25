@@ -7,8 +7,8 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { teardownStateBucket, drainBucketObjects, resolveClient } from '../utils/aws.js';
 import { checkDependency, pollUntil } from '../utils/system.js';
 import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
-import { runTerraformCommand, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, getTerraformStateBuckets, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
+import { failCommand, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags, isProgrammaticCall } from '../utils/command.js';
+import { runTerraformCommand, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, getTerraformStateBuckets, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS, PROGRESS_MODES } from '../utils/terraform.js';
 import { classifyTerraformError, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { findDbTarget, dbStatusOf, resolveDbIdentifier, resolveDbClusterIdentifier, generateSnapshotId } from '../utils/rds.js';
 import { requireManagedTree, parseStateBucketBackend } from '../utils/terraform-metadata.js';
@@ -40,7 +40,7 @@ export function parseDestroyArgs(argv = []) {
     const args = normalizeArgv(argv);
     const { options, unknown } = parseFlags(args, {
         boolean: ['allow-data-loss', 'force', 'headless', 'yes'],
-        string: ['force-unlock'],
+        string: ['force-unlock', 'progress'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return { allowDataLoss: false, force: false, ...options };
@@ -148,6 +148,18 @@ async function destroyStackMain(input = {}) {
     const options = normalizeOptions(input);
     const unknownRefusal = await refuseUnknownFlags(options, { command: 'destroy', event: 'infrastructure_destroyed' });
     if (unknownRefusal) return unknownRefusal;
+    const progressMode = typeof options.progress === 'string' && options.progress.trim() !== '' ? options.progress.trim() : null;
+    if (progressMode !== null && !PROGRESS_MODES.includes(progressMode)) {
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: `\n✖ Invalid --progress "${options.progress}". Supported modes: lines, spinner.\n`,
+            hint: '  Use --progress lines when the output viewer splits animation frames into lines (harness PTYs, log capture).\n',
+            event: 'infrastructure_destroyed',
+            telemetry: { projectName: path.basename(process.cwd()) },
+            errorCode: 'INVALID_PROGRESS_MODE',
+            reason: 'invalid-progress-mode',
+        });
+    }
     intro(color.bgRed(color.white(' grada destroy 🗑️  ')));
 
     // Ejected trees are user-owned: refuse unless --force.
@@ -266,7 +278,7 @@ async function destroyStackMain(input = {}) {
     }
 
     const s = spinner();
-    const lifecycleOpts = { markerDir: process.cwd(), timeoutMs: DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS };
+    const lifecycleOpts = { markerDir: process.cwd(), timeoutMs: DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS, ...(progressMode ? { progress: progressMode } : {}) };
 
     // 1. Init first (R4): destroy on a fresh checkout or a wiped
     // .terraform cache must not trip over missing plugins.

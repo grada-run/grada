@@ -140,14 +140,17 @@ function defaultListLambdaFunctionNames({ region, spawnSyncImpl } = {}) {
 // proposing live-preview groups.
 // One enumeration feeding every ECS liveness consumer: each workspace
 // provisions its own `<app>-cluster`, so liveness must scan the
-// default cluster AND every preview cluster — never just one.
-// Returns service ARNs per project cluster; any client error resolves
-// `unknown` (fail closed) instead of a partial set.
+// default cluster AND every workspace cluster — Grada-minted `pr-N`
+// and hand-made (`staging`) alike, never just one. The segment is
+// deliberately workspace-wide: over-matching only ADDS live marks
+// (gc skips more), while a missed live cluster proposes a live VPC
+// for deletion. Returns service ARNs per project cluster; any client
+// error resolves `unknown` (fail closed) instead of a partial set.
 export async function listProjectClusterServices({ ecsClient = null, projectName, resourceSuffix = '' } = {}) {
     const byCluster = new Map();
     try {
         if (!ecsClient) return { byCluster, unknown: false };
-        const clusterPattern = new RegExp(`^${escapeRegExp(projectName)}(-pr-\\d+)?${escapeRegExp(resourceSuffix)}-cluster$`);
+        const clusterPattern = new RegExp(`^${escapeRegExp(projectName)}(-[A-Za-z0-9_-]+)?${escapeRegExp(resourceSuffix)}-cluster$`);
         let nextToken;
         const clusters = [];
         do {

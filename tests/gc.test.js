@@ -989,6 +989,38 @@ describe('gc: deep VPC liveness', () => {
         expect(found.deletable).toEqual([{ kind: 'vpc', id: 'vpc-stale' }]);
     });
 
+    it('excludes live hand-made-workspace VPCs (non-pr-N clusters count)', async () => {
+        const found = await discoverDeepOrphans(deepCtx({
+            vpcs: [tagged('vpc-staging', `${PROJECT}-staging-vpc`)],
+            clusters: [`${PROJECT}-cluster`, `${PROJECT}-staging-cluster`],
+            services: [{
+                arn: 'arn:svc/staging',
+                cluster: `${PROJECT}-staging-cluster`,
+                detail: {
+                    desiredCount: 1,
+                    runningCount: 1,
+                    networkConfiguration: { awsvpcConfiguration: { subnets: ['sub-7'] } },
+                },
+            }],
+            subnets: [{ SubnetId: 'sub-7', VpcId: 'vpc-staging' }],
+        }));
+
+        expect(found.unknown).toBe(false);
+        expect(found.deletable).toEqual([]);
+        expect(found.reportOnly).toContainEqual({ kind: 'vpc', id: 'vpc-staging', reason: 'live-excluded' });
+    });
+
+    it('still proposes stale hand-made-workspace VPCs whose cluster runs nothing', async () => {
+        const found = await discoverDeepOrphans(deepCtx({
+            vpcs: [tagged('vpc-stale-staging', `${PROJECT}-staging-vpc`)],
+            clusters: [`${PROJECT}-cluster`, `${PROJECT}-staging-cluster`],
+            services: [],
+        }));
+
+        expect(found.unknown).toBe(false);
+        expect(found.deletable).toEqual([{ kind: 'vpc', id: 'vpc-stale-staging' }]);
+    });
+
     it('skips zero-desired zero-running services', async () => {
         const { vpcIds, unknown } = await discoverLiveVpcIds({
             ecsClient: {

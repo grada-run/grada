@@ -4,11 +4,11 @@ import { intro, outro, spinner, log, cancel, confirm, isCancel } from '@clack/pr
 import color from 'picocolors';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
-import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName, isCliEntry } from '../core/telemetry.js';
 import { failCommand, isProgrammaticCall, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { spawnSync } from 'child_process';
-import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS } from '../utils/terraform.js';
+import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS, PROGRESS_MODES } from '../utils/terraform.js';
 import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { readInitManifest, recordAppliedTarget } from '../utils/backup.js';
 import { requireManagedTree, parseStateBucketBackend, upsertAutoTfvar } from '../utils/terraform-metadata.js';
@@ -26,11 +26,25 @@ export function parseApplyArgs(argv = []) {
     if (args[0] === 'apply' || args[0] === 'deploy') args.shift();
     const { options, unknown } = parseFlags(args, {
         boolean: ['force', 'destroy-previous-target', 'force-resume', 'allow-partial-outputs', 'headless', 'auto-approve', 'dry-run'],
-        string: ['force-unlock', 'account-id'],
+        string: ['force-unlock', 'account-id', 'progress'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
     return { force: false, ...options };
 }
+
+// Success/cancel paths exit only for real CLI runs: a bare
+// process.exit kills in-process callers (programmatic API, test
+// harnesses, a future MCP tool) along with their finally blocks.
+// Every site below returns its result right after.
+function exitZeroForCli() {
+    if (isCliEntry()) process.exit(0);
+}
+
+// Manual adopt equivalent, safe to re-run: strip any existing line
+// for the key (indented or not, present or not), then append exactly
+// one copy. A bare `echo … >>` duplicates the key on re-run and
+// Terraform fails hard on the redefinition.
+export const OIDC_ADOPT_MANUAL_COMMAND = `grep -v "^[[:space:]]*create_oidc_provider[[:space:]]*=" terraform/grada.auto.tfvars 2>/dev/null > terraform/grada.auto.tfvars.tmp; mv terraform/grada.auto.tfvars.tmp terraform/grada.auto.tfvars; echo 'create_oidc_provider = false' >> terraform/grada.auto.tfvars`;
 
 // Offline reconcile: an `init --offline` tree carries
 // YOUR_AWS_ACCOUNT_ID placeholders instead of an account id and has no
@@ -104,7 +118,8 @@ export async function reconcileOfflineTree({ targetDir, options = {}, projectNam
         });
         if (confirmed !== true) {
             cancel('Reconcile aborted.');
-            process.exit(0);
+            exitZeroForCli();
+            return { proceed: false, result: { ok: false, reason: 'cancelled' } };
         }
     }
     for (const file of files) {
@@ -298,7 +313,7 @@ async function enforceTargetSwitchGate({ options, targetDir, tfDir, runTerraform
             return { proceed: true, previousAppliedTarget: appliedTarget };
         }
         cancel('Apply cancelled. No infrastructure was changed.');
-        process.exit(0);
+        exitZeroForCli();
         return { proceed: false, result: { ok: false, reason: 'cancelled' } };
     }
 
@@ -334,6 +349,18 @@ async function applyStackMain(input = {}) {
     const options = normalizeOptions(input);
     const unknownRefusal = await refuseUnknownFlags(options, { command: 'apply', event: 'infrastructure_applied' });
     if (unknownRefusal) return unknownRefusal;
+    const progressMode = typeof options.progress === 'string' && options.progress.trim() !== '' ? options.progress.trim() : null;
+    if (progressMode !== null && !PROGRESS_MODES.includes(progressMode)) {
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: `\n✖ Invalid --progress "${options.progress}". Supported modes: lines, spinner.\n`,
+            hint: '  Use --progress lines when the output viewer splits animation frames into lines (harness PTYs, log capture).\n',
+            event: 'infrastructure_applied',
+            telemetry: { projectName: path.basename(process.cwd()) },
+            errorCode: 'INVALID_PROGRESS_MODE',
+            reason: 'invalid-progress-mode',
+        });
+    }
     intro(color.bgCyan(color.black(' grada apply ☁️  ')));
 
     const targetDir = process.cwd();
@@ -413,7 +440,8 @@ async function applyStackMain(input = {}) {
             framework: detectedConfig.framework,
             ...costProps,
         });
-        process.exit(0);
+        exitZeroForCli();
+        return { ok: true, dryRun: true };
     } else if (shouldAutoApprove(options) || options._skipPreview === true) {
         // Internal lock-retry resumes skip the preview: the user already
         // confirmed it before the lock failure.
@@ -430,14 +458,15 @@ async function applyStackMain(input = {}) {
         const confirmed = await renderDryRunPreview(detectedConfig, false);
         if (!confirmed) {
             cancel('Apply aborted.');
-            process.exit(0);
+            exitZeroForCli();
+            return { ok: false, reason: 'cancelled' };
         }
     }
 
     const s = spinner();
     const runTerraform = options.runTerraformImpl || runTerraformCommand;
     const runSync = options.spawnSyncImpl || spawnSync;
-    const lifecycleOpts = { markerDir: targetDir, timeoutMs: DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS };
+    const lifecycleOpts = { markerDir: targetDir, timeoutMs: DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS, ...(progressMode ? { progress: progressMode } : {}) };
     const diskTarget = readTerraformComputeTarget(targetDir);
 
     try {
@@ -550,7 +579,8 @@ async function applyStackMain(input = {}) {
             ...costProps
         });
 
-        process.exit(0);
+        exitZeroForCli();
+        return { ok: true, projectName: actualProjectName, target: diskTarget };
 
     } catch (error) {
         s.stop(color.red('❌ Terraform apply failed.'));
@@ -667,6 +697,7 @@ async function applyStackMain(input = {}) {
             });
         }
 
+        let adoptUpsertError = null;
         if (code === 'OIDC_PROVIDER_CONFLICT' && options._oidcAdopted !== true) {
             // Adopt the shared provider instead of hand-editing: the
             // GitHub provider URL is account-singleton, so the existing
@@ -688,12 +719,21 @@ async function applyStackMain(input = {}) {
                 adopt = !isCancel(confirmed) && confirmed === true;
             }
             if (adopt) {
-                upsertAutoTfvar(tfDir, 'create_oidc_provider', false);
-                trackEvent('oidc_provider_adopted', { projectName: actualProjectName });
-                log.message(color.cyan('Adopted the existing OIDC provider — retrying apply...'));
-                return applyStack({ ...options, _skipPreview: true, _oidcAdopted: true });
+                try {
+                    upsertAutoTfvar(tfDir, 'create_oidc_provider', false);
+                } catch (error) {
+                    // A failed write must not crash inside the error
+                    // handler: fall through to the manual guidance with
+                    // the write error appended.
+                    adoptUpsertError = error;
+                }
+                if (adoptUpsertError === null) {
+                    trackEvent('oidc_provider_adopted', { projectName: actualProjectName });
+                    log.message(color.cyan('Adopted the existing OIDC provider — retrying apply...'));
+                    return applyStack({ ...options, _skipPreview: true, _oidcAdopted: true });
+                }
             }
-            // Declined: fall through to the manual guidance below.
+            // Declined (or unwritable): fall through to the manual guidance below.
         }
 
         if (code === 'OIDC_PROVIDER_CONFLICT') {
@@ -703,8 +743,11 @@ async function applyStackMain(input = {}) {
             log.message('AWS only allows one GitHub Actions provider per account, and you already have one configured.');
             log.message('');
             log.message(`${color.bold('How to fix this:')}`);
-            log.message(`1. Adopt the shared provider: ${color.cyan(`echo 'create_oidc_provider = false' >> terraform/grada.auto.tfvars`)}`);
+            log.message(`1. Adopt the shared provider (safe to re-run): ${color.cyan(OIDC_ADOPT_MANUAL_COMMAND)}`);
             log.message(`2. Run ${color.cyan('npx grada-run apply')} again.`);
+            if (adoptUpsertError) {
+                log.message(color.dim(`  (Automatic adoption failed: ${adoptUpsertError.message})`));
+            }
         } else if (code === 'BACKEND_RECONFIGURE_REQUIRED' || code === 'CLOUDFRONT_IN_PROGRESS' || code === 'DELETION_PROTECTION_ACTIVE') {
             // Named but flow-neutral: runbook guidance with a coded
             // failure. (RECREATE_COLLISION has its dedicated branch

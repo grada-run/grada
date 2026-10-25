@@ -182,6 +182,20 @@ describe('Command: destroy (mocked terraform spawn)', () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
+  it('forces spinner animation through to terraform with --progress=spinner', async () => {
+    writeBackend();
+    clack.mockConfirm
+      .mockResolvedValueOnce(true) // proceed with destroy
+      .mockResolvedValueOnce(false); // retain bucket
+    mockSpawn.mockImplementation(() => makeChild({ code: 0, stdout: 'destroy complete\n' }));
+
+    await destroyStack({ isHeadless: false, progress: 'spinner' });
+
+    // Under the test runner stdout is not a TTY, so spinner frames can
+    // only fire when --progress=spinner threads through lifecycleOpts.
+    expect(clack.mockSpinnerMessage).toHaveBeenCalledWith(expect.stringContaining('destroy complete'));
+  });
+
   it('destroys compute and deletes the state bucket when confirmed', async () => {
     writeBackend('delete-me-123', 'us-east-2');
     clack.mockConfirm

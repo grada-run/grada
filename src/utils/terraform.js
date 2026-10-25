@@ -4,6 +4,7 @@ import { spawn } from 'child_process';
 import color from 'picocolors';
 import { classifyTerraformError } from './terraform-errors.js';
 import { SLEEP_STATE_DIRNAME } from './sleep-state.js';
+import { isActiveEnvValue } from '../core/telemetry.js';
 
 export const LAST_RUN_FILENAME = 'last-run.json';
 // Generous per-phase ceiling: CloudFront teardown and Aurora provisioning
@@ -53,6 +54,12 @@ export function isInterruptedMarker(marker) {
 // output would otherwise replace them.
 const SUMMARY_LINE_RE = /^(Plan:|Apply complete!|Destroy complete!|No changes\.)/;
 
+// Explicit progress modes for `runTerraformCommand` (the --progress flag
+// on apply/destroy): `lines` forces deduped plain lines for viewers that
+// split animation frames into lines (harness PTYs), `spinner` forces the
+// animated spinner. Absent, the terminal sniff below decides.
+export const PROGRESS_MODES = ['lines', 'spinner'];
+
 // Runs a terraform command while piping the latest stdout line into a
 // @clack spinner. Resolves on exit 0; rejects with a structured error
 // (`{ code, stderr, lockId? }` classified via terraform-errors.js)
@@ -68,15 +75,28 @@ const SUMMARY_LINE_RE = /^(Plan:|Apply complete!|Destroy complete!|No changes\.)
 // Progress display: a live terminal rewrites one spinner line, but the
 // spinner re-renders every ~80ms — wherever cursor movement isn't
 // honored (piped output, log viewers) each tick becomes a line and
-// quiet stretches repeat the same message dozens of times. Non-TTY
+// quiet stretches repeat the same message dozens of times. Non-live
 // runs therefore get deduped plain lines instead, and the caller's
 // spinner is cleared so its tick doesn't spam behind them (the
-// caller's later stop then becomes a silent no-op). `isTTY` overrides
-// the terminal sniff for tests.
+// caller's later stop then becomes a silent no-op).
+//
+// `progress` overrides everything (`lines` forces plain lines,
+// `spinner` forces animation). Otherwise an explicit `isTTY` keeps
+// exact legacy semantics, while the default sniff requires a TTY
+// outside CI with a capable TERM — and still can't catch harness
+// PTYs, which is what the flag is for.
 export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}) {
-    const { markerDir = null, timeoutMs = 0, onStdoutLine = null, isTTY = process.stdout?.isTTY } = options || {};
+    const opts = options || {};
+    const { markerDir = null, timeoutMs = 0, onStdoutLine = null, isTTY = process.stdout?.isTTY, progress = null } = opts;
     const wantsProgress = spin && typeof spin.message === 'function';
-    const live = isTTY === true && wantsProgress;
+    const sniffed = opts.isTTY === undefined
+        ? (isTTY === true && !isActiveEnvValue(process.env.CI) && process.env.TERM !== 'dumb')
+        : isTTY === true;
+    let live;
+    if (progress === 'lines') live = false;
+    else if (progress === 'spinner') live = true;
+    else live = sniffed;
+    live = live && wantsProgress;
     let lastEmitted;
     const emit = (text) => {
         if (lastEmitted === text) return;

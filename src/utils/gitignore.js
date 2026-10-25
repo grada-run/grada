@@ -20,6 +20,21 @@ export const GITIGNORE_RULE_BACKUPS = {
     block: '\n# grada backups\n*.bak.*\n',
 };
 
+// Content-level twin of `ensureGitignoreRules` for read-modify-write
+// flows that already hold the file content (eject strips stanzas in
+// memory under the project lock, so the file-based helper can't be
+// used). Pure: returns the amended content plus whether it changed.
+export function applyGitignoreRules(content, rules = []) {
+    const text = typeof content === 'string' ? content : '';
+    const missing = rules.filter(
+        (rule) => !(typeof text === 'string' && text.includes(rule.contains))
+    );
+    if (missing.length === 0) return { content: text, changed: false };
+    const addition = missing.map((rule) => rule.block).join('').replace(/^\n+/, '');
+    const separator = text === '' ? '' : (text.endsWith('\n') ? '\n' : '\n\n');
+    return { content: `${text}${separator}${addition}`, changed: true };
+}
+
 // Ensures every rule's block is present in `<cwd>/.gitignore`. Returns
 // true when the file was created or amended, false when every rule
 // already matched or the write failed.

@@ -11,6 +11,14 @@ const pendingRequests = [];
 
 const CLI_ENTRY_BASENAMES = ['cli.js', 'grada', 'grada-run', 'deploy-stack'];
 
+// True when this process is a real CLI invocation (as opposed to a
+// programmatic import, test harness, or MCP host): success/cancel
+// paths exit only here, so in-process callers get results instead of
+// a dead host. Argv injectable for tests.
+export function isCliEntry(argv = process.argv) {
+    return CLI_ENTRY_BASENAMES.includes(path.basename(argv?.[1] || ''));
+}
+
 // Base props trackEvent stamps on every payload. Callers may override them
 // with real values, but never with `undefined` (see step 3b below).
 const RESERVED_BASE_PROPS = [
@@ -24,6 +32,7 @@ const RESERVED_BASE_PROPS = [
     'is_cli_entry',
     'cli_command',
     'project_id',
+    'run_id',
     'framework',
 ];
 
@@ -31,6 +40,24 @@ let cachedDistinctId = null;
 
 export function resetTelemetryIdentityCache() {
     cachedDistinctId = null;
+}
+
+// Per-invocation correlation id: stable across every event one CLI run
+// emits, unique across runs. Parallel runners share distinct_id (baked
+// image) and project_id (same fixture dirname), so without this their
+// bursts are indistinguishable from one run emitting many events.
+let cachedRunId = null;
+
+export function currentRunId() {
+    if (!cachedRunId) cachedRunId = crypto.randomUUID();
+    return cachedRunId;
+}
+
+// Long-lived hosts (the MCP server) invoke many commands in one process:
+// rotate per tool call so each keeps a distinct correlation id.
+export function rotateRunId() {
+    cachedRunId = crypto.randomUUID();
+    return cachedRunId;
 }
 
 // Active command for programmatic (non-CLI) entrypoints. Wrappers such as
@@ -430,7 +457,7 @@ export function trackEvent(eventName, properties) {
     const ciProvider = detectCiProvider();
     const testEnv = isTestEnv();
     const isCi = isActiveEnvValue(process.env.CI) || ciProvider !== 'none';
-    const isCliEntry = CLI_ENTRY_BASENAMES.includes(path.basename(process.argv?.[1] || ''));
+    const cliEntry = isCliEntry();
 
     // 5. Machine-scoped Person identity, stable across commands in this env.
     const distinctId = resolveDistinctId({ ciProvider, testEnv });
@@ -447,6 +474,9 @@ export function trackEvent(eventName, properties) {
     // 7. Strip the raw name out of the payload
     delete eventProps.projectName;
 
+    // 7b. Invocation correlation, resolved lazily so imports never pay.
+    const runId = currentRunId();
+
     const payload = {
         api_key: POSTHOG_API_KEY,
         event: normalizedEvent,
@@ -459,11 +489,12 @@ export function trackEvent(eventName, properties) {
             ci_provider: ciProvider,
             is_test_env: testEnv,
             is_tty: Boolean(process.stdout && process.stdout.isTTY),
-            is_cli_entry: isCliEntry,
-            cli_command: isCliEntry
+            is_cli_entry: cliEntry,
+            cli_command: cliEntry
                 ? (process.env.CLI_COMMAND || process.argv.slice(2).join(' ') || 'unknown')
                 : (currentCommandName() || 'module_import'),
             project_id: projectId,
+            run_id: runId,
             framework: process.env.GRADA_FRAMEWORK || process.env.DEPLOY_STACK_FRAMEWORK || frameworkOverride || undefined,
             ...eventProps
         }

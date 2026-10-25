@@ -35,6 +35,7 @@ npx grada-run deploy            # alias of apply
 | `--force-unlock <lock-id>` | Force-unlock a stuck Terraform state lock and retry once (only when no other run holds it). |
 | `--account-id <12-digit-id>` | Resolve offline placeholders against this AWS account instead of your credentials (STS). Only read on unreconciled trees. |
 | `--headless` | Global automation flag; implies `--auto-approve` for this command. |
+| `--progress <lines\|spinner>` | Force Terraform progress as deduped plain lines (`lines`, for viewers that split animation frames into lines such as harness PTYs) or as the animated spinner (`spinner`). Default sniffs the terminal (TTY outside CI with a capable `TERM`). |
 
 ## Automation & edge cases
 
@@ -43,6 +44,6 @@ npx grada-run deploy            # alias of apply
 - Second project in an account with a GitHub OIDC provider: `apply` offers to adopt it (one confirm, writes `create_oidc_provider = false` to machine-owned `terraform/grada.auto.tfvars`, retries automatically) instead of failing with hand-edit instructions. Non-interactive runs without `--auto-approve` fail with `OIDC_ADOPT_NON_INTERACTIVE`.
 - Bucket recovery recreates the exact bucket (and region) from `terraform/backend.tf`; if live infrastructure collides with the resumed apply, you get an import runbook (`terraform import` per address) instead of a blind recreate — `--force-resume` proceeds anyway. The same runbook covers same-run AlreadyExists failures (e.g. a create retried across a network drop).
 - After a successful apply, an empty outputs map fails loud (`PARTIAL_STATE`); missing keys warn. `--allow-partial-outputs` accepts legitimately output-less trees.
-- Interrupted previous runs (Ctrl+C, crash) are surfaced up front; on Lambda projects Day-0 seeds a placeholder ECR image so the first provision succeeds; on the known GitHub OIDC provider conflict, set `create_oidc_provider = false` in `terraform/oidc.tf` and re-run.
+- Interrupted previous runs (Ctrl+C, crash) are surfaced up front; on Lambda projects Day-0 seeds a placeholder ECR image so the first provision succeeds; on the known GitHub OIDC provider conflict, set `create_oidc_provider = false` in `terraform/grada.auto.tfvars` (machine-owned, survives regeneration) and re-run.
 
 `apply` shells out to the `terraform` binary in your generated `terraform/` directory and streams progress while it runs.

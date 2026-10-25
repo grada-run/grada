@@ -31,7 +31,7 @@ import { runStatus } from '../src/commands/status.js';
 import { runLogs } from '../src/commands/logs.js';
 import { auditSecrets } from '../src/commands/secrets.js';
 import { runAdd } from '../src/commands/add.js';
-import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../src/core/telemetry.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName, rotateRunId } from '../src/core/telemetry.js';
 
 vi.mock('../src/commands/status.js', () => ({ runStatus: vi.fn() }));
 vi.mock('../src/commands/logs.js', () => ({ runLogs: vi.fn() }));
@@ -45,6 +45,7 @@ vi.mock('../src/core/telemetry.js', () => ({
     trackFailure: vi.fn().mockResolvedValue(),
     setActiveCommandName: vi.fn(),
     resetActiveCommandName: vi.fn(),
+    rotateRunId: vi.fn(),
 }));
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -289,6 +290,12 @@ describe('withMcpCommand', () => {
         expect(resetActiveCommandName).toHaveBeenCalledTimes(1);
         await expect(withMcpCommand('logs', async () => { throw new Error('boom'); })).rejects.toThrow('boom');
         expect(resetActiveCommandName).toHaveBeenCalledTimes(2);
+    });
+
+    it('rotates the telemetry run id once per tool call', async () => {
+        await withMcpCommand('logs', async () => 'ok');
+        await withMcpCommand('status', async () => 'ok');
+        expect(rotateRunId).toHaveBeenCalledTimes(2);
     });
 });
 

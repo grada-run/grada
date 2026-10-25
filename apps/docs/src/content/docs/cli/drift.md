@@ -13,6 +13,10 @@ Catch console click-ops before they surprise you: compare live AWS state against
 - The scheduled workflow runs daily at 06:00 UTC (plus a manual `workflow_dispatch` trigger): on drift it opens (or updates, without spamming) a GitHub Issue labeled `iac-drift` with the plan diff; when drift resolves it comments `✅ Drift resolved` and closes the issue.
 - Set a `SLACK_WEBHOOK_URL` repository secret to also post drift alerts to Slack.
 
+## Before the first apply
+
+A plan on never-applied infrastructure also exits `2` (everything "to add") — that is not drift. Both paths check `terraform state list` first: when the state tracks no resources yet, the CLI reports `✅ Nothing provisioned yet` (exit `0`) and the scheduled workflow skips the issue/Slack alarm, noting the skip in the run summary. Run `apply` once, and drift checks start meaning drift.
+
 ## Usage
 
 ```bash

@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
-import { getCliVersion, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+import { getCliVersion, trackSuccess, setActiveCommandName, resetActiveCommandName, rotateRunId } from '../core/telemetry.js';
 import { safeHomedir } from '../core/homedir.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { failCommand, refuseUnknownFlags } from '../utils/command.js';
@@ -151,6 +151,7 @@ export function runGuardedToolCall(fn) {
 // safe, while setting it outside would race pipelined tool calls.
 export async function withMcpCommand(commandName, fn) {
     setActiveCommandName(commandName);
+    rotateRunId();
     try {
         return await fn();
     } finally {

@@ -372,7 +372,20 @@ describe('S1: apply while asleep', () => {
             'forced_apply_while_asleep',
             expect.objectContaining({ env: 'default' })
         );
-        expect(result).toBeUndefined(); // success path exits 0
+        expect(result).toMatchObject({ ok: true }); // in-process success returns; only CLI exits
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('S1b: real CLI entry still exits 0 on success (including headless CLI)', async () => {
+        asleepFixture();
+        mockHealthyEcsOutputs();
+        const savedArgv = process.argv;
+        process.argv = ['node', '/usr/local/bin/grada', 'apply', '--headless'];
+        try {
+            await applyStack({ isHeadless: true, force: true });
+        } finally {
+            process.argv = savedArgv;
+        }
         expect(exitSpy).toHaveBeenCalledWith(0);
     });
 
@@ -1052,13 +1065,14 @@ describe('S12: target-switch destroy gate', () => {
     it('S12b: --destroy-previous-target proceeds and records the override', async () => {
         switchFixture();
         mockHealthyEcsOutputs();
-        await applyStack({ isHeadless: true, destroyPreviousTarget: true });
+        const result = await applyStack({ isHeadless: true, destroyPreviousTarget: true });
+        expect(result).toMatchObject({ ok: true });
         expect(runTerraformCommand).toHaveBeenCalled();
         expect(trackEvent).toHaveBeenCalledWith('target_switch_override', expect.objectContaining({
             from: 'static',
             to: 'ecs',
         }));
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S12b: parseApplyArgs parses --destroy-previous-target', () => {
@@ -1067,16 +1081,60 @@ describe('S12: target-switch destroy gate', () => {
         });
     });
 
+    it('parses --progress on apply and destroy, both value forms', () => {
+        expect(applyModule.parseApplyArgs(['apply', '--progress', 'lines'])).toMatchObject({ progress: 'lines' });
+        expect(applyModule.parseApplyArgs(['apply', '--progress=spinner'])).toMatchObject({ progress: 'spinner' });
+        expect(destroyModule.parseDestroyArgs(['destroy', '--progress', 'lines'])).toMatchObject({ progress: 'lines' });
+        expect(destroyModule.parseDestroyArgs(['destroy', '--progress=spinner'])).toMatchObject({ progress: 'spinner' });
+        expect(applyModule.parseApplyArgs(['apply']).progress).toBeUndefined();
+    });
+
+    it('refuses an invalid --progress before any terraform call', async () => {
+        const applyResult = await applyStack({ progress: 'bogus' });
+        expect(applyResult).toMatchObject({ ok: false, reason: 'invalid-progress-mode' });
+        expect(trackEvent).toHaveBeenCalledWith('infrastructure_applied', expect.objectContaining({
+            error_code: 'INVALID_PROGRESS_MODE',
+        }));
+        const destroyResult = await destroyModule.destroyStack({ progress: 'bogus' });
+        expect(destroyResult).toMatchObject({ ok: false, reason: 'invalid-progress-mode' });
+        expect(trackEvent).toHaveBeenCalledWith('infrastructure_destroyed', expect.objectContaining({
+            error_code: 'INVALID_PROGRESS_MODE',
+        }));
+        expect(runTerraformCommand).not.toHaveBeenCalled();
+        expect(output()).toContain('Supported modes: lines, spinner');
+    });
+
+    it('threads --progress into every terraform call of an apply', async () => {
+        const dir = makeTmp();
+        writeEcsMainTf(dir);
+        writeSleepState(dir, {
+            default: {
+                env: 'default',
+                sleptAt: new Date().toISOString(),
+                autoRestartAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+                services: { app: 1 },
+            },
+        });
+        process.chdir(dir);
+        mockHealthyEcsOutputs();
+        await applyStack({ isHeadless: true, force: true, progress: 'lines' });
+        expect(runTerraformCommand).toHaveBeenCalled();
+        for (const call of runTerraformCommand.mock.calls) {
+            expect(call[4]).toMatchObject({ progress: 'lines' });
+        }
+    });
+
     it('S12c: same-target re-apply is not gated', async () => {
         const dir = makeTmp();
         writeEcsMainTf(dir);
         writeManifestV2(dir, { target: 'ecs', appliedTarget: 'ecs' });
         process.chdir(dir);
         mockHealthyEcsOutputs();
-        await applyStack({ isHeadless: true });
+        const result = await applyStack({ isHeadless: true });
+        expect(result).toMatchObject({ ok: true });
         expect(runTerraformCommand).toHaveBeenCalled();
         expect(trackEvent).not.toHaveBeenCalledWith('target_switch_override', expect.anything());
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S12: v2 manifest without appliedTarget (never applied) proceeds', async () => {
@@ -1085,16 +1143,18 @@ describe('S12: target-switch destroy gate', () => {
         writeManifestV2(dir, { target: 'ecs' });
         process.chdir(dir);
         mockHealthyEcsOutputs();
-        await applyStack({ isHeadless: true });
+        const result = await applyStack({ isHeadless: true });
+        expect(result).toMatchObject({ ok: true });
         expect(runTerraformCommand).toHaveBeenCalled();
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S12 interactive: plan review confirm proceeds, decline cancels', async () => {
         switchFixture();
         mockConfirm.mockResolvedValueOnce(true);
         mockHealthyEcsOutputs();
-        await applyStack({ isHeadless: false });
+        const result = await applyStack({ isHeadless: false });
+        expect(result).toMatchObject({ ok: true });
         expect(runTerraformCommand).toHaveBeenCalledWith(
             expect.arrayContaining(['plan']),
             expect.anything(),
@@ -1109,7 +1169,7 @@ describe('S12: target-switch destroy gate', () => {
             expect.anything(),
             expect.anything()
         );
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S12 interactive: declining the switch review cancels with zero apply', async () => {
@@ -1124,7 +1184,7 @@ describe('S12: target-switch destroy gate', () => {
             expect.anything(),
             expect.anything()
         );
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S12 legacy: v1 manifest (applied unknown) refuses closed', async () => {
@@ -1188,7 +1248,8 @@ describe('S14: stale state lock', () => {
             applies += 1;
             if (applies === 1) throw new Error(LOCK_STDERR);
         });
-        await applyStack({ runTerraformImpl, isHeadless: false });
+        const result = await applyStack({ runTerraformImpl, isHeadless: false });
+        expect(result).toMatchObject({ ok: true });
         expect(runTerraformImpl).toHaveBeenCalledWith(
             expect.arrayContaining(['force-unlock', 'abc-123-lock']),
             expect.anything(),
@@ -1199,7 +1260,7 @@ describe('S14: stale state lock', () => {
         expect(trackEvent).toHaveBeenCalledWith('state_lock_force_unlocked', expect.objectContaining({
             mode: 'interactive',
         }));
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S14c: headless --force-unlock proceeds without prompting', async () => {
@@ -1212,7 +1273,8 @@ describe('S14: stale state lock', () => {
             applies += 1;
             if (applies === 1) throw new Error(LOCK_STDERR);
         });
-        await applyStack({ isHeadless: true, forceUnlock: 'abc-123-lock', runTerraformImpl });
+        const result = await applyStack({ isHeadless: true, forceUnlock: 'abc-123-lock', runTerraformImpl });
+        expect(result).toMatchObject({ ok: true });
         expect(runTerraformImpl).toHaveBeenCalledWith(
             expect.arrayContaining(['force-unlock']),
             expect.anything(),
@@ -1221,7 +1283,7 @@ describe('S14: stale state lock', () => {
         );
         expect(mockConfirm).not.toHaveBeenCalled();
         expect(applies).toBe(2);
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('S14c: parseApplyArgs parses --force-unlock <id>', () => {
@@ -1302,10 +1364,11 @@ describe('S17: manifest intended/applied target', () => {
         writeManifestV2(dir, { target: 'ecs' });
         process.chdir(dir);
         mockHealthyEcsOutputs();
-        await applyStack({ isHeadless: true });
+        const result = await applyStack({ isHeadless: true });
+        expect(result).toMatchObject({ ok: true });
         const manifest = JSON.parse(fs.readFileSync(path.join(dir, '.grada', 'manifest.json'), 'utf-8'));
         expect(manifest.appliedTarget).toBe('ecs');
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 });
 
@@ -1982,9 +2045,10 @@ describe('S31: outputs contract', () => {
         const dir = makeTmp();
         writeEcsMainTf(dir);
         process.chdir(dir);
-        await applyStack({ isHeadless: true, allowPartialOutputs: true });
+        const result = await applyStack({ isHeadless: true, allowPartialOutputs: true });
+        expect(result).toMatchObject({ ok: true });
         expect(output()).toMatch(/partial/i);
-        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(exitSpy).not.toHaveBeenCalled();
     });
 
     it('names the resumed partial apply when a prior interrupt marker exists', async () => {

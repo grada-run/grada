@@ -46,7 +46,7 @@ vi.mock('../src/utils/visualizer.js', async (importOriginal) => {
   };
 });
 
-import { applyStack } from '../src/commands/apply.js';
+import { applyStack, OIDC_ADOPT_MANUAL_COMMAND } from '../src/commands/apply.js';
 import { renderDryRunPreview } from '../src/utils/visualizer.js';
 import { provisionStateBucket, ensureStateBucketExists } from '../src/utils/aws.js';
 import { upsertAutoTfvar } from '../src/utils/terraform-metadata.js';
@@ -125,9 +125,10 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it('dry run renders preview and exits 0 without spawning terraform', async () => {
+  it('dry run renders preview and returns without spawning terraform', async () => {
     writeProject();
-    await expect(applyStack({ isDryRun: true })).rejects.toMatchObject({ exitCode: 0 });
+    const result = await applyStack({ isDryRun: true });
+    expect(result).toEqual({ ok: true, dryRun: true });
     expect(renderDryRunPreview).toHaveBeenCalledWith(expect.anything(), true);
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(trackEvent).toHaveBeenCalledWith(
@@ -135,7 +136,16 @@ describe('Command: apply (mocked terraform spawn)', () => {
       expect.objectContaining({ success: true, ...COST_PROPS_SHAPE })
     );
     expect(flushTelemetry).toHaveBeenCalled();
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns cancelled without exiting when the preview confirm is declined', async () => {
+    writeProject();
+    renderDryRunPreview.mockResolvedValueOnce(false);
+    const result = await applyStack({ isHeadless: false });
+    expect(result).toEqual({ ok: false, reason: 'cancelled' });
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('refuses loudly when headless without approval flags instead of abandoning the preview prompt', async () => {
@@ -156,7 +166,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it('provisions successfully: init + apply exit 0 and prints app/direct URL outputs', async () => {
+  it('provisions successfully: init + apply return and print app/direct URL outputs', async () => {
     writeProject();
     mockSpawn.mockImplementation((cmd, args = []) => {
       expect(cmd).toBe('terraform');
@@ -174,16 +184,15 @@ describe('Command: apply (mocked terraform spawn)', () => {
     });
 
     const outroSpy = clack.mockOutro;
-    // Success exit(0) lives INSIDE applyStack's try block, so a throwing
-    // process.exit mock would be swallowed as a failure. Use a no-op here.
-    exitSpy.mockImplementation(() => { });
-    await applyStack({ isHeadless: false });
+    // In-process callers get a result object; only real CLI runs exit.
+    const result = await applyStack({ isHeadless: false });
 
+    expect(result).toMatchObject({ ok: true });
     expect(mockSpawn).toHaveBeenCalledTimes(3);
     expect(mockSpawn.mock.calls[0][1]).toEqual(['init', '-upgrade']);
     expect(mockSpawn.mock.calls[1][1]).toEqual(['apply', '-auto-approve']);
     expect(mockSpawn.mock.calls[2][1]).toEqual(['output', '-json']);
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
     expect(outroSpy).toHaveBeenCalled();
     const outroText = stripVTControlCharacters(outroSpy.mock.calls.map((call) => call[0]).join('\n'));
     expect(outroText).toContain('App URL: https://d123.cloudfront.net (global CDN — share this link)');
@@ -236,11 +245,10 @@ describe('Command: apply (mocked terraform spawn)', () => {
     });
     clack.mockConfirm.mockResolvedValue(true); // accept recovery prompt
 
-    // Final success exit(0) is inside try: use no-op exit so it is not swallowed.
-    exitSpy.mockImplementation(() => { });
-    await applyStack({ isHeadless: false });
+    const result = await applyStack({ isHeadless: false });
 
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(result).toMatchObject({ ok: true });
+    expect(exitSpy).not.toHaveBeenCalled();
     expect(ensureStateBucketExists).toHaveBeenCalledWith({
       region: 'us-east-2',
       bucket: 'myapp-a1b2c3-tfstate-123456789012',
@@ -264,14 +272,13 @@ describe('Command: apply (mocked terraform spawn)', () => {
       return makeChild({ code: 0 });
     });
 
-    // Success exit(0) lives inside the try block: no-op exit like above.
-    exitSpy.mockImplementation(() => { });
-    await applyStack({ autoApprove: true });
+    const result = await applyStack({ autoApprove: true });
 
+    expect(result).toMatchObject({ ok: true });
     expect(renderDryRunPreview).toHaveBeenCalledTimes(1);
     expect(renderDryRunPreview).toHaveBeenCalledWith(expect.anything(), true);
     expect(clack.mockConfirm).not.toHaveBeenCalled();
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('aborts when the user declines state-bucket recovery', async () => {
@@ -302,11 +309,73 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(clack.mockLogError).toHaveBeenCalledWith(
       expect.stringContaining('OIDC')
     );
+    expect(clack.mockLogMessage).toHaveBeenCalledWith(expect.stringContaining('safe to re-run'));
+    expect(clack.mockLogMessage).toHaveBeenCalledWith(expect.stringContaining(OIDC_ADOPT_MANUAL_COMMAND));
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_applied',
       expect.objectContaining({ success: false })
     );
     expect(fs.existsSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'))).toBe(false);
+  });
+
+  it('falls through to guidance (never a raw crash) when the adopt write fails', async () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root bypasses directory perms
+    writeProject();
+    const tfDir = path.join(tmpDir, 'terraform');
+    let applies = 0;
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      if (args[0] === 'apply') {
+        applies += 1;
+        return makeChild({ code: 1, stderr: 'EntityAlreadyExists: token.actions.githubusercontent.com provider exists' });
+      }
+      return makeChild({ code: 0 });
+    });
+    clack.mockConfirm.mockResolvedValue(true); // accept adoption
+    fs.chmodSync(tfDir, 0o555);
+    try {
+      await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
+    } finally {
+      fs.chmodSync(tfDir, 0o755);
+    }
+    expect(applies).toBe(1);
+    expect(trackEvent).not.toHaveBeenCalledWith('oidc_provider_adopted', expect.anything());
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'OIDC_PROVIDER_CONFLICT' })
+    );
+    expect(clack.mockLogMessage).toHaveBeenCalledWith(expect.stringContaining('Automatic adoption failed'));
+  });
+
+  it('manual adopt command converges when run twice, even over an indented line', async () => {
+    const { execFileSync } = await vi.importActual('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adopt-cmd-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'terraform', 'grada.auto.tfvars'), '  create_oidc_provider = true\nasleep = true\n');
+      for (let i = 0; i < 2; i++) {
+        execFileSync('sh', ['-c', OIDC_ADOPT_MANUAL_COMMAND], { cwd: dir, stdio: 'pipe' });
+      }
+      expect(fs.readFileSync(path.join(dir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toBe(
+        'asleep = true\ncreate_oidc_provider = false\n'
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('manual adopt command creates the file when missing', async () => {
+    const { execFileSync } = await vi.importActual('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adopt-cmd-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+      execFileSync('sh', ['-c', OIDC_ADOPT_MANUAL_COMMAND], { cwd: dir, stdio: 'pipe' });
+      expect(fs.readFileSync(path.join(dir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toBe(
+        'create_oidc_provider = false\n'
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('adopts the existing OIDC provider on confirm and retries the apply', async () => {
@@ -321,11 +390,20 @@ describe('Command: apply (mocked terraform spawn)', () => {
         }
         return makeChild({ code: 0, stdout: 'Apply complete!' });
       }
+      if (args[0] === 'output')
+        return makeChild({
+          code: 0,
+          stdout: JSON.stringify({
+            cloudfront_url: { value: 'https://d123.cloudfront.net' },
+            alb_direct_url: { value: 'http://alb-123.us-east-2.elb.amazonaws.com' },
+          }),
+        });
       return makeChild({ code: 0 });
     });
 
-    await applyStack({ isHeadless: false }).catch((error) => error);
+    const result = await applyStack({ isHeadless: false });
 
+    expect(result).toMatchObject({ ok: true });
     expect(applies).toBe(2);
     expect(fs.readFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toContain('create_oidc_provider = false');
     expect(trackEvent).toHaveBeenCalledWith('oidc_provider_adopted', expect.objectContaining({ projectName: expect.any(String) }));
@@ -364,11 +442,20 @@ describe('Command: apply (mocked terraform spawn)', () => {
         }
         return makeChild({ code: 0, stdout: 'Apply complete!' });
       }
+      if (args[0] === 'output')
+        return makeChild({
+          code: 0,
+          stdout: JSON.stringify({
+            cloudfront_url: { value: 'https://d123.cloudfront.net' },
+            alb_direct_url: { value: 'http://alb-123.us-east-2.elb.amazonaws.com' },
+          }),
+        });
       return makeChild({ code: 0 });
     });
 
-    await applyStack({ isHeadless: true, autoApprove: true }).catch((error) => error);
+    const result = await applyStack({ isHeadless: true, autoApprove: true });
 
+    expect(result).toMatchObject({ ok: true });
     expect(applies).toBe(2);
     expect(clack.mockConfirm).not.toHaveBeenCalled();
     expect(fs.readFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toContain('create_oidc_provider = false');
@@ -392,7 +479,8 @@ describe('Command: apply (mocked terraform spawn)', () => {
     writeProject({
       '.deploy-stack/sleep-state.json': JSON.stringify({ default: { env: 'default' } }),
     });
-    await expect(applyStack({ isDryRun: true })).rejects.toMatchObject({ exitCode: 0 });
+    const result = await applyStack({ isDryRun: true });
+    expect(result).toEqual({ ok: true, dryRun: true });
     const warns = clack.mockLogWarn.mock.calls.map((call) => stripVTControlCharacters(String(call[0]))).join('\n');
     expect(warns).toContain('is asleep');
     expect(warns).toContain('npx grada-run wake');
@@ -400,7 +488,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
 
   it('stays silent about sleep when the environment is awake', async () => {
     writeProject();
-    await expect(applyStack({ isDryRun: true })).rejects.toMatchObject({ exitCode: 0 });
+    await expect(applyStack({ isDryRun: true })).resolves.toEqual({ ok: true, dryRun: true });
     const warns = clack.mockLogWarn.mock.calls.map((call) => stripVTControlCharacters(String(call[0]))).join('\n');
     expect(warns).not.toContain('is asleep');
   });
@@ -489,8 +577,9 @@ describe('Command: apply on --target lambda projects', () => {
     const runTerraformImpl = vi.fn(async (args) => { terraformCalls.push(args); });
     const spawnSyncImpl = mockAws({ imageExists: false });
 
-    await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+    const result = await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
 
+    expect(result).toMatchObject({ ok: true });
     expect(terraformCalls[0]).toEqual(['init', '-upgrade']);
     expect(terraformCalls[1]).toEqual(['apply', '-target=aws_ecr_repository.app', '-input=false', '-auto-approve']);
     expect(terraformCalls[2]).toEqual(['apply', '-auto-approve']);
@@ -502,7 +591,7 @@ describe('Command: apply on --target lambda projects', () => {
     expect(outroText).toContain('App URL: https://d123.cloudfront.net');
     expect(outroText).toContain('API URL: https://abc.execute-api.us-east-2.amazonaws.com (bypasses the CDN — for debugging)');
     expect(outroText).not.toContain('Direct URL:');
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('seeds the suffixed ECR repo on suffixed trees', async () => {
@@ -516,13 +605,14 @@ describe('Command: apply on --target lambda projects', () => {
     const runTerraformImpl = vi.fn(async () => { });
     const spawnSyncImpl = mockAws({ imageExists: true });
 
-    await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+    const result = await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
 
+    expect(result).toMatchObject({ ok: true });
     const describe = spawnSyncImpl.mock.calls.find(([, args]) => args[1] === 'describe-images');
     expect(describe).toBeDefined();
     const repoIdx = describe[1].indexOf('--repository-name');
     expect(describe[1][repoIdx + 1]).toBe('myapp-a1b2c3-repo');
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('prints the Site URL when the stack outputs site_url (static target)', async () => {
@@ -532,13 +622,14 @@ describe('Command: apply on --target lambda projects', () => {
     const runTerraformImpl = vi.fn(async () => { });
     const spawnSyncImpl = mockAws({ imageExists: true });
 
-    await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+    const result = await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
 
+    expect(result).toMatchObject({ ok: true });
     const outroText = stripVTControlCharacters(clack.mockOutro.mock.calls.map((call) => call[0]).join('\n'));
     expect(outroText).toContain('Site URL: https://d456.cloudfront.net (global CDN — share this link)');
     expect(outroText).not.toContain('Direct URL:');
     expect(outroText).not.toContain('API URL:');
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('skips seeding when :latest already exists', async () => {
@@ -546,10 +637,11 @@ describe('Command: apply on --target lambda projects', () => {
     const runTerraformImpl = vi.fn(async () => { });
     const spawnSyncImpl = mockAws({ imageExists: true });
 
-    await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+    const result = await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
 
+    expect(result).toMatchObject({ ok: true });
     expect(spawnSyncImpl).toHaveBeenCalledTimes(1);
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('fails fast with guidance when Day-0 seeding fails', async () => {
@@ -610,6 +702,20 @@ describe('upsertAutoTfvar', () => {
       const content = fs.readFileSync(path.join(dir, 'grada.auto.tfvars'), 'utf8');
       expect(content).toContain('create_oidc_provider = false\n');
       expect(content).toContain('asleep = true\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces an indented entry in place instead of duplicating it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfvars-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'grada.auto.tfvars'), '  create_oidc_provider = true\n');
+      const out = upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      expect(out).toMatchObject({ created: false, changed: true });
+      expect(fs.readFileSync(out.path, 'utf8')).toBe('create_oidc_provider = false\n');
+      const again = upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      expect(again).toMatchObject({ created: false, changed: false });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

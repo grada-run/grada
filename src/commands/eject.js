@@ -11,9 +11,10 @@ import {
     writeEjectedMarker,
     writeEjectedSentinel,
     parseStateBucketBackend,
+    GRADA_AUTO_TFVARS_FILENAME,
 } from '../utils/terraform-metadata.js';
 import { readSleepState, writeSleepState, LEDGER_LOCK_SCOPE } from '../utils/sleep-state.js';
-import { ensureGitignoreRules, GITIGNORE_RULE_GRADA_DIR } from '../utils/gitignore.js';
+import { ensureGitignoreRules, applyGitignoreRules, GITIGNORE_RULE_GRADA_DIR } from '../utils/gitignore.js';
 import { withProjectLock } from '../utils/file-lock.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { runWake } from './wake.js';
@@ -180,6 +181,24 @@ async function ejectStackMain(input = {}) {
             let gitignore = fs.readFileSync(gitignorePath, 'utf8');
             // Remove the exact block we injected in backup.js
             gitignore = stripGitignoreMetadata(gitignore);
+            // 2b. Adopted trees must keep the adoption committed: the
+            // scaffolded `terraform/*.auto.tfvars` ignore would drop
+            // grada.auto.tfvars from fresh clones, breaking them on
+            // OIDC with no Grada left to adopt. Negate just that file
+            // (sleep.auto.tfvars stays ignored). No file, no rule to
+            // negate, or already negated: leave the file untouched.
+            const autoTfvarsPath = path.join(tfDir, GRADA_AUTO_TFVARS_FILENAME);
+            const hasIgnoreRule = gitignore.split('\n').some((line) => {
+                const trimmed = line.trim();
+                return trimmed !== '' && !trimmed.startsWith('#') && !trimmed.startsWith('!') && trimmed.includes('auto.tfvars');
+            });
+            if (hasIgnoreRule && fs.existsSync(autoTfvarsPath)) {
+                const negation = `!terraform/${GRADA_AUTO_TFVARS_FILENAME}`;
+                gitignore = applyGitignoreRules(gitignore, [{
+                    contains: negation,
+                    block: `# Ejected tree: keep the adopted OIDC override committed\n${negation}\n`,
+                }]).content;
+            }
             atomicWriteFileSync(gitignorePath, gitignore.trim() + '\n');
         }
 

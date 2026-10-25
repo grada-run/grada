@@ -55,8 +55,24 @@ jobs:
           echo "### Drift plan (exit $EXITCODE)" >> "$GITHUB_STEP_SUMMARY"
           head -50 plan.txt >> "$GITHUB_STEP_SUMMARY"
 
+      # A plan on never-applied infrastructure also exits 2 (everything
+      # "to add") — that is not drift. Skip the issue/Slack alarm when
+      # the state tracks no resources yet. A failed lookup emits no
+      # output, so real drift is never masked by a broken check.
+      - name: Check provisioned state
+        id: state
+        if: steps.plan.outputs.exitcode == '2'
+        working-directory: ./terraform
+        run: |
+          if STATE_OUT=$(terraform state list -no-color 2>/dev/null); then
+            if [ -z "$STATE_OUT" ]; then
+              echo "empty=true" >> "$GITHUB_OUTPUT"
+              echo "### Not provisioned yet — skipping drift alarm (state tracks no resources)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
       - name: Report drift as GitHub Issue
-        if: steps.plan.outputs.exitcode == '2' || steps.plan.outputs.exitcode == '0'
+        if: (steps.plan.outputs.exitcode == '2' || steps.plan.outputs.exitcode == '0') && steps.state.outputs.empty != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -99,7 +115,7 @@ jobs:
             }
 
       - name: Notify Slack
-        if: steps.plan.outputs.exitcode == '2'
+        if: steps.plan.outputs.exitcode == '2' && steps.state.outputs.empty != 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |

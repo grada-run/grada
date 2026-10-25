@@ -137,6 +137,63 @@ describe('eject non-interactive gate', () => {
     });
 });
 
+describe('eject adopted-tree gitignore negation', () => {
+    const originalCwd = process.cwd();
+    let tmpDir;
+    let exitSpy;
+    let consoleSpy;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eject-negation-test-'));
+        process.chdir(tmpDir);
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'main.tf'), '# fake stack\n');
+        exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        process.chdir(originalCwd);
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeGitignore(content) {
+        fs.writeFileSync(path.join(tmpDir, '.gitignore'), content);
+    }
+
+    function readGitignore() {
+        return fs.readFileSync(path.join(tmpDir, '.gitignore'), 'utf8');
+    }
+
+    it('negates the adopted var file so fresh clones keep the OIDC adoption', async () => {
+        writeGitignore('node_modules/\nterraform/*.auto.tfvars\n');
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'create_oidc_provider = false\n');
+        await ejectStack({ yes: true });
+        const gitignore = readGitignore();
+        expect(gitignore).toContain('terraform/*.auto.tfvars');
+        expect(gitignore).toContain('!terraform/grada.auto.tfvars');
+        expect(gitignore.indexOf('!terraform/grada.auto.tfvars')).toBeGreaterThan(
+            gitignore.indexOf('terraform/*.auto.tfvars')
+        );
+    });
+
+    it('leaves the gitignore alone when nothing was adopted', async () => {
+        writeGitignore('node_modules/\nterraform/*.auto.tfvars\n');
+        await ejectStack({ yes: true });
+        expect(readGitignore()).not.toContain('!terraform/grada.auto.tfvars');
+    });
+
+    it('never duplicates a pre-existing negation', async () => {
+        writeGitignore('terraform/*.auto.tfvars\n\n# Ejected tree: keep the adopted OIDC override committed\n!terraform/grada.auto.tfvars\n');
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'create_oidc_provider = false\n');
+        await ejectStack({ yes: true });
+        expect(readGitignore().match(/!terraform\/grada\.auto\.tfvars/g)).toHaveLength(1);
+    });
+});
+
 describe('eject backup purge', () => {
     it.each([
         ['terraform.bak.1791725950691', true],

@@ -39,5 +39,8 @@ export async function telemetryMockFactory(importOriginal) {
         getCliVersion: actual.getCliVersion,
         setActiveCommandName: actual.setActiveCommandName,
         resetActiveCommandName: actual.resetActiveCommandName,
+        currentRunId: actual.currentRunId,
+        rotateRunId: actual.rotateRunId,
+        isCliEntry: actual.isCliEntry,
     };
 }
