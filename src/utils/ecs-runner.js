@@ -8,6 +8,7 @@ import { FilterLogEventsCommand, GetLogEventsCommand } from '@aws-sdk/client-clo
 import color from 'picocolors';
 import { fetchActiveService, pickRuntimeContainer } from './ecs.js';
 import { sleep, pollUntil } from './system.js';
+import { truncateSpinnerText } from './spinner-text.js';
 import { isNotFoundError, buildLogStreamName } from '../commands/logs.js';
 
 export const DEFAULT_RUNNER_POLL_INTERVAL_MS = 2000;
@@ -259,7 +260,7 @@ export async function runEphemeralEcsTask({
                     console.log(color.dim(`  task ${taskId} — press Ctrl+C to abort and stop the remote task.\n`));
                 } else if (!streaming && status && status !== lastPhase) {
                     lastPhase = status;
-                    spinner?.message(phaseMessage(status));
+                    spinner?.message(truncateSpinnerText(phaseMessage(status)));
                 }
                 return { done: false };
             },

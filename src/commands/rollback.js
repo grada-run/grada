@@ -13,6 +13,7 @@ import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, resolveWorkspaceSuffix, resolveCwd, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
+import { truncateSpinnerText } from '../utils/spinner-text.js';
 import { guardSleepingEnv, resolveSleepTarget } from '../utils/sleep-state.js';
 import {
     discoverEligibleRevisions as discoverWithAdapter,
@@ -301,7 +302,7 @@ async function runRollbackMain(input = {}) {
         }
 
         // 2. Trigger the rollback.
-        s.start(`Rolling back ${service} to revision ${targetRevisionNum}...`);
+        s.start(truncateSpinnerText(`Rolling back ${service} to revision ${targetRevisionNum}...`));
         await ecsClient.send(new UpdateServiceCommand({
             cluster,
             service,
@@ -353,19 +354,23 @@ async function runRollbackMain(input = {}) {
             }
 
             const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+            // Every poll frame goes through the width budget: the
+            // crashing-container variant walls past 131 columns on long
+            // service names without it.
+            const progressStem = `Rolling back ${service} to revision ${targetRevisionNum}... [${elapsedSec}s]`;
             if (!primary) {
-                s.message(`Rolling back ${service} to revision ${targetRevisionNum}... [${elapsedSec}s] (registering deployment...)`);
+                s.message(truncateSpinnerText(`${progressStem} (registering deployment...)`));
             } else {
                 const runningCount = primary.runningCount ?? 0;
                 const desiredCount = primary.desiredCount ?? 0;
                 const pendingCount = primary.pendingCount ?? 0;
                 const failedTasks = primary.failedTasks ?? 0;
                 if (failedTasks > 0) {
-                    s.message(`Rolling back ${service} to revision ${targetRevisionNum}... [${elapsedSec}s] (${runningCount}/${desiredCount} running, ${pendingCount} pending, ${failedTasks} failed ⚠️ — container crashing)`);
+                    s.message(truncateSpinnerText(`${progressStem} (${runningCount}/${desiredCount} running, ${pendingCount} pending, ${failedTasks} failed ⚠️ — container crashing)`));
                 } else if (runningCount >= desiredCount && desiredCount > 0 && pendingCount === 0) {
-                    s.message(`Rolling back ${service} to revision ${targetRevisionNum}... [${elapsedSec}s] (${runningCount}/${desiredCount} running — draining previous tasks)`);
+                    s.message(truncateSpinnerText(`${progressStem} (${runningCount}/${desiredCount} running — draining previous tasks)`));
                 } else {
-                    s.message(`Rolling back ${service} to revision ${targetRevisionNum}... [${elapsedSec}s] (${runningCount}/${desiredCount} running, ${pendingCount} pending)`);
+                    s.message(truncateSpinnerText(`${progressStem} (${runningCount}/${desiredCount} running, ${pendingCount} pending)`));
                 }
             }
 

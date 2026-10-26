@@ -364,6 +364,23 @@ describe('Command: apply (mocked terraform spawn)', () => {
     }
   });
 
+  it('manual adopt command converges under set -e on a single-key file', async () => {
+    const { execFileSync } = await vi.importActual('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adopt-cmd-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'terraform', 'grada.auto.tfvars'), 'create_oidc_provider = true\n');
+      for (let i = 0; i < 2; i++) {
+        execFileSync('sh', ['-e', '-c', OIDC_ADOPT_MANUAL_COMMAND], { cwd: dir, stdio: 'pipe' });
+      }
+      expect(fs.readFileSync(path.join(dir, 'terraform', 'grada.auto.tfvars'), 'utf8')).toBe(
+        'create_oidc_provider = false\n'
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('manual adopt command creates the file when missing', async () => {
     const { execFileSync } = await vi.importActual('child_process');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adopt-cmd-'));
@@ -716,6 +733,25 @@ describe('upsertAutoTfvar', () => {
       expect(fs.readFileSync(out.path, 'utf8')).toBe('create_oidc_provider = false\n');
       const again = upsertAutoTfvar(dir, 'create_oidc_provider', false);
       expect(again).toMatchObject({ created: false, changed: false });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('collapses pre-existing duplicate keys into one copy', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfvars-'));
+    try {
+      fs.writeFileSync(
+        path.join(dir, 'grada.auto.tfvars'),
+        'create_oidc_provider = false\nasleep = true\ncreate_oidc_provider = false\n'
+      );
+      const out = upsertAutoTfvar(dir, 'create_oidc_provider', false);
+      expect(out).toMatchObject({ created: false, changed: true });
+      const content = fs.readFileSync(out.path, 'utf8');
+      expect(content.match(/^create_oidc_provider = /gm)).toHaveLength(1);
+      expect(content).toContain('asleep = true\n');
+      // Converged: a second upsert is a no-op.
+      expect(upsertAutoTfvar(dir, 'create_oidc_provider', false)).toMatchObject({ changed: false });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

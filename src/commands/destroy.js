@@ -14,6 +14,7 @@ import { findDbTarget, dbStatusOf, resolveDbIdentifier, resolveDbClusterIdentifi
 import { requireManagedTree, parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { guardSleepingEnv } from '../utils/sleep-state.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
+import { truncateSpinnerText } from '../utils/spinner-text.js';
 
 export const DEFAULT_DESTROY_DB_TIMEOUT_MS = 600000;
 export const DEFAULT_DESTROY_DB_SETTLE_TIMEOUT_MS = 1800000;
@@ -323,7 +324,7 @@ async function destroyStackMain(input = {}) {
                     if (status === 'stopped' || status === 'available' || status === null) {
                         return { done: true, value: status };
                     }
-                    s.message(`Waiting for ${dbTarget.id} to settle (${status})... [${Math.floor(elapsedMs / 1000)}s]`);
+                    s.message(truncateSpinnerText(`Waiting for ${dbTarget.id} to settle (${status})... [${Math.floor(elapsedMs / 1000)}s]`));
                     return { done: false };
                 },
             });
@@ -334,7 +335,7 @@ async function destroyStackMain(input = {}) {
                 onTick: async ({ elapsedMs }) => {
                     const status = await readStatus();
                     if (status === 'available' || status === null) return { done: true, value: status };
-                    s.message(`Waiting for ${dbTarget.id} to become available... [${Math.floor(elapsedMs / 1000)}s]`);
+                    s.message(truncateSpinnerText(`Waiting for ${dbTarget.id} to become available... [${Math.floor(elapsedMs / 1000)}s]`));
                     return { done: false };
                 },
             });
@@ -404,7 +405,7 @@ async function destroyStackMain(input = {}) {
     // (nothing left to protect).
     if (dbNeedsProtection) {
         const snapshotId = generateSnapshotId(dbTarget.id);
-        s.start(`Snapshotting database ${dbTarget.id} before destruction...`);
+        s.start(truncateSpinnerText(`Snapshotting database ${dbTarget.id} before destruction...`));
         try {
             if (dbTarget.kind === 'cluster') {
                 await rdsClient.send(new CreateDBClusterSnapshotCommand({ DBClusterSnapshotIdentifier: snapshotId, DBClusterIdentifier: dbTarget.id }));
@@ -441,7 +442,7 @@ async function destroyStackMain(input = {}) {
     // warns and proceeds — terraform reports the authoritative outcome.
     if (dbTarget && dbTarget.status !== 'deleting') {
         const isCluster = dbTarget.kind === 'cluster';
-        s.start(`Lifting RDS deletion protection on ${dbTarget.id}...`);
+        s.start(truncateSpinnerText(`Lifting RDS deletion protection on ${dbTarget.id}...`));
         let lifted = false;
         try {
             if (isCluster) {
@@ -474,7 +475,7 @@ async function destroyStackMain(input = {}) {
                         status = null;
                     }
                     if (status === 'available' || status === null || status === 'deleting') return { done: true, value: status };
-                    s.message(`Waiting for ${dbTarget.id} after lifting protection (${status})... [${Math.floor(elapsedMs / 1000)}s]`);
+                    s.message(truncateSpinnerText(`Waiting for ${dbTarget.id} after lifting protection (${status})... [${Math.floor(elapsedMs / 1000)}s]`));
                     return { done: false };
                 },
             });
@@ -585,7 +586,7 @@ async function destroyStackMain(input = {}) {
         });
 
         if (deleteS3Bucket && typeof deleteS3Bucket !== 'symbol') {
-            s.start(`Emptying and deleting S3 state bucket: ${bucketName}...`);
+            s.start(truncateSpinnerText(`Emptying and deleting S3 state bucket: ${bucketName}...`));
             try {
                 const bucketResult = await teardownStateBucket(region, bucketName);
                 const remaining = bucketResult && typeof bucketResult === 'object' && Array.isArray(bucketResult.remaining)

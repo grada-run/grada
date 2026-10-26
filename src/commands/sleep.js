@@ -7,6 +7,7 @@ import { intro, outro, spinner, confirm, cancel } from '@clack/prompts';
 import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
+import { truncateSpinnerText } from '../utils/spinner-text.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
@@ -219,7 +220,7 @@ async function runSleepMain(input = {}) {
     const runSync = options.spawnSyncImpl || spawnSync;
 
     const s = spinner();
-    s.start(`Putting ${target.envKey} to sleep...`);
+    s.start(truncateSpinnerText(`Putting ${target.envKey} to sleep...`));
 
     try {
         // Read-only probes first: the fast-path check below must see live

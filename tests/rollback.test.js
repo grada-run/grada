@@ -117,6 +117,7 @@ describe('rollback: workspace resolution', () => {
 describe('Command: rollback (mocked ECS)', () => {
     let exitSpy;
     let consoleSpy;
+    let columnsDescriptor;
     const savedCi = process.env.CI;
 
     const spinnerMessages = () => createdSpinners.flatMap(
@@ -128,14 +129,62 @@ describe('Command: rollback (mocked ECS)', () => {
         consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
         createdSpinners.length = 0;
         delete process.env.CI;
+        // Wide terminal: message-content assertions see uncut frames
+        // (all fit 120); truncation itself is covered by the width
+        // test below plus the helper units.
+        columnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+        Object.defineProperty(process.stdout, 'columns', { value: 131, configurable: true });
     });
 
     afterEach(() => {
         exitSpy.mockRestore();
         consoleSpy.mockRestore();
+        if (columnsDescriptor) Object.defineProperty(process.stdout, 'columns', columnsDescriptor);
+        else delete process.stdout.columns;
         if (savedCi === undefined) delete process.env.CI;
         else process.env.CI = savedCi;
         vi.clearAllMocks();
+    });
+
+    it('caps poll frames to the terminal width on long service names', async () => {
+        const service = 's'.repeat(34);
+        const inProgress = {
+            services: [{
+                ...activeService(14),
+                serviceName: service,
+                deployments: [{
+                    status: 'PRIMARY',
+                    taskDefinition: arn(12),
+                    rolloutState: 'IN_PROGRESS',
+                    runningCount: 1,
+                    desiredCount: 2,
+                    pendingCount: 1,
+                    failedTasks: 2,
+                }],
+            }],
+        };
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) {
+                const calls = ecsClient.send.mock.calls.filter(([c]) => c instanceof DescribeServicesCommand).length;
+                if (calls <= 2) return inProgress;
+                return { services: [activeService(12, completedPrimary(12))] };
+            }
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
+            }
+            if (command instanceof UpdateServiceCommand) return {};
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        const result = await runRollback({ ...baseOptions({ service }), revision: '12', ecsClient });
+        expect(result.ok).toBe(true);
+        const messages = spinnerMessages();
+        expect(messages.length).toBeGreaterThan(0);
+        for (const msg of messages) {
+            expect(Array.from(String(msg)).length).toBeLessThanOrEqual(120);
+        }
+        // The crashing-container frame exceeds the budget raw and is cut.
+        expect(messages.some((msg) => String(msg).endsWith('...'))).toBe(true);
     });
 
     it('explicit numeric revision describes family:12, updates service, waits for COMPLETED', async () => {

@@ -5,6 +5,7 @@ import color from 'picocolors';
 import { classifyTerraformError } from './terraform-errors.js';
 import { SLEEP_STATE_DIRNAME } from './sleep-state.js';
 import { isActiveEnvValue } from '../core/telemetry.js';
+import { truncateSpinnerText, SPINNER_FRAME_OVERHEAD } from './spinner-text.js';
 
 export const LAST_RUN_FILENAME = 'last-run.json';
 // Generous per-phase ceiling: CloudFront teardown and Aurora provisioning
@@ -223,16 +224,18 @@ export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}
             if (typeof onStdoutLine === 'function') {
                 for (const line of lines) onStdoutLine(line);
             }
+            // Both emits cut the line to the terminal budget (truncate
+            // before coloring so ANSI escapes never count as columns).
+            const lineOverhead = `${loadingPrefix} - `.length + SPINNER_FRAME_OVERHEAD;
             for (const line of lines) {
                 const trimmed = line.trim();
                 if (SUMMARY_LINE_RE.test(trimmed)) {
-                    emit(`${loadingPrefix} - ${color.dim(trimmed)}`);
+                    emit(`${loadingPrefix} - ${color.dim(truncateSpinnerText(trimmed, { fixedOverhead: lineOverhead }))}`);
                 }
             }
             if (lines.length > 0) {
                 const latestLine = lines[lines.length - 1].trim();
-                const display = latestLine.length > 120 ? latestLine.substring(0, 117) + '...' : latestLine;
-                emit(`${loadingPrefix} - ${color.dim(display)}`);
+                emit(`${loadingPrefix} - ${color.dim(truncateSpinnerText(latestLine, { fixedOverhead: lineOverhead }))}`);
             }
         });
 

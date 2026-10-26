@@ -43,8 +43,11 @@ function exitZeroForCli() {
 // Manual adopt equivalent, safe to re-run: strip any existing line
 // for the key (indented or not, present or not), then append exactly
 // one copy. A bare `echo … >>` duplicates the key on re-run and
-// Terraform fails hard on the redefinition.
-export const OIDC_ADOPT_MANUAL_COMMAND = `grep -v "^[[:space:]]*create_oidc_provider[[:space:]]*=" terraform/grada.auto.tfvars 2>/dev/null > terraform/grada.auto.tfvars.tmp; mv terraform/grada.auto.tfvars.tmp terraform/grada.auto.tfvars; echo 'create_oidc_provider = false' >> terraform/grada.auto.tfvars`;
+// Terraform fails hard on the redefinition. The `|| true` keeps the
+// paste alive under `set -e`: grep -v exits 1 when it selects
+// nothing (single-key file), which would otherwise stop the chain
+// before the move and append.
+export const OIDC_ADOPT_MANUAL_COMMAND = `grep -v "^[[:space:]]*create_oidc_provider[[:space:]]*=" terraform/grada.auto.tfvars 2>/dev/null > terraform/grada.auto.tfvars.tmp || true; mv terraform/grada.auto.tfvars.tmp terraform/grada.auto.tfvars; echo 'create_oidc_provider = false' >> terraform/grada.auto.tfvars`;
 
 // Offline reconcile: an `init --offline` tree carries
 // YOUR_AWS_ACCOUNT_ID placeholders instead of an account id and has no

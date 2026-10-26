@@ -8,6 +8,7 @@ import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/a
 import { resolveRegion, resolveProjectName, resolveAppName, resolveCwd } from '../../utils/resolvers.js';
 import { findDbTarget, generateSnapshotId, isValidSnapshotId, resolveDbIdentifier, resolveDbClusterIdentifier } from '../../utils/rds.js';
 import { pollUntil, parseTimeoutSeconds } from '../../utils/system.js';
+import { truncateSpinnerText } from '../../utils/spinner-text.js';
 
 export const DEFAULT_BACKUP_TIMEOUT_SECONDS = 900;
 export const DEFAULT_BACKUP_POLL_INTERVAL_MS = 5000;
@@ -137,7 +138,7 @@ async function runDbBackupMain(input = {}) {
             ? options.snapshotId.trim()
             : generateSnapshotId(target.id);
 
-        s.message(`Creating snapshot ${snapshotId}...`);
+        s.message(truncateSpinnerText(`Creating snapshot ${snapshotId}...`));
         const snapshotTags = [
             { Key: 'ManagedBy', Value: 'grada' },
             { Key: 'Project', Value: projectName },
@@ -165,7 +166,7 @@ async function runDbBackupMain(input = {}) {
             return { ok: true, snapshotId, status: 'creating' };
         }
 
-        s.message(`Waiting for snapshot ${snapshotId} to become available...`);
+        s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to become available...`));
         const outcome = await pollUntil({
             intervalMs: pollIntervalMs,
             timeoutMs,
@@ -188,7 +189,7 @@ async function runDbBackupMain(input = {}) {
                     // creation (eventual consistency), so keep polling.
                     const notFoundNames = isCluster ? CLUSTER_SNAPSHOT_NOT_FOUND_NAMES : SNAPSHOT_NOT_FOUND_NAMES;
                     if (error && notFoundNames.has(error.name)) {
-                        s.message(`Waiting for snapshot ${snapshotId}... [${Math.floor(elapsedMs / 1000)}s]`);
+                        s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId}... [${Math.floor(elapsedMs / 1000)}s]`));
                         return { done: false };
                     }
                     throw error;
@@ -203,7 +204,7 @@ async function runDbBackupMain(input = {}) {
                 if (snapshot && TERMINAL_SNAPSHOT_STATUSES.has(String(snapshot.Status || '').toLowerCase())) {
                     return { done: true, value: { terminalFailure: true, status: snapshot.Status } };
                 }
-                s.message(`Waiting for snapshot ${snapshotId}... [${Math.floor(elapsedMs / 1000)}s]`);
+                s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId}... [${Math.floor(elapsedMs / 1000)}s]`));
                 return { done: false };
             },
         });

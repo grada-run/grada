@@ -11,6 +11,7 @@ import { atomicWriteFile } from '../utils/atomic-write.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
+import { truncateSpinnerText } from '../utils/spinner-text.js';
 
 // Static sites provision no secrets vault, so push/pull/audit would fail
 // obscurely against a Secrets Manager secret that can never exist. One
@@ -242,7 +243,7 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         : path.basename(process.cwd());
 
     const s = spinner();
-    s.start(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`);
+    s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
 
     try {
         // 1. Read and parse the local .env file

@@ -13,6 +13,7 @@ import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { findDbTarget, dbStatusOf } from '../utils/rds.js';
 import { fetchActiveService, detectTaskFailure } from '../utils/ecs.js';
 import { pollUntil } from '../utils/system.js';
+import { truncateSpinnerText } from '../utils/spinner-text.js';
 import {
     resolveSleepTarget,
     readSleepState,
@@ -231,7 +232,7 @@ async function runWakeMain(input = {}) {
     }
 
     const s = spinner();
-    s.start(`Waking ${target.envKey}...`);
+    s.start(truncateSpinnerText(`Waking ${target.envKey}...`));
 
     try {
         // 1. Start the database first so booting containers never
@@ -261,7 +262,7 @@ async function runWakeMain(input = {}) {
 
         if (!noWait && dbTarget && dbStarted) {
             const isCluster = dbTarget.kind === 'cluster';
-            s.message(`Waiting for ${dbTarget.id} to become available...`);
+            s.message(truncateSpinnerText(`Waiting for ${dbTarget.id} to become available...`));
             const outcome = await pollUntil({
                 intervalMs: pollIntervalMs,
                 timeoutMs,
@@ -275,7 +276,7 @@ async function runWakeMain(input = {}) {
                         ? (resp.DBClusters || [])[0] || null
                         : (resp.DBInstances || [])[0] || null;
                     if (dbStatusOf(current, isCluster ? 'cluster' : 'instance') === 'available') return { done: true, value: current };
-                    s.message(`Waiting for ${dbTarget.id}... [${Math.floor(elapsedMs / 1000)}s]`);
+                    s.message(truncateSpinnerText(`Waiting for ${dbTarget.id}... [${Math.floor(elapsedMs / 1000)}s]`));
                     return { done: false };
                 },
             });

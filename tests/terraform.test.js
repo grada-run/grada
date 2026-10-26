@@ -120,6 +120,32 @@ describe('runTerraformCommand', () => {
         expect(PROGRESS_MODES).toEqual(['lines', 'spinner']);
     });
 
+    it('cuts both spinner emits to the terminal budget on long lines', async () => {
+        const stdout = process.stdout;
+        const descriptor = Object.getOwnPropertyDescriptor(stdout, 'columns');
+        Object.defineProperty(stdout, 'columns', { value: 131, configurable: true });
+        try {
+            // Summary-matching AND latest-line branches both fire on one
+            // chunk (distinct lines, so dedup keeps both); both must fit
+            // `Provisioning - ` (15) + 107 + chrome.
+            const summaryLine = `Plan: ${'x'.repeat(124)}`;
+            const latestLine = `aws_sqs_queue.main: ${'y'.repeat(111)}`;
+            mockSpawn.mockReturnValue(makeChild({ stdout: `${summaryLine}\n${latestLine}\n` }));
+            const spin = { message: vi.fn(), clear: vi.fn() };
+
+            await expect(runTerraformCommand(['apply'], '/tmp', spin, 'Provisioning', { isTTY: true })).resolves.toBeUndefined();
+            expect(spin.message.mock.calls.length).toBeGreaterThan(0);
+            for (const [frame] of spin.message.mock.calls) {
+                const visible = String(frame).replace(/\x1B\[[0-9;]*m/g, '');
+                expect(visible.length).toBeLessThanOrEqual(122);
+                expect(visible.endsWith('...')).toBe(true);
+            }
+        } finally {
+            if (descriptor) Object.defineProperty(stdout, 'columns', descriptor);
+            else delete stdout.columns;
+        }
+    });
+
     describe('default terminal sniff', () => {
         function stubStdoutTTY(value) {
             const stdout = process.stdout;

@@ -155,9 +155,18 @@ export function upsertAutoTfvar(tfDir, key, value) {
     const created = content === '';
     const line = `${key} = ${value ? 'true' : 'false'}`;
     const pattern = new RegExp(`^[ \\t]*${key}\\s*=.*$`, 'm');
+    const matches = content.match(new RegExp(`^[ \\t]*${key}\\s*=.*$`, 'gm')) || [];
     let changed;
-    if (pattern.test(content)) {
+    if (matches.length === 1) {
         const next = content.replace(pattern, line);
+        changed = next !== content;
+        content = next;
+    } else if (matches.length > 1) {
+        // Pre-existing duplicates (the old single-echo guidance ran
+        // twice): first-match replace would keep the dup and report
+        // unchanged while Terraform fails hard. Collapse to one copy.
+        const stripped = content.replace(new RegExp(`^[ \\t]*${key}\\s*=.*$\\n?`, 'gm'), '');
+        const next = `${stripped === '' ? '' : stripped.replace(/\n*$/, '\n')}${line}\n`;
         changed = next !== content;
         content = next;
     } else {

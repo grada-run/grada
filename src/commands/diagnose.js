@@ -6,6 +6,7 @@ import { intro, outro, spinner } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall } from '../utils/command.js';
 import { normalizeOptions } from '../utils/args.js';
+import { truncateSpinnerText } from '../utils/spinner-text.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
 import { pickNewestRunningTask } from '../utils/ecs.js';
@@ -173,7 +174,7 @@ export async function runLambdaDiagnose(input = {}) {
     const lastUpdateStatus = configuration.LastUpdateStatus || 'UNKNOWN';
     const configUnhealthy = state !== 'Active' || lastUpdateStatus === 'Failed';
 
-    s.message(`Fetching last ${LOG_FETCH_LIMIT} log lines for "${functionName}"...`);
+    s.message(truncateSpinnerText(`Fetching last ${LOG_FETCH_LIMIT} log lines for "${functionName}"...`));
     let logs = [];
     let logGroupMissing = false;
     let logFetchFailed = false;
@@ -400,7 +401,7 @@ async function runDiagnoseMain(input = {}) {
             };
         }
 
-        s.message(`Fetching last ${LOG_FETCH_LIMIT} log lines for "${containerName}"...`);
+        s.message(truncateSpinnerText(`Fetching last ${LOG_FETCH_LIMIT} log lines for "${containerName}"...`));
 
         // CloudWatch stream names follow `ecs/<containerName>/<taskId>`.
         const taskId = extractTaskIdFromArn(failedTask.taskArn);
