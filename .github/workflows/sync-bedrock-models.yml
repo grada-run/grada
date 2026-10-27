@@ -16,6 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug OIDC claims
+        run: python3 -c "
+        import json, os, urllib.request, base64
+        url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=sts.amazonaws.com'
+        req = urllib.request.Request(url, headers={'Authorization': 'bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+        token = json.load(urllib.request.urlopen(req))['value']
+        payload = token.split('.')[1]
+        print(json.dumps(json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4))), indent=2))
+        "
+
       - name: Check for AWS role configuration
         id: guard
         run: |
