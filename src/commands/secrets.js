@@ -6,10 +6,11 @@ import { spinner, confirm, outro, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 import path from 'path';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { failCommand, refuseIfNonInteractive } from '../utils/command.js';
+import { failCommand, isProgrammaticCall, refuseIfNonInteractive } from '../utils/command.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { ADDON_ENV_VARS, ADDON_REGISTRY } from '../utils/addons.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 
@@ -137,6 +138,65 @@ function resolvePullAuditArgs(projectName, options) {
         resolvedProjectName: resolveSecretsProject(normalized.projectName),
         opts: normalized.options,
     };
+}
+
+// Names Grada itself injects into the runtime environment. A pushed vault
+// key sharing one of these names collides in the ECS task definition
+// (RegisterTaskDefinition 400: a secret name must be unique and not shared
+// with any environment variable) or is silently shadowed on Lambda, where
+// the same names arrive as plain environment variables.
+const BASE_MANAGED_ENV = {
+    ecs: ['PORT', 'NODE_ENV'],
+    lambda: ['PORT', 'AWS_LWA_PORT', 'APP_SECRETS_ARN'],
+};
+const DB_MANAGED_ENV = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_ENGINE', 'DB_USER', 'DB_PASSWORD'];
+
+// Wiring-like names whose local-dev values break production when pushed:
+// the migrate gate trusts a present DATABASE_URL verbatim, so a localhost
+// value pushed from a dev .env would be dialed from inside the ECS task.
+const WIRING_LIKE_NAMES = ['DATABASE_URL', 'DB_URL', 'REDIS_URL', 'VALKEY_URL', 'DB_HOST', 'REDIS_HOST'];
+const NON_PROD_VALUE_PATTERN = /localhost|127\.0\.0\.1|0\.0\.0\.0|example\.(com|org|net)/i;
+
+// Managed-name set for this tree: the target base set, plus DB names when
+// a database file exists, plus each enabled addon's injected names
+// (capability file present under terraform/). Sorted for stable output.
+export async function getManagedEnvNames(cwd = process.cwd(), target = 'ecs') {
+    const names = new Set(BASE_MANAGED_ENV[target] || BASE_MANAGED_ENV.ecs);
+    let tfFiles = [];
+    try {
+        tfFiles = await fs.readdir(path.join(cwd, 'terraform'));
+    } catch {
+        return [...names].sort();
+    }
+    if (tfFiles.some((file) => file.startsWith('database') && file.endsWith('.tf'))) {
+        for (const name of DB_MANAGED_ENV) names.add(name);
+    }
+    for (const [capability, entry] of Object.entries(ADDON_REGISTRY)) {
+        const envEntries = ADDON_ENV_VARS[capability];
+        if (!envEntries || !entry.file || !tfFiles.includes(entry.file)) continue;
+        for (const { name } of envEntries) names.add(name);
+    }
+    return [...names].sort();
+}
+
+// Values that look like local-dev placeholders on wiring-like names.
+// Returns [{ key, indicator }] — the matched indicator only, never the
+// value itself, so warnings stay safe to print and count in telemetry.
+export function findNonProdWiring(parsedSecrets = {}) {
+    const hits = [];
+    for (const [key, value] of Object.entries(parsedSecrets)) {
+        if (!WIRING_LIKE_NAMES.includes(key)) continue;
+        const match = NON_PROD_VALUE_PATTERN.exec(String(value ?? ''));
+        if (match) hits.push({ key, indicator: match[0] });
+    }
+    return hits;
+}
+
+// Names a few keys for confirm prompts without blowing the density
+// budget: first 8 inline, remainder as a count.
+function summarizeKeys(keys) {
+    if (keys.length <= 8) return keys.join(', ');
+    return `${keys.slice(0, 8).join(', ')} (+${keys.length - 8} more)`;
 }
 
 export function diffSecretsEnvs(localSecrets = {}, remoteSecrets = {}) {
@@ -301,6 +361,63 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
             return;
         }
 
+        // Pre-write guards (BUG-79): collisions brick ECS deploys with a
+        // RegisterTaskDefinition 400, and local-dev wiring values get
+        // trusted verbatim by the migrate gate — both must surface before
+        // any AWS or keys-file write. The spinner stops once for all
+        // pre-write output and restarts when the push proceeds.
+        const pushTarget = readTerraformComputeTarget(process.cwd());
+        const managedNames = await getManagedEnvNames(process.cwd(), pushTarget);
+        const collisions = Object.keys(parsedSecrets).filter((key) => managedNames.includes(key));
+        const wiringHits = findNonProdWiring(parsedSecrets);
+        const needsPreWriteOutput = collisions.length > 0 || wiringHits.length > 0;
+        if (needsPreWriteOutput) s.stop('Pre-flight checks done.');
+        for (const { key, indicator } of wiringHits) {
+            console.log(color.yellow(`⚠️  Warning: "${key}" looks like a local-dev value (contains "${indicator}") — pushed as-is, production wiring would dial it.`));
+        }
+        if (collisions.length > 0 && pushTarget === 'lambda') {
+            console.log(color.yellow(`⚠️  Warning: ${summarizeKeys(collisions)} ${collisions.length === 1 ? 'is' : 'are'} also injected by Grada as plain environment variables — the pushed vault value may be shadowed at runtime.`));
+        }
+        if (collisions.length > 0 && pushTarget !== 'lambda') {
+            console.log(color.yellow(`⚠️  Warning: ${summarizeKeys(collisions)} ${collisions.length === 1 ? 'collides' : 'collide'} with names Grada injects into the container — the next deploy would fail with an ECS task-definition error.`));
+            // Explicit --yes/--auto-approve acknowledges the collision and
+            // proceeds; every other non-interactive caller refuses loudly
+            // (a colliding push guarantees a broken deploy, so proceeding
+            // silently is never the safe default).
+            const explicitlyApproved = [opts.autoApprove, opts.yes].some((flag) => flag === true || flag === 'true');
+            if (!explicitlyApproved) {
+                if (opts.isHeadless || opts.headless || process.env.CI) {
+                    return failCommand({
+                        noExit: isProgrammaticCall(opts),
+                        message: `\n✖ secrets push refuses to push ${summarizeKeys(collisions)}: Grada-managed environment names cannot also be vault secrets on ECS targets.`,
+                        hint: '  Rename the key in your .env file, or re-run with --yes to acknowledge the collision and push anyway.\n',
+                        event: 'secrets_pushed',
+                        telemetry: { projectName: resolvedProjectName, managed_collisions: collisions.length },
+                        errorCode: 'SECRETS_MANAGED_KEY_COLLISION',
+                        reason: 'managed-key-collision',
+                        exitCode: 1,
+                    });
+                }
+                const refusedCollision = await refuseIfNonInteractive(opts, {
+                    message: `\n✖ secrets push needs approval before pushing ${summarizeKeys(collisions)}: Grada-managed environment names cannot also be vault secrets on ECS targets.`,
+                    hint: '  Re-run with --yes to acknowledge the collision non-interactively, or run interactively to decide.\n',
+                    event: 'secrets_pushed',
+                    telemetry: { projectName: resolvedProjectName, managed_collisions: collisions.length },
+                    errorCode: 'SECRETS_MANAGED_KEY_COLLISION',
+                });
+                if (refusedCollision) return refusedCollision;
+                const proceed = await confirm({
+                    message: `Push ${collisions.length === 1 ? 'this colliding key' : 'these colliding keys'} anyway? Deploys will fail until the collision is removed.`,
+                    initialValue: false,
+                });
+                if (isCancel(proceed) || proceed !== true) {
+                    console.log(color.dim('Secrets push cancelled. The vault and secret_keys.json are unchanged.'));
+                    return;
+                }
+            }
+        }
+        if (needsPreWriteOutput) s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
+
         // 2. Resolve the region (explicit flag > env > backend.tf > default)
         // so the AWS client is never constructed without one.
         const targetRegion = await resolveSecretsRegion(opts);
@@ -329,6 +446,37 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
             } else {
                 throw fetchError;
             }
+        }
+
+        // BUG-80: push is full-replace, so vault keys absent from .env are
+        // deleted by the update below. Name every victim before writing;
+        // interactive runs confirm first, headless proceeds loudly.
+        const removed = (existingKeys ?? []).filter((key) => !Object.hasOwn(parsedSecrets, key));
+        if (removed.length > 0) {
+            s.stop('Pre-flight checks done.');
+            console.log(color.yellow(`⚠️  ${removed.length} vault ${removed.length === 1 ? 'key' : 'keys'} not in ${resolvedFilePath} will be deleted:`));
+            for (const key of removed) console.log(color.red(`- ${key} (removed from the vault)`));
+            const headlessPush = opts.isHeadless || opts.headless || process.env.CI;
+            const removalApproved = [opts.autoApprove, opts.yes].some((flag) => flag === true || flag === 'true');
+            if (!headlessPush && !removalApproved) {
+                const refusedRemoval = await refuseIfNonInteractive(opts, {
+                    message: `\n✖ secrets push needs approval before deleting ${removed.length} vault ${removed.length === 1 ? 'key' : 'keys'} missing from ${resolvedFilePath}.`,
+                    hint: '  Re-run with --headless to delete non-interactively (removals are named above), or run interactively to decide.\n',
+                    event: 'secrets_pushed',
+                    telemetry: { projectName: resolvedProjectName, removed_count: removed.length },
+                    errorCode: 'SECRETS_NON_INTERACTIVE',
+                });
+                if (refusedRemoval) return refusedRemoval;
+                const proceed = await confirm({
+                    message: `Delete ${summarizeKeys(removed)} from the vault?`,
+                    initialValue: false,
+                });
+                if (isCancel(proceed) || proceed !== true) {
+                    console.log(color.dim('Secrets push cancelled. The vault and secret_keys.json are unchanged.'));
+                    return;
+                }
+            }
+            s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
         }
 
         // 5. Update the secret string in AWS
@@ -365,7 +513,9 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     projectName: resolvedProjectName,
                     secret_count: Object.keys(parsedSecrets).length,
                     keys_changed: false,
-                    ecs_restart: false
+                    ecs_restart: false,
+                    removed_count: removed.length,
+                    managed_collisions: collisions.length
                 });
                 return { keysChanged: false, restarted: false };
             }
@@ -378,7 +528,9 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     projectName: resolvedProjectName,
                     secret_count: Object.keys(parsedSecrets).length,
                     keys_changed: false,
-                    ecs_restart: false
+                    ecs_restart: false,
+                    removed_count: removed.length,
+                    managed_collisions: collisions.length
                 });
                 return { keysChanged: false, restarted: false };
             }
@@ -416,7 +568,9 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     projectName: resolvedProjectName,
                     secret_count: Object.keys(parsedSecrets).length,
                     keys_changed: false,
-                    ecs_restart: true
+                    ecs_restart: true,
+                    removed_count: removed.length,
+                    managed_collisions: collisions.length
                 });
                 console.log(color.blue(`\n📘 Learn how secrets reach your app: ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/secrets-management.md')}`));
                 return { keysChanged: false, restarted: true, cluster, service };
@@ -427,7 +581,9 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         await trackSuccess('secrets_pushed', {
             projectName: resolvedProjectName,
             secret_count: Object.keys(parsedSecrets).length,
-            keys_changed: keysChanged
+            keys_changed: keysChanged,
+            removed_count: removed.length,
+            managed_collisions: collisions.length
         });
         return { keysChanged };
 
@@ -660,15 +816,30 @@ async function auditSecretsMain(envFilePath, projectName, options = {}) {
             }
         }
 
+        // BUG-79: flag both limbs — keys colliding with Grada-managed
+        // environment names (fatal on ECS, shadowing on Lambda) and
+        // wiring-like values that look like local-dev placeholders.
+        const auditTarget = readTerraformComputeTarget(process.cwd());
+        const auditManaged = await getManagedEnvNames(process.cwd(), auditTarget);
+        const auditedKeys = [...new Set([...Object.keys(localSecrets), ...Object.keys(remoteSecrets)])];
+        const collisions = auditedKeys.filter((key) => auditManaged.includes(key));
+        for (const key of collisions) {
+            console.log(color.red(`! ${key} (collides with a Grada-managed environment name)`));
+        }
+        for (const { key, indicator } of findNonProdWiring(remoteSecrets)) {
+            console.log(color.yellow(`⚠️  ${key} looks like a local-dev value (contains "${indicator}") — production wiring would dial it.`));
+        }
+
         outro(`Audit complete. ${driftCount} drifted variable(s) found.`);
 
         trackEvent('secrets_audit', {
             projectName: resolvedProjectName,
             driftCount,
+            collision_count: collisions.length,
         });
         await flushTelemetry();
 
-        return { missingLocally, mismatched, untrackedLocally, driftCount };
+        return { missingLocally, mismatched, untrackedLocally, driftCount, collisions };
     } catch (error) {
         return handleSecretsCatch({
             error,

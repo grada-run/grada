@@ -19,6 +19,7 @@
 - **CI parity:** GitHub Actions sets `CI=true` and Vitest workers run with `FORCE_COLOR=1` (via `vitest.config.js`), which activates ANSI escape sequences in `picocolors` even when `process.stdout.isTTY` is false. Any test asserting on strings styled with `picocolors` must either strip ANSI codes using `stripVTControlCharacters` from `node:util` or avoid matching across styled/unstyled boundaries.
 - Run `npm test` continuously to verify your work.
 - Do not conclude your task until the test suite passes completely.
+- **Tests first:** For bug fixes and behavior changes, write the focused failing test first, watch it fail, then implement the smallest fix and watch it pass. Trivial changes (typos, text, version pins) are exempt — a direct check is enough there.
 
 ## 4. Documentation & Communication
 - **Audience First:** Write all READMEs, documentation, and release notes for the **end-user**, not the backend engineer. 

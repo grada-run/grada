@@ -5,6 +5,9 @@ description: How grada prevents regressions — unit tests, snapshot harness, AP
 
 To ensure zero regressions in infrastructure generation and safe local execution, `grada` relies on a multi-layered testing strategy split between fast local snapshots and rigid CI/CD validation.
 
+## 0. Tests-first workflow
+Every bug fix or behavior change starts with a focused failing test: write it, watch it fail, then implement the smallest fix and watch it pass. A test that never failed proves nothing — red-first is what makes the suite a regression net rather than a green decoration. Trivial changes (typos, text, version pins) are exempt.
+
 ## 1. Unit & argument testing
 We use pure Node.js unit tests (via Vitest) to validate the CLI argument parser (`src/core/parser.js`). This ensures that flags (like `--headless` or `--no-telemetry`) are routed correctly and never hijack positional arguments like file paths.
 

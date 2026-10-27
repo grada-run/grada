@@ -30,6 +30,12 @@ Region resolution is shared across all three commands (see Prerequisites), so th
 
 **Missing env file:** if the file does not exist, `push` does not throw. Interactively it asks `Would you like to create an empty <file> file now to get started?` — confirming creates the file (with parent directories) so you can fill it in and re-run; declining leaves everything untouched. Non-interactive runs print a pointer to generate the file first and exit 1 (`SECRETS_NON_INTERACTIVE`).
 
+**Push guards (checked before anything is written):**
+
+- **Managed-name collisions** — keys sharing a name with variables Grada injects itself (`PORT`, `NODE_ENV`, database wiring, and per-addon URLs like `REDIS_URL`) would fail the next deploy with an ECS task-definition error. On ECS targets `push` asks for explicit confirmation (declining leaves the vault and `secret_keys.json` untouched); non-interactive runs refuse with `SECRETS_MANAGED_KEY_COLLISION` unless `--yes` acknowledges it. On Lambda targets the same names only warn, since vault reads cannot break the deploy.
+- **Vault deletions** — push replaces the whole vault, so keys present in AWS but missing from your `.env` are named (`- KEY (removed from the vault)`) and confirmed before anything is deleted; declining leaves both sides untouched. `--headless`/CI proceeds after naming them.
+- **Local-dev wiring** — `DATABASE_URL`-style values containing `localhost` and similar placeholders warn loudly, since production would dial them verbatim.
+
 ## secrets pull
 
 Fetches the remote JSON payload from the `<project-name>-secrets` vault and merges it into your local env file — useful for onboarding a new machine or recovering after losing `.env`.
@@ -58,6 +64,8 @@ npx grada-run secrets audit
 - `+ KEY (Missing locally)` in green — exists in AWS but not in your `.env`.
 - `~ KEY (Mismatched value)` in yellow — exists in both with different values.
 - `- KEY (Not tracked in AWS)` in dim — exists locally but was never pushed.
+- `! KEY (collides with a Grada-managed environment name)` in red — would fail the next ECS deploy; rename it or remove it from the vault.
+- Local-dev wiring values (`DATABASE_URL` containing `localhost`, etc.) warn in yellow.
 
 Ends with `Audit complete. N drifted variable(s) found.`
 
@@ -73,7 +81,7 @@ This file contains **key names only** (e.g. `["API_KEY"]`), never values — it 
 
 ## Automation & edge cases
 
-- Non-interactive runs fail with `SECRETS_NON_INTERACTIVE` instead of prompting: `push` restart approval (pass `--headless` to defer to the next deploy). Full catalog: [Headless Mode](/grada/guides/headless/).
+- Non-interactive runs fail with `SECRETS_NON_INTERACTIVE` instead of prompting: `push` restart approval (pass `--headless` to defer to the next deploy), `push` vault-deletion approval (pass `--headless` to delete after the loud listing, or `--yes`). `push` fails with `SECRETS_MANAGED_KEY_COLLISION` when a key collides with a Grada-managed name (rename it, or pass `--yes` to push anyway). Full catalog: [Headless Mode](/grada/guides/headless/).
 
 ## See also
 
