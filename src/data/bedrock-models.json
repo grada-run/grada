@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-10-12",
+  "updatedAt": "2026-10-27",
   "defaultModelId": "us.anthropic.claude-sonnet-4-6",
   "providers": [
     {
@@ -95,15 +95,6 @@
           ]
         },
         {
-          "id": "us.anthropic.claude-sonnet-4-20250514-v1:0",
-          "name": "Claude Sonnet 4",
-          "hint": "Balanced coding & reasoning (standard temperature/top_p compatible)",
-          "scopes": [
-            "us",
-            "global"
-          ]
-        },
-        {
           "id": "us.anthropic.claude-opus-4-8",
           "name": "Anthropic Claude Opus 4.8",
           "hint": "Opus 4-series deep reasoning & engineering (standard temperature/top_p compatible)",
@@ -154,6 +145,14 @@
           "hint": "Haiku-tier low-latency, high-throughput workloads",
           "scopes": [
             "us",
+            "global"
+          ]
+        },
+        {
+          "id": "global.anthropic.claude-sonnet-4-20250514-v1:0",
+          "name": "Claude Sonnet 4",
+          "hint": "Balanced coding & reasoning (standard temperature/top_p compatible)",
+          "scopes": [
             "global"
           ]
         }
@@ -269,6 +268,15 @@
         {
           "id": "us.openai.gpt-6.1-sol",
           "name": "OpenAI GPT-6.1 Sol",
+          "hint": "Flagship multi-step reasoning & agentic workflows (Converse API)",
+          "scopes": [
+            "us",
+            "global"
+          ]
+        },
+        {
+          "id": "us.openai.gpt-6.1-terra",
+          "name": "OpenAI GPT-6.1 Terra",
           "hint": "Flagship multi-step reasoning & agentic workflows (Converse API)",
           "scopes": [
             "us",
