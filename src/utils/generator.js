@@ -305,6 +305,12 @@ export async function generateTemplates(targetDir, config) {
     // 3. Configure Compute Commands & Environment Variables
     let secretsArray = [];
 
+    // Exact container env + static-secret names for the managed_env_names
+    // collision-guard list (union over rendered task definitions). Each
+    // section below appends what IT renders, so the list tracks the
+    // environment by construction instead of parallel knowledge.
+    const managedEnvNames = ['PORT'];
+
     // 3.1. Format the ECS Task Command (Heroku Procfile Support)
     // If a Procfile exists and has a 'web' process, override the Docker CMD
     if (config.PROCFILE && config.PROCFILE.web) {
@@ -338,6 +344,10 @@ export async function generateTemplates(targetDir, config) {
     } else {
         config.WORKER_COMMAND = '';
     }
+    // Worker-only static env joins the union only when worker.tf renders —
+    // otherwise a pushed NODE_ENV would trip the app precondition though
+    // nothing would collide.
+    if (config.WORKER_COMMAND !== '') managedEnvNames.push('NODE_ENV');
 
     // 3.2. Inject Managed Database Variables. Static targets have no
     // compute to connect, so a database is never generated for them (init
@@ -374,6 +384,9 @@ export async function generateTemplates(targetDir, config) {
 
             secretsArray.push(`{ "name" : "DB_USER", "valueFrom" : "\${${dbRef}.master_user_secret[0].secret_arn}:username::" }`);
             secretsArray.push(`{ "name" : "DB_PASSWORD", "valueFrom" : "\${${dbRef}.master_user_secret[0].secret_arn}:password::" }`);
+            managedEnvNames.push('DB_HOST', 'DB_PORT', 'DB_NAME');
+            if (dbEngine !== 'postgres') managedEnvNames.push('DB_ENGINE');
+            managedEnvNames.push('DB_USER', 'DB_PASSWORD');
         }
 
         // VPC-attached functions reach RDS/ElastiCache over the VPC subnets;
@@ -412,6 +425,7 @@ export async function generateTemplates(targetDir, config) {
                     composeWebEnvVars.push(`      ${key} = "${String(val).replace(/"/g, '\\"')}"`);
                 } else {
                     composeWebEnvVars.push(`{ "name" : "${key}", "value" : "${String(val).replace(/"/g, '\\"')}" }`);
+                    managedEnvNames.push(key);
                 }
             }
 
@@ -481,6 +495,8 @@ export async function generateTemplates(targetDir, config) {
     if (config.finalFramework === 'rails') {
         secretsArray.push(`{ "name" : "RAILS_MASTER_KEY", "valueFrom" : "\${local.secret_arn}:RAILS_MASTER_KEY::" }`);
 
+        if (!isLambda) managedEnvNames.push('RAILS_MASTER_KEY');
+
         let initialMasterKey = "1234567890abcdef1234567890abcdef"; // Dummy fallback for CI/CD
         const masterKeyPath = path.join(targetDir, 'config', 'master.key');
 
@@ -501,6 +517,9 @@ export async function generateTemplates(targetDir, config) {
         console.log(color.yellow('⚠️  RAILS_MASTER_KEY is not auto-injected on Lambda targets: set it as a function environment variable after provisioning.'));
     }
     config.TASK_SECRETS = isLambda ? '' : secretsArray.join(',\n          ');
+    // Collision-guard list for the task-definition precondition. Unused on
+    // Lambda/static targets (their templates carry no task definitions).
+    config.MANAGED_ENV_NAMES = `[${[...new Set(managedEnvNames)].map((name) => JSON.stringify(name)).join(', ')}]`;
     config.INITIAL_SECRET_MAP = initialSecretMap;
 
     config.SAFE_ALB_NAME = config.PROJECT_NAME.length > 27

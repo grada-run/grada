@@ -42,6 +42,7 @@ function baseConfig(overrides = {}) {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
+        GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
         BUILD_DIR: '',
         finalFramework: 'nextjs',
         NEEDS_DATABASE: true,

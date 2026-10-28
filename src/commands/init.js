@@ -82,13 +82,47 @@ export async function mainStack(input = {}) {
     }
 }
 
+// Scoped classic claim shape: `repo:<owner>/<name>[:<suffix>]`. Owner and
+// name exclude `@` (GitHub names cannot contain it), so immutable-format
+// entries never match and pass through untouched.
+const SCOPED_SUB_RE = /^repo:([^/@]+)\/([^/@:]+)(?::(.*))?$/;
+
+// Builds the immutable-claim companion for a classic entry, or null when
+// the entry is not classic-shaped (open trust, immutable entries, and
+// anything exotic stay single).
+export function immutableCompanion(classicSub) {
+    if (typeof classicSub !== 'string') return null;
+    const match = SCOPED_SUB_RE.exec(classicSub);
+    if (!match) return null;
+    const [, owner, name, rest] = match;
+    const suffix = rest === undefined ? '*' : rest;
+    return `repo:${owner}@*/${name}@*:${suffix}`;
+}
+
+// Renders the OIDC sub claim as an HCL value fragment: scoped trusts gain
+// the immutable-claim companion (repos created after 2026-07-15 emit
+// `repo:<owner>@<id>/<name>@<id>:...`, which classic patterns reject),
+// while the open trust (matching every format) and non-classic literals
+// render verbatim.
+export function renderOidcSubClaim(sub) {
+    const companion = immutableCompanion(sub);
+    if (companion === null) return `"${sub}"`;
+    return `["${sub}", "${companion}"]`;
+}
+
 // Classifies an existing tree's OIDC claim for re-init: a bare string (or
-// single-entry list, IAM-identical) renders verbatim; anything richer is
-// described for warnings and guarded against silent widening.
+// single-entry list, IAM-identical) renders verbatim; our own canonical
+// dual-format pair resolves back to its classic entry so re-init stays
+// stable; anything richer is described for warnings and guarded against
+// silent widening.
 function classifyTreeTrust(claim) {
     if (!claim) return { trust: null, complex: null };
     if (claim.kind === 'string') return { trust: claim.value, complex: null };
     if (claim.kind === 'list' && claim.entries.length === 1) {
+        return { trust: claim.entries[0], complex: null };
+    }
+    if (claim.kind === 'list' && claim.entries.length === 2
+        && immutableCompanion(claim.entries[0]) === claim.entries[1]) {
         return { trust: claim.entries[0], complex: null };
     }
     if (claim.kind === 'list') {
@@ -780,7 +814,7 @@ async function mainStackMain(input = {}) {
         HEALTH_CHECK_PATH: config.healthCheckPath,
         DESIRED_COUNT: config.desiredCount,
         DEPLOY_BRANCH: config.branch,
-        GITHUB_REPO_SUB: oidcTrustSub,
+        GITHUB_REPO_SUB: renderOidcSubClaim(oidcTrustSub),
         BUILD_DIR: buildDir,
         finalFramework: config.framework,
         NEEDS_DATABASE: config.needsDatabase,

@@ -519,6 +519,99 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(content).toContain('applyStack');
     expect(content).toContain("'apply'");
   });
+  it('preflight fails fast naming keys colliding with rendered env names', async () => {
+    writeProject({
+      'terraform/main.tf': [
+        'resource "aws_ecs_cluster" "main" {}',
+        'environment = [',
+        '  { "name" : "PORT", "value" : "3000" },',
+        '  { name = "REDIS_URL", value = "redis://x" },',
+        ']',
+        '',
+      ].join('\n'),
+      'terraform/secret_keys.json': JSON.stringify(['API_KEY', 'REDIS_URL']),
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+    try {
+      await expect(applyStack({})).rejects.toMatchObject({ exitCode: 1 });
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_applied',
+        expect.objectContaining({ success: false, error_code: 'SECRETS_ENV_COLLISION', collision_count: 1 })
+      );
+      const text = stripVTControlCharacters(logSpy.mock.calls.map((call) => String(call[0])).join('\n'));
+      expect(text).toContain('REDIS_URL');
+      expect(text).toContain('re-push');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('preflight covers compose-injected env names from the rendered file', async () => {
+    writeProject({
+      'terraform/main.tf': [
+        'resource "aws_ecs_cluster" "main" {}',
+        'environment = [',
+        '  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },',
+        ']',
+        '',
+      ].join('\n'),
+      'terraform/secret_keys.json': JSON.stringify(['CUSTOM_COMPOSE_VAR']),
+    });
+    exitSpy.mockImplementation(() => { });
+
+    const result = await applyStack({});
+    expect(result).toMatchObject({ ok: false });
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'SECRETS_ENV_COLLISION' })
+    );
+  });
+
+  it('preflight rejects malformed keys files before terraform runs', async () => {
+    writeProject({
+      'terraform/main.tf': 'resource "aws_ecs_cluster" "main" {}\n',
+      'terraform/secret_keys.json': JSON.stringify(['OK_KEY', 42]),
+    });
+    exitSpy.mockImplementation(() => { });
+
+    const result = await applyStack({});
+    expect(result).toMatchObject({ ok: false });
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'SECRETS_ENV_COLLISION' })
+    );
+  });
+
+  it('preflight passes clean trees and skips lambda targets', async () => {
+    writeProject({
+      'terraform/main.tf': [
+        'resource "aws_ecs_cluster" "main" {}',
+        'environment = [',
+        '  { "name" : "PORT", "value" : "3000" },',
+        ']',
+        '',
+      ].join('\n'),
+      'terraform/secret_keys.json': JSON.stringify(['API_KEY']),
+    });
+    const dryClean = await applyStack({ isDryRun: true });
+    expect(dryClean).toEqual({ ok: true, dryRun: true });
+
+    writeProject({
+      'terraform/main.tf': [
+        'resource "aws_lambda_function" "app" {}',
+        'environment { variables = { PORT = "3000" } }',
+        '',
+      ].join('\n'),
+      'terraform/secret_keys.json': JSON.stringify(['PORT']),
+    });
+    const dryLambda = await applyStack({ isDryRun: true });
+    expect(dryLambda).toEqual({ ok: true, dryRun: true });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
 });
 
 describe('apply: fuzzer hardening', () => {

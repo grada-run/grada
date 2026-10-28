@@ -12,7 +12,7 @@ import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterrup
 import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
 import { readInitManifest, recordAppliedTarget } from '../utils/backup.js';
 import { requireManagedTree, parseStateBucketBackend, upsertAutoTfvar } from '../utils/terraform-metadata.js';
-import { readTerraformComputeTarget, resolveRegion } from '../utils/resolvers.js';
+import { readTerraformComputeTarget, resolveRegion, readRenderedContainerEnvNames } from '../utils/resolvers.js';
 import { requireAwakeEnvironment, resolveSleepTarget, guardSleepingEnv } from '../utils/sleep-state.js';
 import { promptStateBucketRecovery, recreateStateBucket } from '../utils/recovery.js';
 import { resolveProjectName, readResourceSuffix } from '../utils/resolvers.js';
@@ -339,6 +339,34 @@ async function enforceTargetSwitchGate({ options, targetDir, tfDir, runTerraform
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
 // invocation path, including direct imports that bypass bin/cli.js and MCP.
+// Intersects secret_keys.json with the RENDERED container env names so
+// stale, confirmed-through, or hand-edited keys files fail here instead
+// of late on the raw ECS 400. Returns null when clean or inapplicable
+// (non-ECS target, unreadable inputs — those surface through their own
+// errors), else { kind, keys, detail? } for the failCommand call site.
+function preflightSecretEnvCollisions({ targetDir }) {
+    if (readTerraformComputeTarget(targetDir) !== 'ecs') return null;
+    let keysRaw;
+    try {
+        keysRaw = fs.readFileSync(path.join(targetDir, 'terraform', 'secret_keys.json'), 'utf-8');
+    } catch {
+        return null;
+    }
+    let keys;
+    try {
+        keys = JSON.parse(keysRaw);
+    } catch {
+        return { kind: 'malformed', keys: [], detail: 'is not valid JSON.' };
+    }
+    if (!Array.isArray(keys) || keys.some((key) => typeof key !== 'string' || key === '')) {
+        return { kind: 'malformed', keys: [], detail: 'must be a JSON array of non-empty key names.' };
+    }
+    const rendered = readRenderedContainerEnvNames(targetDir);
+    const collisions = [...new Set(keys.filter((key) => rendered.includes(key)))];
+    if (collisions.length === 0) return null;
+    return { kind: 'collision', keys: collisions };
+}
+
 export async function applyStack(input = {}) {
     setActiveCommandName('apply');
     try {
@@ -424,6 +452,34 @@ async function applyStackMain(input = {}) {
             wakeImpl: options.wakeImpl || runWake,
         });
         if (!sleepGuard.proceed) return sleepGuard.result;
+    }
+
+    // 1d. Preflight secret/env collisions (BUG-81): stale,
+    // confirmed-through, or hand-edited keys files would die late on
+    // the raw ECS 400 — fail here naming the key and the fix. ECS-only
+    // (Lambda maps no secrets into env), unconditional (a collision is
+    // deterministic breakage no flag can fix), and fail-open on
+    // unreadable inputs. Runs on dry runs too: previews should
+    // surface deterministic breakage, not hide it.
+    const secretPreflight = preflightSecretEnvCollisions({ targetDir });
+    if (secretPreflight !== null) {
+        const shown = secretPreflight.keys.length <= 8
+            ? secretPreflight.keys.join(', ')
+            : `${secretPreflight.keys.slice(0, 8).join(', ')} (+${secretPreflight.keys.length - 8} more)`;
+        const isCollision = secretPreflight.kind === 'collision';
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: isCollision
+                ? `\n✖ ${secretPreflight.keys.length} secret ${secretPreflight.keys.length === 1 ? 'key' : 'keys'} in terraform/secret_keys.json ${secretPreflight.keys.length === 1 ? 'collides' : 'collide'} with container environment names: ${shown}.\n`
+                : `\n✖ terraform/secret_keys.json ${secretPreflight.detail}\n`,
+            hint: isCollision
+                ? '  ECS rejects task definitions where a secret shares a name with an environment variable. Remove the key(s) from .env and re-push (colliding keys are skipped automatically), then re-run apply.\n'
+                : '  Re-push your secrets to regenerate it: npx grada-run secrets push .env\n',
+            event: 'infrastructure_applied',
+            telemetry: { projectName: path.basename(targetDir), collision_count: secretPreflight.keys.length },
+            errorCode: 'SECRETS_ENV_COLLISION',
+            reason: isCollision ? 'secrets-env-collision' : 'malformed-keys-file',
+        });
     }
 
     // 2. Read the actual AWS configuration from disk (CPU, Memory, Region, Database)

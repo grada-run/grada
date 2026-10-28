@@ -85,7 +85,7 @@ describe('Infrastructure Generator', () => {
                 HEALTH_CHECK_PATH: '/health',
                 DESIRED_COUNT: '1',
                 DEPLOY_BRANCH: 'main',
-                GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+                GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
                 BUILD_DIR: tc.buildDir,
                 finalFramework: tc.framework,
                 NEEDS_DATABASE: tc.needsDb,
@@ -202,7 +202,7 @@ describe('worker.tf without a database', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -266,7 +266,7 @@ describe('database env vars render as bare HCL references', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: true,
@@ -326,7 +326,7 @@ describe('multi-engine database generation', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: true,
@@ -406,7 +406,7 @@ describe('Generator gitignore handling of secret_keys.json', () => {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
-        GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+        GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
         BUILD_DIR: '',
         finalFramework: 'node',
         NEEDS_DATABASE: false,
@@ -476,7 +476,7 @@ describe('Generator doc ownership & secret_keys preservation', () => {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
-        GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+        GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
         BUILD_DIR: '',
         finalFramework: 'node',
         NEEDS_DATABASE: false,
@@ -640,7 +640,7 @@ describe('Infrastructure Generator: --target lambda', () => {
             HEALTH_CHECK_PATH: '/',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -814,7 +814,7 @@ describe('Infrastructure Generator: --target static', () => {
             HEALTH_CHECK_PATH: '/',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: 'dist',
             finalFramework: 'static',
             NEEDS_DATABASE: false,
@@ -871,7 +871,7 @@ describe('Infrastructure Generator: --target static', () => {
         await generateTemplates(staticTargetDir, staticConfig());
 
         const oidcTf = await readTf('oidc.tf');
-        expect(oidcTf).toContain('"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"');
+        expect(oidcTf).toContain('"token.actions.githubusercontent.com:sub" : ["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
         expect(oidcTf).not.toContain('{{GITHUB_REPO_SUB}}');
     });
 
@@ -989,7 +989,7 @@ describe('R18: sleep auto-vars guards (plan-identity fixtures)', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '2',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -1088,7 +1088,7 @@ describe('M2: GradaProject default tag in all provider blocks', () => {
                 HEALTH_CHECK_PATH: '/health',
                 DESIRED_COUNT: '1',
                 DEPLOY_BRANCH: 'main',
-                GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+                GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
                 BUILD_DIR: '',
                 finalFramework: 'node',
                 NEEDS_DATABASE: false,
@@ -1134,7 +1134,7 @@ describe('Compose merge safety', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: 'repo:acme/widgets:*',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
             BUILD_DIR: '',
             finalFramework: 'nextjs',
             NEEDS_DATABASE: false,
@@ -1271,5 +1271,107 @@ describe('Compose merge safety', () => {
         const sidecarBlock = mainTf.slice(mainTf.indexOf('name      = "cache"'));
         expect(sidecarBlock).toContain('essential = false');
         expect(mainTf).toContain('essential = true');
+    });
+});
+
+describe('Managed env names list (BUG-81 CI cover)', () => {
+    const dir = path.join(process.cwd(), 'tests', '.tmp-managed-env-names');
+
+    function ecsConfig(overrides = {}) {
+        return {
+            PROJECT_NAME: 'managedy',
+            REGION: 'us-east-2',
+            PORT: '3000',
+            CPU: '256',
+            MEMORY: '512',
+            COMPUTE_TIER: 'Micro',
+            ESTIMATED_COST: '30.00',
+            STATE_BUCKET: 'managedy-bucket-123',
+            AWS_ACCOUNT_ID: '123456789012',
+            HEALTH_CHECK_PATH: '/health',
+            DESIRED_COUNT: '1',
+            DEPLOY_BRANCH: 'main',
+            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            BUILD_DIR: '',
+            finalFramework: 'node',
+            NEEDS_DATABASE: false,
+            DISABLE_DEFAULT_CI: false,
+            PROCFILE: null,
+            VERCEL_RULES: null,
+            VERCEL_EDGE_ROUTING: '',
+            DOCKER_COMPOSE: null,
+            ENABLE_PR_PREVIEWS: false,
+            TASK_COMMAND: '',
+            WORKER_COMMAND: '',
+            DB_ENV_VARS: '',
+            COMPOSE_WEB_ENV_VARS: '',
+            EXTRA_CONTAINERS: '',
+            TASK_SECRETS: '',
+            INITIAL_SECRET_MAP: '{\n  }',
+            SAFE_ALB_NAME: 'managedy-alb',
+            ...overrides,
+        };
+    }
+
+    beforeEach(async () => {
+        await fs.rm(dir, { recursive: true, force: true });
+        await fs.mkdir(path.join(dir, '.github', 'workflows'), { recursive: true });
+    });
+
+    afterEach(async () => {
+        await fs.rm(dir, { recursive: true, force: true });
+        vi.restoreAllMocks();
+    });
+
+    function managedLine(mainTf) {
+        return mainTf.split('\n').find((line) => line.includes('managed_env_names')) ?? '';
+    }
+
+    it('renders the managed list with base, DB, and static-secret names', async () => {
+        await generateTemplates(dir, ecsConfig({ NEEDS_DATABASE: true, DB_ENGINE: 'postgres' }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(mainTf).toContain('managed_env_names = ["PORT", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]');
+    });
+
+    it('includes DB_ENGINE only for non-postgres engines', async () => {
+        await generateTemplates(dir, ecsConfig({ NEEDS_DATABASE: true, DB_ENGINE: 'mysql' }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(managedLine(mainTf)).toContain('"DB_ENGINE"');
+    });
+
+    it('includes compose web env keys', async () => {
+        await generateTemplates(dir, ecsConfig({
+            DOCKER_COMPOSE: [
+                { name: 'web', image: 'myapp:latest', port: 3000, build: { context: '.' }, environment: { CUSTOM_COMPOSE_VAR: 'x' } },
+            ],
+        }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(managedLine(mainTf)).toContain('"CUSTOM_COMPOSE_VAR"');
+    });
+
+    it('includes NODE_ENV only when a worker is rendered', async () => {
+        await generateTemplates(dir, ecsConfig({ PROCFILE: { web: ['node', 'server.js'] } }));
+        const noWorker = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(managedLine(noWorker)).not.toContain('"NODE_ENV"');
+
+        await fs.rm(dir, { recursive: true, force: true });
+        await fs.mkdir(path.join(dir, '.github', 'workflows'), { recursive: true });
+        await generateTemplates(dir, ecsConfig({ PROCFILE: { web: ['node', 'server.js'], worker: ['node', 'worker.js'] } }));
+        const withWorker = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(managedLine(withWorker)).toContain('"NODE_ENV"');
+    });
+
+    it('renders the secrets-collision precondition on the app task definition', async () => {
+        await generateTemplates(dir, ecsConfig({ NEEDS_DATABASE: true, DB_ENGINE: 'postgres' }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        const appBlock = mainTf.slice(mainTf.indexOf('resource "aws_ecs_task_definition" "app"'));
+        expect(appBlock).toContain('precondition');
+        expect(appBlock).toContain('setintersection(toset(local.secret_keys), toset(local.managed_env_names))');
+    });
+
+    it('includes the Rails static secret name for rails trees', async () => {
+        await generateTemplates(dir, ecsConfig({ finalFramework: 'rails' }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(managedLine(mainTf)).toContain('"RAILS_MASTER_KEY"');
     });
 });

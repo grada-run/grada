@@ -11,7 +11,7 @@ import { parseCliArgs } from '../src/core/parser.js';
 import { getProjectConfig, getTargetDirectory, sanitizeProjectName } from '../src/utils/prompts.js';
 import { trackEvent } from '../src/core/telemetry.js';
 import { provisionStateBucket } from '../src/utils/aws.js';
-import { mainStack, resolveOidcTrust } from '../src/commands/init.js';
+import { mainStack, resolveOidcTrust, renderOidcSubClaim, immutableCompanion } from '../src/commands/init.js';
 
 // Deep-mock the interactive prompt library. The CLI only uses
 // `@clack/prompts` for interactive mode (verified: no `inquirer` or
@@ -1196,7 +1196,7 @@ describe('Headless: OIDC trust scoping', () => {
 
     async function renderedTrust() {
         const oidc = await fs.readFile(path.join(tmpDir, 'terraform', 'oidc.tf'), 'utf-8');
-        return oidc.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*"([^"]+)"/)[1];
+        return oidc.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*(\[[^\]]*\]|"[^"]*")/)[1];
     }
 
     function trustTelemetry() {
@@ -1220,7 +1220,7 @@ describe('Headless: OIDC trust scoping', () => {
 
         expect(exitCalls).toEqual([]);
         expectNoInteractivePrompts();
-        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
         const calls = trustTelemetry();
         expect(calls).toHaveLength(1);
         expect(calls[0][1]).toMatchObject({ mode: 'scoped', source: 'flag' });
@@ -1231,7 +1231,7 @@ describe('Headless: OIDC trust scoping', () => {
         const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node']);
 
         expect(exitCalls).toEqual([]);
-        expect(await renderedTrust()).toBe('repo:*');
+        expect(await renderedTrust()).toBe('"repo:*"');
         expect(logText).toContain('repo:*');
         expect(logText).toContain('--github-repo');
         const calls = trustTelemetry();
@@ -1244,7 +1244,7 @@ describe('Headless: OIDC trust scoping', () => {
         const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node']);
 
         expect(exitCalls).toEqual([]);
-        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
         expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'remote' });
     });
 
@@ -1253,7 +1253,7 @@ describe('Headless: OIDC trust scoping', () => {
         execSync('git init -q && git remote add origin git@github.com:acme/other.git', { cwd: tmpDir, stdio: 'pipe' });
         await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
 
-        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
         expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'flag' });
     });
 
@@ -1263,7 +1263,7 @@ describe('Headless: OIDC trust scoping', () => {
         const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node']);
 
         expect(exitCalls).toEqual([]);
-        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
         expect(logText).not.toContain('repo:*');
         expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
     });
@@ -1273,7 +1273,7 @@ describe('Headless: OIDC trust scoping', () => {
         vi.clearAllMocks();
         const { logText } = await runHeadlessInit(['--headless', '--framework=node']);
 
-        expect(await renderedTrust()).toBe('repo:*');
+        expect(await renderedTrust()).toBe('"repo:*"');
         expect(logText).toContain('repo:*');
     });
 
@@ -1314,7 +1314,7 @@ describe('Headless: OIDC trust scoping', () => {
         const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node', '--force', '--github-repo=acme/c']);
 
         expect(exitCalls).toEqual([]);
-        expect(await renderedTrust()).toBe('repo:acme/c:*');
+        expect(await renderedTrust()).toBe('["repo:acme/c:*", "repo:acme@*/c@*:*"]');
         expect(logText).toContain('repo:acme/a:*');
         expect(logText).toContain('repo:acme/b:*');
     });
@@ -1326,7 +1326,7 @@ describe('Headless: OIDC trust scoping', () => {
         const { exitCalls, logText } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
 
         expect(exitCalls).toEqual([]);
-        expect(await renderedTrust()).toBe('repo:acme/widgets:*');
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
         expect(logText).not.toContain('repo:*');
         expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
     });
@@ -1339,6 +1339,36 @@ describe('Headless: OIDC trust scoping', () => {
 
         expect(result).toMatchObject({ ok: false, reason: 'oidc-trust-widening-refused' });
         expect(exitCalls).toEqual([1]);
+    });
+
+    it('renders dual-format trust covering classic and immutable claims', async () => {
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
+    });
+
+    it('re-init upgrades a classic single-string trust to the pair', async () => {
+        await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
+        // Simulate a pre-fix tree carrying the classic-only claim.
+        await handEditTrust('"repo:acme/widgets:*"');
+        vi.clearAllMocks();
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
+        expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
+    });
+
+    it('re-init preserves a canonical pair without refusal', async () => {
+        await runHeadlessInit(['--headless', '--framework=node', '--github-repo=acme/widgets']);
+        await handEditTrust('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
+        vi.clearAllMocks();
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect(exitCalls).toEqual([]);
+        expect(await renderedTrust()).toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
+        expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
     });
 });
 
@@ -1501,5 +1531,40 @@ describe('resolveOidcTrust', () => {
             confirmWiden: async () => false,
         });
         expect(result).toEqual({ cancelled: true });
+    });
+
+    it('recognizes a canonical dual-format pair as managed tree trust', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:acme@*/a@*:*'] },
+            readRemote: () => null,
+        });
+        expect(result).toEqual({ sub: 'repo:acme/a:*', source: 'tree' });
+        expect(logged).toEqual([]);
+    });
+
+    it('still protects non-canonical pairs from silent widening', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:other/b:*'] },
+            readRemote: () => null,
+        });
+        expect(result.refusal).toMatchObject({ reason: 'oidc-trust-widening-refused' });
+    });
+
+    it('renderOidcSubClaim pairs scoped trusts and passes through the rest', () => {
+        expect(renderOidcSubClaim('repo:acme/widgets:*'))
+            .toBe('["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
+        expect(renderOidcSubClaim('repo:acme/widgets:ref:refs/heads/main'))
+            .toBe('["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]');
+        expect(renderOidcSubClaim('repo:*')).toBe('"repo:*"');
+        expect(renderOidcSubClaim('repo:acme@*/widgets@*:*')).toBe('"repo:acme@*/widgets@*:*"');
+    });
+
+    it('immutableCompanion derives the wildcard-ID arm or null', () => {
+        expect(immutableCompanion('repo:acme/widgets:*')).toBe('repo:acme@*/widgets@*:*');
+        expect(immutableCompanion('repo:*')).toBeNull();
+        expect(immutableCompanion('repo:acme@*/widgets@*:*')).toBeNull();
+        expect(immutableCompanion(null)).toBeNull();
     });
 });

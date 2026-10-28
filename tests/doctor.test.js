@@ -729,6 +729,60 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('warns on classic-only OIDC trust missing immutable-claim coverage', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/immutable/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+                check_oidc_immutable_claims: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes immutable-claim coverage on dual-format trust', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : ["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).not.toMatch(/immutable/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_oidc_immutable_claims: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes immutable-claim coverage on open trust', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:*"\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_oidc_immutable_claims: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
     it('warns on list trusts containing an open repo:* entry', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

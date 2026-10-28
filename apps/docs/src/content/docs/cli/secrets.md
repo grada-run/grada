@@ -32,7 +32,7 @@ Region resolution is shared across all three commands (see Prerequisites), so th
 
 **Push guards (checked before anything is written):**
 
-- **Managed-name collisions** — keys sharing a name with variables Grada injects itself (`PORT`, `NODE_ENV`, database wiring, and per-addon URLs like `REDIS_URL`) would fail the next deploy with an ECS task-definition error. On ECS targets `push` asks for explicit confirmation (declining leaves the vault and `secret_keys.json` untouched); non-interactive runs refuse with `SECRETS_MANAGED_KEY_COLLISION` unless `--yes` acknowledges it. On Lambda targets the same names only warn, since vault reads cannot break the deploy.
+- **Managed-name collisions** — keys sharing a name with variables Grada injects itself (`PORT`, `NODE_ENV`, database wiring, per-addon URLs like `REDIS_URL`, and anything in the rendered task definition) can never deploy, so on ECS targets `push` skips them automatically with a loud per-key notice instead of writing them to the vault or `secret_keys.json`. `--yes` pushes everything anyway for vault-storage flows (the apply preflight still backstops deploys). On Lambda targets the same names only warn, since vault reads cannot break the deploy.
 - **Vault deletions** — push replaces the whole vault, so keys present in AWS but missing from your `.env` are named (`- KEY (removed from the vault)`) and confirmed before anything is deleted; declining leaves both sides untouched. `--headless`/CI proceeds after naming them.
 - **Local-dev wiring** — `DATABASE_URL`-style values containing `localhost` and similar placeholders warn loudly, since production would dial them verbatim.
 
@@ -81,7 +81,7 @@ This file contains **key names only** (e.g. `["API_KEY"]`), never values — it 
 
 ## Automation & edge cases
 
-- Non-interactive runs fail with `SECRETS_NON_INTERACTIVE` instead of prompting: `push` restart approval (pass `--headless` to defer to the next deploy), `push` vault-deletion approval (pass `--headless` to delete after the loud listing, or `--yes`). `push` fails with `SECRETS_MANAGED_KEY_COLLISION` when a key collides with a Grada-managed name (rename it, or pass `--yes` to push anyway). Full catalog: [Headless Mode](/grada/guides/headless/).
+- Non-interactive runs fail with `SECRETS_NON_INTERACTIVE` instead of prompting: `push` restart approval (pass `--headless` to defer to the next deploy), `push` vault-deletion approval (pass `--headless` to delete after the loud listing, or `--yes`). Colliding keys are skipped identically in every mode (no prompt, no refusal). Full catalog: [Headless Mode](/grada/guides/headless/).
 
 ## See also
 

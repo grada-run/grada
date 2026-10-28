@@ -33,6 +33,7 @@ export const PROJECT_CHECKS = [
     { id: 'state_lock', label: 'Terraform state lock', scope: 'project', severity: 'fail', run: checkStateLock, hint: () => 'If no apply is running, release it with: terraform force-unlock <lock-id> (find the holder via grada doctor --deep).' },
     { id: 'interrupted_run', label: 'Interrupted Terraform run', scope: 'project', severity: 'warn', run: checkInterruptedRun, hint: () => 'Review the last apply/destroy output before trusting applied state; the next run overwrites the marker.' },
     { id: 'oidc_trust_scope', label: 'OIDC trust scope', scope: 'project', severity: 'warn', run: checkOidcTrustScope, hint: () => 'Re-scope with: npx grada-run init --github-repo owner/name (or edit the sub claim in terraform/oidc.tf).' },
+    { id: 'oidc_immutable_claims', label: 'OIDC trust formats', scope: 'project', severity: 'warn', run: checkOidcImmutableClaims, hint: () => 'Re-run setup to upgrade the trust, or add a repo:<owner>@*/<name>@*:* entry to terraform/oidc.tf.' },
 ];
 
 const INSTALL_HINTS = {
@@ -217,6 +218,26 @@ function checkOidcTrustScope({ cwd }) {
     return {
         ok: false,
         detailLines: [`CI trust is open (${trust.kind === 'list' ? 'list entry repo:*' : 'repo:*'}): any repo's Actions can assume the deploy role — re-scope before going live.`],
+    };
+}
+
+// Project check: a trust covering classic subject claims only rejects
+// every repo created after 2026-07-15 (immutable `repo:<owner>@<id>/`
+// `<name>@<id>:...` subjects). Warning-grade like the scope check: the
+// open trust matches all formats, and any `@*`/`@<id>` entry counts as
+// immutable coverage.
+function checkOidcImmutableClaims({ cwd }) {
+    const trust = readTerraformOidcTrust(cwd);
+    if (trust === null) return { ok: true, skipped: 'no oidc.tf trust found' };
+    if (trust.kind === 'unparseable') {
+        return { ok: true, skipped: 'trust value not parseable (non-literal claim — review by hand)' };
+    }
+    const entries = trust.kind === 'list' ? trust.entries : [trust.value];
+    const covered = entries.some((entry) => entry === 'repo:*' || /@(\*|\d)/.test(entry));
+    if (covered) return { ok: true };
+    return {
+        ok: false,
+        detailLines: ['CI trust covers classic subject claims only — workflows in repos created after 2026-07-15 use immutable claims this trust rejects, failing every deploy with an OIDC assume-role error.'],
     };
 }
 

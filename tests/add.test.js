@@ -15,6 +15,7 @@ import {
     resolveAddonOptions,
     sanitizeCronName,
     injectContainerEnvVars,
+    upsertManagedEnvNames,
     injectLambdaEnvVars,
     ensureLambdaVpcConfig,
     ensureIsolatedSubnets,
@@ -2322,5 +2323,43 @@ describe('injectContainerSecrets', () => {
         ].join('\n');
         const after = injectContainerSecrets(direct, DB_SECRETS.slice(0, 1));
         expect(after).toContain('{ "name" : "DB_USER"');
+    });
+});
+
+describe('upsertManagedEnvNames', () => {
+    const WITH_LIST = [
+        'locals {',
+        '  app_name = "myapp"',
+        '  managed_env_names = ["PORT", "DB_HOST"]',
+        '}',
+        '',
+    ].join('\n');
+
+    it('merges new names sorted and idempotently', () => {
+        const once = upsertManagedEnvNames(WITH_LIST, ['REDIS_URL', 'DB_HOST']);
+        expect(once).toContain('managed_env_names = ["DB_HOST", "PORT", "REDIS_URL"]');
+        expect(upsertManagedEnvNames(once, ['REDIS_URL'])).toBe(once);
+    });
+
+    it('leaves content without the block untouched (old trees fail open)', () => {
+        const legacy = 'locals {\n  app_name = "myapp"\n}\n';
+        expect(upsertManagedEnvNames(legacy, ['REDIS_URL'])).toBe(legacy);
+    });
+
+    it('runAdd appends addon env names to the list', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '{ "name": "EXISTING", "value": "1" },');
+        const mainPath = path.join(dir, 'terraform', 'main.tf');
+        const before = fs.readFileSync(mainPath, 'utf-8');
+        fs.writeFileSync(mainPath, before.replace('  app_name = "myapp${local.env_suffix}"', '  app_name = "myapp${local.env_suffix}"\n  managed_env_names = ["PORT"]'));
+
+        const result = await runAdd({ cwd: dir, capability: 'db:redis', yes: true });
+
+        expect(result.ok).not.toBe(false);
+        const after = fs.readFileSync(mainPath, 'utf-8');
+        expect(after).toContain('"REDIS_URL"');
+        const listLine = after.split('\n').find((line) => line.includes('managed_env_names'));
+        expect(listLine).toContain('PORT');
+        expect(listLine).toContain('REDIS_URL');
     });
 });

@@ -11,6 +11,7 @@ Run the Terraform plan/apply flow against the generated configuration.
 - If the S3 state bucket is missing, offers to recreate it and resume instead of failing.
 - Refuses to apply while the environment is asleep (it would start tasks against a stopped database) — wake first, or pass `--force`.
 - When the compute target changed since the last apply, shows the plan and requires explicit approval first, since the switch destroys the old stack's resources.
+- Before Terraform runs, a secrets preflight rejects `secret_keys.json` entries that collide with the container environment (or a malformed keys file), naming the key and the fix — dry runs check too.
 - `deploy` is an alias of `apply` (same flags, same behavior).
 
 ## Usage
@@ -45,5 +46,6 @@ npx grada-run deploy            # alias of apply
 - Bucket recovery recreates the exact bucket (and region) from `terraform/backend.tf`; if live infrastructure collides with the resumed apply, you get an import runbook (`terraform import` per address) instead of a blind recreate — `--force-resume` proceeds anyway. The same runbook covers same-run AlreadyExists failures (e.g. a create retried across a network drop).
 - After a successful apply, an empty outputs map fails loud (`PARTIAL_STATE`); missing keys warn. `--allow-partial-outputs` accepts legitimately output-less trees.
 - Interrupted previous runs (Ctrl+C, crash) are surfaced up front; on Lambda projects Day-0 seeds a placeholder ECR image so the first provision succeeds; on the known GitHub OIDC provider conflict, set `create_oidc_provider = false` in `terraform/grada.auto.tfvars` (machine-owned, survives regeneration) and re-run.
+- Secrets preflight failures exit with `SECRETS_ENV_COLLISION` unconditionally — no flag bypasses it, since a collision is deterministic breakage (remove the key from `.env` and re-push, then re-run). CI deploys enforce the same rule at plan time through a task-definition precondition over the CLI-maintained `managed_env_names` list, so raw-terraform runs fail plan with the named error instead of dying on the ECS 400.
 
 `apply` shells out to the `terraform` binary in your generated `terraform/` directory and streams progress while it runs.

@@ -478,6 +478,21 @@ resource "aws_subnet" "db_isolated" {
   }
 }`;
 
+// Merges names into the `managed_env_names` collision-guard list in
+// main.tf content. Sorted + deduplicated for deterministic output;
+// idempotent reruns return the content identical. Returns content
+// unchanged when the block is absent (pre-list trees fail open — the
+// CLI preflight still guards local applies).
+export function upsertManagedEnvNames(tfContent, names = []) {
+    const content = String(tfContent ?? '');
+    const match = /managed_env_names\s*=\s*\[([^\]]*)\]/.exec(content);
+    if (!match) return content;
+    const existing = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    const merged = [...new Set([...existing, ...names])].sort();
+    if (merged.length === existing.length && merged.every((name, i) => name === existing[i])) return content;
+    return content.replace(match[0], `managed_env_names = [${merged.map((name) => JSON.stringify(name)).join(', ')}]`);
+}
+
 // Idempotently appends the isolated-subnet block to network.tf content.
 // Returns the content unchanged when the block already exists. Uses the
 // line-anchored lookup so a `#` comment quoting the header never
@@ -1552,6 +1567,8 @@ async function scaffoldDatabaseInner(engine, projectDir, refs) {
         const withVpc = ensureLambdaVpcConfig(updated);
         vpcInjected = withVpc !== updated;
         updated = withVpc;
+    } else {
+        updated = upsertManagedEnvNames(updated, [...env.map((entry) => entry.name), ...secrets.map((entry) => entry.name)]);
     }
     const envInjected = updated !== mainTfContent;
     if (envInjected) await atomicWriteFile(mainTfPath, normalizeBlankLines(updated));
@@ -1735,10 +1752,11 @@ async function scaffoldAddonInner(capability, resolvedOpts, { cwd, region } = {}
     // ElastiCache lives inside the VPC: attach the function on first Redis
     // provisioning when the project was generated without a database.
     const withVpc = capability === 'db:redis' ? ensureLambdaVpcConfig(updated) : updated;
-    const envInjected = withVpc !== mainTfContent;
+    const withManaged = isLambda ? withVpc : upsertManagedEnvNames(withVpc, envVars.map((entry) => entry.name));
+    const envInjected = withManaged !== mainTfContent;
     const vpcInjected = withVpc !== updated;
     if (envInjected) {
-        await atomicWriteFile(mainTfPath, normalizeBlankLines(withVpc));
+        await atomicWriteFile(mainTfPath, normalizeBlankLines(withManaged));
     }
 
     let workerEnvInjected = false;

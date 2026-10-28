@@ -148,6 +148,31 @@ export function readTerraformOidcTrust(cwd = process.cwd()) {
     return { kind: 'string', value: raw.slice(1, -1) };
 }
 
+// Reads container environment + static-secret names from the rendered
+// task definitions (main.tf + worker.tf). Covers every injection path —
+// scaffold DB/compose entries (`{ "name" : "X" }`), addon entries
+// (`{ name = "X" }`), static secrets (`valueFrom`) — because it reads
+// what Terraform will actually submit, not what the maps predict. The
+// dynamic `for key in local.secret_keys` loop carries an unquoted key
+// reference, so it never matches; the shape filter drops resource names
+// (`${...}`, hyphens, paths). Sorted, deduplicated, [] when unreadable.
+export function readRenderedContainerEnvNames(cwd = process.cwd()) {
+    const base = resolveCwd({}, cwd);
+    const names = new Set();
+    const patterns = [/"name"\s*:\s*"([^"]+)"/g, /\bname\s*=\s*"([^"]+)"/g];
+    const shape = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    for (const file of ['main.tf', 'worker.tf']) {
+        const content = readFileSafe(path.join(base, 'terraform', file));
+        if (!content) continue;
+        for (const pattern of patterns) {
+            for (const match of content.matchAll(pattern)) {
+                if (shape.test(match[1])) names.add(match[1]);
+            }
+        }
+    }
+    return [...names].sort();
+}
+
 // Collision-resistant naming: init mints a `-a1b2c3` suffix per project,
 // rendered into `grada_resource_suffix` in terraform/main.tf. AWS-name
 // builders append it to whatever base they assemble (bare or

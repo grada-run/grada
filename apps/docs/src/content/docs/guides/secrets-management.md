@@ -45,7 +45,7 @@ npx grada-run secrets push .env
 
 > 🌱 **No `.env` yet?** `secrets push` offers to create an empty one for you interactively. In CI / `--headless` mode it exits 1 instead of prompting, so generate the file before pushing.
 
-> 🛡️ **Push guards.** Before writing anything, `push` warns when a key collides with a name Grada injects itself (`PORT`, database wiring, addon URLs like `REDIS_URL`) — such collisions fail the next deploy, so ECS targets ask for explicit confirmation (declining changes nothing) while Lambda targets only warn. Vault keys missing from your `.env` are named and confirmed before deletion, and `localhost`-style wiring values (e.g. `DATABASE_URL`) warn loudly. See the [secrets CLI reference](/grada/cli/secrets/) for the `--headless` behavior of each guard.
+> 🛡️ **Push guards.** Before writing anything, `push` auto-skips keys colliding with names Grada injects itself (`PORT`, database wiring, addon URLs like `REDIS_URL`, anything in the rendered task definition) — each skipped key is named loudly, and nothing colliding ever reaches the vault or `secret_keys.json` on ECS targets (`--yes` pushes everything anyway; Lambda only warns). Vault keys missing from your `.env` are named and confirmed before deletion, `localhost`-style wiring values (e.g. `DATABASE_URL`) warn loudly, and `apply` re-checks the keys file against the rendered environment before Terraform runs. See the [secrets CLI reference](/grada/cli/secrets/) for details.
 
 ### Step 3: Map Secrets into the Container
 Commit the updated `terraform/secret_keys.json` and push to GitHub:

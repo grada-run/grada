@@ -808,7 +808,7 @@ describe('Secrets Push on --target lambda projects', () => {
 
         const result = await pushSecrets('.env', 'myapp');
 
-        expect(result).toEqual({ keysChanged: false, restarted: false });
+        expect(result).toEqual({ keysChanged: false, restarted: false, skipped: [] });
         expect(mockConfirm).not.toHaveBeenCalled();
         expect(mockEcsSend).not.toHaveBeenCalled();
         expect(trackEvent).toHaveBeenCalledWith('secrets_pushed', expect.objectContaining({
@@ -995,6 +995,24 @@ describe('Secrets managed-env helpers (BUG-79)', () => {
         expect(names).not.toContain('SES_FROM_EMAIL');
     });
 
+    it('unions rendered container env names over the map-based set', async () => {
+        await fs.writeFile(
+            path.join('terraform', 'main.tf'),
+            'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\n'
+        );
+        const names = await getManagedEnvNames(process.cwd(), 'ecs');
+        expect(names).toContain('CUSTOM_COMPOSE_VAR');
+        expect(names).toContain('PORT');
+    });
+
+    it('manages DB_ENGINE only when the database engine is non-postgres', async () => {
+        await fs.writeFile(path.join('terraform', 'database.tf'), 'resource "aws_db_instance" "x" {\n  engine = "postgres"\n}\n');
+        expect(await getManagedEnvNames(process.cwd(), 'ecs')).not.toContain('DB_ENGINE');
+
+        await fs.writeFile(path.join('terraform', 'database.tf'), 'resource "aws_db_instance" "x" {\n  engine = "mysql"\n}\n');
+        expect(await getManagedEnvNames(process.cwd(), 'ecs')).toContain('DB_ENGINE');
+    });
+
     it('flags local-dev values on wiring-like names without leaking the value', () => {
         expect(findNonProdWiring({ DATABASE_URL: 'postgres://localhost:5432/db' })).toEqual([
             { key: 'DATABASE_URL', indicator: 'localhost' },
@@ -1029,53 +1047,55 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         mockSend.mockResolvedValue({});
     });
 
-    it('aborts before any write when a colliding key is declined on ECS', async () => {
+    it('auto-skips colliding keys interactively without prompting', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379\nAPI_KEY=abc');
-        mockConfirm.mockResolvedValueOnce(false);
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
 
         try {
-            await pushSecrets('.env', 'my-project', { isHeadless: false });
+            const result = await pushSecrets('.env', 'my-project', { isHeadless: false });
 
-            expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
-                message: expect.stringContaining('colliding key'),
-            }));
-            expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
-            await expect(fs.readFile(path.join('terraform', 'secret_keys.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+            expect(mockConfirm).not.toHaveBeenCalled();
             expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('REDIS_URL'));
-            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('unchanged'));
+            expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+                SecretString: JSON.stringify({ API_KEY: 'abc' }),
+            }));
+            expect(result).toMatchObject({ skipped: ['REDIS_URL'] });
         } finally {
             logSpy.mockRestore();
         }
     });
 
-    it('proceeds when a colliding key is explicitly acknowledged', async () => {
+    it('aborts gracefully in interactive mode when every key is skipped', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
-        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
-        mockSend.mockResolvedValueOnce({});
-        mockConfirm.mockResolvedValueOnce(true);
 
-        await pushSecrets('.env', 'my-project', { isHeadless: false });
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: false });
 
-        expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
-            SecretId: 'my-project-secrets',
-        }));
+        expect(result).toBeUndefined();
+        expect(mockConfirm).not.toHaveBeenCalled();
+        expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
+        await expect(fs.readFile(path.join('terraform', 'secret_keys.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-    it('refuses colliding keys in headless mode without writing', async () => {
+    it('names every skipped key when several collide', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
-        await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
+        await fs.writeFile('.env', 'PORT=3000\nREDIS_URL=redis://x\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
 
         try {
             const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
 
-            expect(result).toMatchObject({ ok: false });
-            expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
-            await expect(fs.readFile(path.join('terraform', 'secret_keys.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('PORT'));
             expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('REDIS_URL'));
+            expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+                SecretString: JSON.stringify({ API_KEY: 'abc' }),
+            }));
+            expect(result).toMatchObject({ skipped: ['PORT', 'REDIS_URL'] });
         } finally {
             logSpy.mockRestore();
         }
@@ -1172,6 +1192,97 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+
+    it('auto-skips colliding keys on ECS with a loud notice instead of refusing', async () => {
+        await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
+        await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
+
+            expect(mockConfirm).not.toHaveBeenCalled();
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('REDIS_URL'));
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('kipped'));
+            expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+                SecretString: JSON.stringify({ API_KEY: 'abc' }),
+            }));
+            const keysContent = await fs.readFile(path.join('terraform', 'secret_keys.json'), 'utf-8');
+            expect(JSON.parse(keysContent)).toEqual(['API_KEY']);
+            expect(result).toMatchObject({ keysChanged: true, skipped: ['REDIS_URL'] });
+            expect(trackEvent).toHaveBeenCalledWith('secrets_pushed', expect.objectContaining({
+                skipped_count: 1,
+                success: true,
+            }));
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('--yes pushes colliding keys without skipping', async () => {
+        await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
+        await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
+
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: true, yes: true });
+
+        expect(mockConfirm).not.toHaveBeenCalled();
+        expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+            SecretString: JSON.stringify({ REDIS_URL: 'redis://custom:6379' }),
+        }));
+        expect(result).toMatchObject({ skipped: [] });
+    });
+
+    it('skipped keys never trigger the removal confirm', async () => {
+        await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
+        await fs.writeFile('.env', 'KEPT=1\nREDIS_URL=redis://custom:6379');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', REDIS_URL: 'old' }) });
+        mockSend.mockResolvedValueOnce({});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            await pushSecrets('.env', 'my-project', { isHeadless: false });
+
+            expect(mockConfirm).not.toHaveBeenCalled();
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('REDIS_URL'));
+            expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+                SecretString: JSON.stringify({ KEPT: '1' }),
+            }));
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('aborts rather than pushing an empty set when every key is skipped', async () => {
+        await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
+        await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
+
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(result).toBeUndefined();
+        expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
+        await expect(fs.readFile(path.join('terraform', 'secret_keys.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('push guard covers rendered compose-injected env names', async () => {
+        await fs.writeFile(
+            path.join('terraform', 'main.tf'),
+            'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\n'
+        );
+        await fs.writeFile('.env', 'CUSTOM_COMPOSE_VAR=1\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
+
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+            SecretString: JSON.stringify({ API_KEY: 'abc' }),
+        }));
+        expect(result).toMatchObject({ skipped: ['CUSTOM_COMPOSE_VAR'] });
     });
 
     it('audit flags managed-name collisions in both directions', async () => {

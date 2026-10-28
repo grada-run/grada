@@ -23,7 +23,7 @@ permissions:
   contents: read
 ```
 
-and assumes the `{{PROJECT_NAME}}-github-actions-role` IAM role created by `terraform/oidc.tf`. There is nothing to rotate and no secret to leak. The role's trust is scoped to your repo (`repo:<owner>/<name>:*`) at scaffold time — from `--github-repo`, your git remote, or the setup prompt — instead of the open `repo:*`; `doctor` flags trees that still carry the open trust. (If your AWS account already has a GitHub OIDC provider, set `create_oidc_provider = false` in `terraform/grada.auto.tfvars` — see [apply](/grada/cli/apply/).)
+and assumes the `{{PROJECT_NAME}}-github-actions-role` IAM role created by `terraform/oidc.tf`. There is nothing to rotate and no secret to leak. The role's trust is scoped to your repo at scaffold time — from `--github-repo`, your git remote, or the setup prompt — instead of the open `repo:*`; `doctor` flags trees that still carry the open trust. Scoped trusts cover both GitHub subject-claim formats (classic `repo:<owner>/<name>:*` plus the immutable-claim companion for repos created after July 2026), and re-running setup upgrades older classic-only trusts automatically. (If your AWS account already has a GitHub OIDC provider, set `create_oidc_provider = false` in `terraform/grada.auto.tfvars` — see [apply](/grada/cli/apply/).)
 
 ## The five stages
 

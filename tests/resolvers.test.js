@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix, readRenderedContainerEnvNames } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -67,6 +67,76 @@ describe('readTerraformOidcTrust', () => {
         const dir = makeTmp();
         writeOidc(dir, body);
         expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'unparseable' });
+    });
+});
+
+describe('readRenderedContainerEnvNames', () => {
+    function writeTf(dir, file, body) {
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', file), body);
+    }
+
+    it('returns [] when no task-definition files exist', () => {
+        expect(readRenderedContainerEnvNames(makeTmp())).toEqual([]);
+    });
+
+    it('reads JSON-form scaffold entries, static secrets, and HCL-form addon entries', () => {
+        const dir = makeTmp();
+        writeTf(dir, 'main.tf', [
+            'environment = [',
+            '  { "name" : "PORT", "value" : "3000" },',
+            '  { "name" : "DB_HOST", "value" : aws_db_instance.x.address },',
+            '  { name = "REDIS_URL", value = "redis://x" },',
+            ']',
+            'secrets = concat([',
+            '  { "name" : "DB_USER", "valueFrom" : "arn:username::" },',
+            '], [])',
+            'resource "aws_iam_role" "x" {',
+            '  name = "${local.app_name}-role"',
+            '}',
+            'resource "aws_ecs_cluster" "main" {',
+            '  name = "plain-but-hyphenated"',
+            '}',
+            'locals { app_name = "x" }',
+            'master_username = "dbadmin"',
+            '',
+        ].join('\n'));
+        expect(readRenderedContainerEnvNames(dir)).toEqual(['DB_HOST', 'DB_USER', 'PORT', 'REDIS_URL']);
+    });
+
+    it('ignores the dynamic secret_keys loop (unquoted key reference)', () => {
+        const dir = makeTmp();
+        writeTf(dir, 'main.tf', [
+            'secrets = concat([',
+            '  for key in local.secret_keys : {',
+            '    name      = key',
+            '    valueFrom = "arn:${key}::"',
+            '  }',
+            '], [])',
+            '',
+        ].join('\n'));
+        expect(readRenderedContainerEnvNames(dir)).toEqual([]);
+    });
+
+    it('ignores the managed_env_names collision-guard list itself', () => {
+        const dir = makeTmp();
+        writeTf(dir, 'main.tf', [
+            'locals {',
+            '  managed_env_names = ["PORT", "DB_HOST"]',
+            '}',
+            'environment = [',
+            '  { "name" : "PORT", "value" : "3000" },',
+            ']',
+            '',
+        ].join('\n'));
+        expect(readRenderedContainerEnvNames(dir)).toEqual(['PORT']);
+    });
+
+    it('unions main.tf and worker.tf', () => {
+        const dir = makeTmp();
+        writeTf(dir, 'main.tf', 'environment = [\n  { "name" : "PORT", "value" : "3000" },\n]\n');
+        writeTf(dir, 'worker.tf', 'environment = [\n  { "name" : "NODE_ENV", "value" : "production" },\n]\n');
+        expect(readRenderedContainerEnvNames(dir)).toEqual(['NODE_ENV', 'PORT']);
     });
 });
 
