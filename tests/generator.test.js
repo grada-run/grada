@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
-import { generateTemplates, resolveDocDest, isManagedDoc, MANAGED_DOC_FALLBACK, LEGACY_MANAGED_DOC_FALLBACK, injectLambdaAdapter, convertDatabaseTfForLambda, addRandomProvider } from '../src/utils/generator.js';
+import { generateTemplates, resolveDocDest, isManagedDoc, MANAGED_DOC_FALLBACK, LEGACY_MANAGED_DOC_FALLBACK, injectLambdaAdapter, convertDatabaseTfForLambda, addRandomProvider, backendNeedsRandomProvider } from '../src/utils/generator.js';
 
 describe('Infrastructure Generator', () => {
     const testTargetDir = path.join(process.cwd(), 'tests', '.tmp-test-env');
@@ -781,6 +782,114 @@ describe('Infrastructure Generator: --target lambda', () => {
         expect(previewYml).toContain('aws lambda update-function-code');
         expect(previewYml).not.toContain('alb_direct_url');
         await expect(fs.stat(path.join(lambdaTargetDir, '.github', 'workflows', 'teardown.yml'))).resolves.toBeTruthy();
+    });
+});
+
+describe('App CDN template pair', () => {
+    it('keeps cloudfront.tf and cloudfront-lambda.tf origin-only different', async () => {
+        const ecsRaw = await fs.readFile(path.resolve('templates/terraform', 'cloudfront.tf'), 'utf-8');
+        // The ALB origin-secret header is ECS-only (API Gateway has no
+        // header validation to pair it with): strip the documented block,
+        // then everything else must align.
+        const headerBlock = /    # Origin secret \(BUG-91\)[\s\S]*?    \}\n\n/;
+        expect(ecsRaw).toMatch(headerBlock);
+        const ecs = ecsRaw.replace(headerBlock, '').split('\n');
+        const lambda = (await fs.readFile(path.resolve('templates/terraform', 'cloudfront-lambda.tf'), 'utf-8')).split('\n');
+        expect(lambda).toHaveLength(ecs.length);
+        // Every differing line must be origin plumbing — behavior, policy,
+        // and error-handling lines stay shared so a fix on one CDN can
+        // never silently miss the other.
+        const originTokens = ['ALBOrigin', 'ApiGatewayOrigin', 'aws_lb.', 'aws_apigatewayv2_api.', 'Load Balancer', 'API Gateway', 'http-only', 'https-only', 'route internally', 'HTTPS-only'];
+        const stray = [];
+        for (let i = 0; i < ecs.length; i++) {
+            if (ecs[i] !== lambda[i] && !originTokens.some((token) => ecs[i].includes(token) || lambda[i].includes(token))) {
+                stray.push(`${i + 1}: ${ecs[i]} || ${lambda[i]}`);
+            }
+        }
+        expect(stray).toEqual([]);
+    });
+});
+
+describe('App CDN cache behavior (BUG-82)', () => {
+    const APP_CDNS = ['cloudfront.tf', 'cloudfront-lambda.tf'];
+
+    async function readTemplate(name) {
+        return fs.readFile(path.resolve('templates/terraform', name), 'utf-8');
+    }
+
+    it.each(APP_CDNS)('%s keys each traffic class separately (no shared path-only slot)', async (name) => {
+        const content = await readTemplate(name);
+        expect(content).not.toMatch(/data\s+"aws_cloudfront_cache_policy"\s+"optimized"/);
+        expect(content).not.toContain('cache_policy.optimized.id');
+        expect(content).toMatch(/path_pattern\s*=\s*"\/api\/\*"/);
+        expect(content).toContain('Managed-CachingDisabled');
+        expect(content).toMatch(/path_pattern\s*=\s*"\/_next\/static\/\*"/);
+        expect(content).toContain('resource "aws_cloudfront_cache_policy" "app_default"');
+        expect(content).toMatch(/query_string_behavior\s*=\s*"all"/);
+        expect(content).toMatch(/cookie_behavior\s*=\s*"all"/);
+        expect(content).toContain('"RSC", "Next-Router-State-Tree", "Next-Router-Prefetch", "Next-Url"');
+        // Origin still receives full request variance.
+        expect(content).toContain('Managed-AllViewerExceptHostHeader');
+    });
+
+    it.each(APP_CDNS)('%s caps error TTLs and carries price class + lookup comment', async (name) => {
+        const content = await readTemplate(name);
+        expect(content).toContain('custom_error_response');
+        expect(content).toContain('error_caching_min_ttl');
+        expect(content).toMatch(/price_class\s*=\s*"PriceClass_100"/);
+        expect(content).toMatch(/comment\s*=\s*"\$\{local\.app_name\}-cdn"/);
+    });
+});
+
+describe('App CDN security headers (BUG-92)', () => {
+    it.each(['cloudfront.tf', 'cloudfront-lambda.tf'])('%s attaches the managed security-headers policy', async (name) => {
+        const content = await fs.readFile(path.resolve('templates/terraform', name), 'utf-8');
+        expect(content).toContain('Managed-SecurityHeadersPolicy');
+        expect(content).toMatch(/response_headers_policy_id\s*=/);
+    });
+});
+
+describe('ALB origin secret (BUG-91)', () => {
+    it('sends a secret header from CloudFront and validates it at the ALB', async () => {
+        const cf = await fs.readFile(path.resolve('templates/terraform', 'cloudfront.tf'), 'utf-8');
+        expect(cf).toMatch(/custom_header\s*\{[^}]*X-Grada-Origin-Secret/s);
+        const main = await fs.readFile(path.resolve('templates/terraform', 'main.tf'), 'utf-8');
+        expect(main).toContain('resource "aws_lb_listener_rule" "origin_secret"');
+        expect(main).toMatch(/http_header_name\s*=\s*"X-Grada-Origin-Secret"/);
+        expect(main).toMatch(/type\s*=\s*"fixed-response"/);
+        expect(main).toMatch(/status_code\s*=\s*"403"/);
+        expect(main).toContain('resource "random_password" "origin_secret"');
+    });
+
+    it('requires the random provider on ECS renders only (plus Lambda with a DB)', async () => {
+        expect(backendNeedsRandomProvider('ecs', false)).toBe(true);
+        expect(backendNeedsRandomProvider('lambda', true)).toBe(true);
+        expect(backendNeedsRandomProvider('lambda', false)).toBe(false);
+        expect(backendNeedsRandomProvider('static', false)).toBe(false);
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-ecs-backend-'));
+        try {
+            await generateTemplates(dir, {
+                PROJECT_NAME: 'test-ecs', REGION: 'us-east-2', PORT: '3000', CPU: '256',
+                MEMORY: '512', COMPUTE_TIER: 'Micro', ESTIMATED_COST: '30.00',
+                STATE_BUCKET: 'test-bucket-123', AWS_ACCOUNT_ID: '123456789012',
+                HEALTH_CHECK_PATH: '/health', DESIRED_COUNT: '1', DEPLOY_BRANCH: 'main',
+                GITHUB_REPO_SUB: '["repo:acme/widgets:*"]', BUILD_DIR: '',
+                finalFramework: 'node', NEEDS_DATABASE: false, DB_ENGINE: 'postgres',
+                DISABLE_DEFAULT_CI: false,
+            });
+            const backend = await fs.readFile(path.join(dir, 'terraform', 'backend.tf'), 'utf-8');
+            expect(backend).toMatch(/source\s*=\s*"hashicorp\/random"/);
+        } finally {
+            await fs.rm(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('TF collision-guard advice (BUG-94)', () => {
+    it('names the guard-list repair when push would not skip the key', async () => {
+        const content = await fs.readFile(path.resolve('templates/terraform', 'main.tf'), 'utf-8');
+        expect(content).toMatch(/managed_env_names in terraform\/main\.tf/);
+        expect(content).toMatch(/stale/);
     });
 });
 

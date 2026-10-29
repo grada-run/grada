@@ -139,6 +139,23 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
+  it('programmatic target-switch refusal stops before terraform (no fall-through)', async () => {
+    writeProject({
+      '.grada/manifest.json': JSON.stringify({ version: 2, appliedTarget: 'lambda', files: {} }),
+    });
+    // json:true is programmatic (noExit) without approving: the gate must
+    // return its refusal instead of falling through to cross-target apply.
+    // (_skipPreview moves past the earlier preview prompt to the gate.)
+    const result = await applyStack({ json: true, _skipPreview: true });
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'non-interactive' }));
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'APPLY_NON_INTERACTIVE' })
+    );
+  });
+
   it('returns cancelled without exiting when the preview confirm is declined', async () => {
     writeProject();
     renderDryRunPreview.mockResolvedValueOnce(false);
@@ -527,6 +544,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
         '  { "name" : "PORT", "value" : "3000" },',
         '  { name = "REDIS_URL", value = "redis://x" },',
         ']',
+        'secrets = concat([], [])',
         '',
       ].join('\n'),
       'terraform/secret_keys.json': JSON.stringify(['API_KEY', 'REDIS_URL']),
@@ -555,6 +573,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
         'environment = [',
         '  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },',
         ']',
+        'secrets = concat([], [])',
         '',
       ].join('\n'),
       'terraform/secret_keys.json': JSON.stringify(['CUSTOM_COMPOSE_VAR']),

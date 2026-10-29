@@ -303,7 +303,7 @@ async function enforceTargetSwitchGate({ options, targetDir, tfDir, runTerraform
             telemetry: { projectName },
             errorCode: 'APPLY_NON_INTERACTIVE',
         });
-        if (refused) return refused;
+        if (refused) return { proceed: false, previousAppliedTarget: appliedTarget, result: refused };
         log.warn(color.yellow(`⚠ This tree targets "${diskTarget}" but the last apply recorded "${from}". Applying would destroy the previous stack.`));
         await renderSwitchPlan({ runTerraform, tfDir, lifecycleOpts });
         const confirmed = await confirm({

@@ -692,6 +692,30 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('downgrade survives warn-grade failures alongside a lone missing aws binary', async () => {
+        mockBinaries({ terraform: true, aws: false, docker: true, git: true, auth: true });
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.mkdirSync(path.join(tmpDir, '.grada'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, '.grada', 'last-run.json'),
+            JSON.stringify({ status: 'interrupted', command: 'apply', startedAt: '2026-10-01T00:00:00Z' })
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+                check_aws_cli: false,
+                check_interrupted_run: false,
+                failed_checks: ['aws_cli'],
+            }));
+            const [, props] = vi.mocked(trackEvent).mock.calls[0];
+            expect(props).not.toHaveProperty('error_code');
+        } finally {
+            restore();
+        }
+    });
+
     it('warns (without failing) on open repo:* OIDC trust', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

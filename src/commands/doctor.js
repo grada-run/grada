@@ -367,7 +367,7 @@ async function runDoctorMain(input = {}) {
     const ranProject = projectResults.filter((result) => !result.skipped);
     const failedGrade = (result) => !result.ok && result.severity !== 'warn';
     const passedChecks = [...results, ...ranProject].filter((result) => result.ok).map((result) => result.id);
-    const failedChecks = [...results, ...ranProject].filter((result) => !result.ok).map((result) => result.id);
+    const failedChecks = [...results, ...ranProject].filter(failedGrade).map((result) => result.id);
 
     // Enterprise downgrade: a missing `aws` binary with live SDK credentials
     // is a warning, not a failure — the SDK path provisions fine. Applies

@@ -16,6 +16,7 @@ env:
   AWS_REGION: {{REGION}}
   ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
   LAMBDA_FUNCTION: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-fn
+  CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn
 
 permissions:
   id-token: write
@@ -122,4 +123,22 @@ jobs:
             --region ${{ env.AWS_REGION }}
           aws lambda wait function-updated \
             --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --region ${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='${{ env.CF_COMMENT }}'].Id | [0]" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*" \
             --region ${{ env.AWS_REGION }}

@@ -523,6 +523,16 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
         const patched = await patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, 'add', noExit);
         if (!patched.ok) return patched.failure;
         cloudfrontPatched = patched.changed;
+    } else if (previousDomain && previousDomain !== domain) {
+        // External-pending wires nothing new, but a --force replace must
+        // still release the previous ACTIVE aliases (BUG-100).
+        const read = await readCloudFrontDistribution(cloudfrontTfPath, 'add', noExit);
+        if (!read.ok) return read.failure;
+        const updated = unpatchCloudFrontDomain(read.content, previousDomain);
+        if (updated !== read.content) {
+            await atomicWriteFile(cloudfrontTfPath, updated);
+            cloudfrontPatched = true;
+        }
     }
 
     if (mode === 'route53') {
@@ -543,9 +553,9 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
     return { ok: true, subcommand: 'add', mode, domain, file: 'terraform/domain.tf', cloudfrontPatched };
 }
 
-// Patches `cloudfront.tf`, replacing a previous managed domain on --force.
-// Returns `{ ok: true, changed }` or `{ ok: false, failure }`.
-async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, subcommand, noExit = false) {
+// Reads `cloudfront.tf` for alias patching. Returns `{ ok: true, content }`
+// or `{ ok: false, failure }` when the distribution block is missing.
+async function readCloudFrontDistribution(cloudfrontTfPath, subcommand, noExit = false) {
     let content;
     try {
         content = await fs.readFile(cloudfrontTfPath, 'utf-8');
@@ -565,12 +575,20 @@ async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, sub
             }),
         };
     }
-    let updated = content;
+    return { ok: true, content };
+}
+
+// Patches `cloudfront.tf`, replacing a previous managed domain on --force.
+// Returns `{ ok: true, changed }` or `{ ok: false, failure }`.
+async function patchCloudFrontFile(cloudfrontTfPath, domain, previousDomain, subcommand, noExit = false) {
+    const read = await readCloudFrontDistribution(cloudfrontTfPath, subcommand, noExit);
+    if (!read.ok) return read;
+    let updated = read.content;
     if (previousDomain && previousDomain !== domain) {
         updated = unpatchCloudFrontDomain(updated, previousDomain);
     }
     updated = patchCloudFrontDomain(updated, domain);
-    const changed = updated !== content;
+    const changed = updated !== read.content;
     if (changed) await atomicWriteFile(cloudfrontTfPath, updated);
     return { ok: true, changed };
 }
@@ -740,12 +758,14 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
         }
     }
     let remainingAliases = [];
+    let unpatched = false;
     try {
         if (domain && fsSync.existsSync(cloudfrontTfPath)) {
             const content = fsSync.readFileSync(cloudfrontTfPath, 'utf-8');
             const updated = unpatchCloudFrontDomain(content, domain);
             if (updated !== content) atomicWriteFileSync(cloudfrontTfPath, updated);
             remainingAliases = getCloudFrontAliases(updated).filter((entry) => entry !== domain);
+            unpatched = true;
         }
     } catch {
         // A best-effort unpatch never blocks domain.tf removal.
@@ -755,6 +775,16 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
     if (remainingAliases.length > 0) {
         console.log(color.green(`\n✅ Custom domain ${domain || ''} removed.`.replace('  ', ' ')));
         console.log(color.yellow(`⚠ ${remainingAliases.length} alias(es) remain (${remainingAliases.join(', ')}): the ACM viewer_certificate is kept, but its validation resource is deleted with domain.tf — rewire the certificate by hand before applying.`));
+    } else if (!unpatched) {
+        // The aliases were never touched: claiming a restore would send
+        // the next apply into a stale-alias failure (BUG-99).
+        console.log(color.green(`\n✅ Custom domain ${domain || ''} removed.`.replace('  ', ' ')));
+        const why = !domain
+            ? 'terraform/domain.tf was unparseable, so CloudFront aliases were left untouched'
+            : !fsSync.existsSync(cloudfrontTfPath)
+                ? 'terraform/cloudfront.tf is missing, so aliases could not be verified'
+                : 'the CloudFront unpatch failed';
+        console.log(color.yellow(`⚠ CloudFront was NOT restored to the default certificate (${why}) — inspect terraform/cloudfront.tf before applying.`));
     } else {
         console.log(color.green(`\n✅ Custom domain ${domain || ''} removed; CloudFront restored to the default certificate.`.replace('  ', ' ')));
     }

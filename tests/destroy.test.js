@@ -62,7 +62,7 @@ vi.mock('../src/utils/system.js', async (importOriginal) => {
 });
 
 
-import { destroyStack } from '../src/commands/destroy.js';
+import { destroyStack, handleDestroyTerraformError } from '../src/commands/destroy.js';
 import { teardownStateBucket, drainBucketObjects } from '../src/utils/aws.js';
 import { checkDependency } from '../src/utils/system.js';
 import { trackEvent } from '../src/core/telemetry.js';
@@ -134,6 +134,15 @@ describe('Command: destroy (mocked terraform spawn)', () => {
   it('cancels cleanly when the user declines the confirm prompt', async () => {
     writeBackend();
     clack.mockConfirm.mockResolvedValue(false);
+    await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 0 });
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(teardownStateBucket).not.toHaveBeenCalled();
+    expect(clack.mockCancel).toHaveBeenCalled();
+  });
+
+  it('cancels cleanly when the user escapes the confirm prompt (cancel symbol)', async () => {
+    writeBackend();
+    clack.mockConfirm.mockResolvedValue(Symbol('clack:cancel'));
     await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 0 });
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(teardownStateBucket).not.toHaveBeenCalled();
@@ -244,6 +253,35 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       'infrastructure_destroyed',
       expect.objectContaining({ error_code: 'STATE_LOCK_HELD' })
     );
+  });
+
+  it('programmatic destroy refusal returns a shaped failure before terraform', async () => {
+    writeBackend();
+    // json:true is programmatic (noExit) without approving: the refusal
+    // must come back shaped, not as success-like undefined.
+    const result = await destroyStack({ json: true });
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'non-interactive', exitCode: 1 }));
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(teardownStateBucket).not.toHaveBeenCalled();
+  });
+
+  it('lock-refusal honors the {retried,result} contract for programmatic callers', async () => {
+    // The state-lock unlock prompt is unreachable once the pre-terraform
+    // confirm gate refuses, so this contracts the handler directly: a
+    // raw refusal here would surface as success-shaped undefined.
+    const handled = await handleDestroyTerraformError({
+      options: { json: true },
+      tfDirPath: path.join(tmpDir, 'terraform'),
+      attemptDestroy: vi.fn(),
+      error: Object.assign(new Error('Error acquiring the state lock'), {
+        code: 'STATE_LOCK_HELD',
+        lockId: 'destroy-lock-9',
+      }),
+    });
+    expect(handled.retried).toBe(false);
+    expect(handled.result).toEqual(expect.objectContaining({ ok: false, reason: 'non-interactive', exitCode: 1 }));
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('interactive destroy confirms, unlocks, and retries once', async () => {
@@ -368,11 +406,13 @@ describe('Command: destroy (mocked terraform spawn)', () => {
     // Describe calls (first call feeds findDbTarget, the rest feed the
     // wait loops); Start calls are recorded in `seen`. Instances carry
     // DBInstanceStatus, clusters carry Status (true SDK shapes).
-    function scriptedRdsClient({ kind = 'instance', statuses = [], modifyError = null } = {}) {
+    function scriptedRdsClient({ kind = 'instance', statuses = [], modifyError = null, snapshotStatuses = ['available'] } = {}) {
       const seen = [];
       const sent = [];
       let calls = 0;
       const nextStatus = () => statuses[Math.min(calls++, statuses.length - 1)];
+      let snapshotCalls = 0;
+      const nextSnapshotStatus = () => snapshotStatuses[Math.min(snapshotCalls++, snapshotStatuses.length - 1)];
       return {
         seen,
         sent,
@@ -394,6 +434,12 @@ describe('Command: destroy (mocked terraform spawn)', () => {
           }
           if (name === 'StartDBInstanceCommand' || name === 'StartDBClusterCommand') return {};
           if (name === 'CreateDBSnapshotCommand' || name === 'CreateDBClusterSnapshotCommand') return {};
+          if (name === 'DescribeDBSnapshotsCommand') {
+            return { DBSnapshots: [{ Status: nextSnapshotStatus() }] };
+          }
+          if (name === 'DescribeDBClusterSnapshotsCommand') {
+            return { DBClusterSnapshots: [{ Status: nextSnapshotStatus() }] };
+          }
           if (name === 'ModifyDBInstanceCommand' || name === 'ModifyDBClusterCommand') {
             if (modifyError) throw modifyError;
             return {};
@@ -473,6 +519,12 @@ describe('Command: destroy (mocked terraform spawn)', () => {
           }
           if (name === 'StartDBInstanceCommand' || name === 'StartDBClusterCommand') return {};
           if (name === 'CreateDBSnapshotCommand' || name === 'CreateDBClusterSnapshotCommand') return {};
+          if (name === 'DescribeDBSnapshotsCommand') {
+            return { DBSnapshots: [{ Status: 'available' }] };
+          }
+          if (name === 'DescribeDBClusterSnapshotsCommand') {
+            return { DBClusterSnapshots: [{ Status: 'available' }] };
+          }
           throw new Error(`unexpected command ${name}`);
         }),
       };
@@ -588,6 +640,58 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(trackEvent).toHaveBeenCalledWith(
         'deletion_protection_lifted',
         expect.objectContaining({ via: 'prompt' })
+      );
+    });
+
+    it('waits for the snapshot to reach available before destroying', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({
+        kind: 'instance',
+        statuses: ['available'],
+        snapshotStatuses: ['creating', 'creating', 'available'],
+      });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
+
+      expect(rdsClient.seen).toContain('DescribeDBSnapshotsCommand');
+      expect(rdsClient.seen.filter((name) => name === 'DescribeDBSnapshotsCommand')).toHaveLength(3);
+      expect(mockSpawn).toHaveBeenCalledTimes(3);
+    });
+
+    it('refuses the destroy when the snapshot fails', async () => {
+      writeBackend();
+      clack.mockConfirm.mockResolvedValueOnce(true); // proceed with destroy
+      mockSpawn.mockImplementation(() => makeChild({ code: 0, stdout: 'destroy complete' }));
+      const rdsClient = scriptedRdsClient({
+        kind: 'instance',
+        statuses: ['available'],
+        snapshotStatuses: ['creating', 'failed'],
+      });
+
+      await expect(destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false }))
+        .rejects.toMatchObject({ exitCode: 1 });
+      // init ran; the destroy itself never started.
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ success: false, error_code: 'DB_SNAPSHOT_FAILED' })
+      );
+    });
+
+    it('refuses the destroy when the snapshot times out', async () => {
+      writeBackend();
+      clack.mockConfirm.mockResolvedValueOnce(true); // proceed with destroy
+      mockSpawn.mockImplementation(() => makeChild({ code: 0, stdout: 'destroy complete' }));
+      const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'], snapshotStatuses: ['creating'] });
+
+      await expect(destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, snapshotTimeoutMs: 0, isHeadless: false }))
+        .rejects.toMatchObject({ exitCode: 1 });
+      // init ran; the destroy itself never started.
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ success: false, error_code: 'DB_SNAPSHOT_TIMEOUT' })
       );
     });
 

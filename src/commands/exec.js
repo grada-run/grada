@@ -6,7 +6,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { hasAwsCli, AWS_CLI_INSTALL_URL, isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, guardComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveService, resolveCwd, guardComputeTarget, withWorkspaceNamespace } from '../utils/resolvers.js';
 import {
     hasSessionManagerPlugin,
     resolveContainer,
@@ -35,7 +35,7 @@ export function parseExecArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'exec') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
-        string: ['cluster', 'service', 'container', { name: 'command', greedy: true }, 'region'],
+        string: ['cluster', 'service', 'container', { name: 'command', greedy: true }, 'region', 'workspace'],
         boolean: ['headless'],
     });
     const positionals = rest.filter((arg) => typeof arg === 'string' && !arg.startsWith('-'));
@@ -109,8 +109,13 @@ async function runExecMain(input = {}) {
         cwd = resolveCwd(options);
         region = resolveRegion(options, cwd);
         projectName = resolveProjectName(options, cwd);
-        cluster = resolveCluster(options, cwd);
-        service = resolveService(options, cwd);
+        // Workspace-namespaced resources (BUG-90): --workspace (or the
+        // local .terraform/environment) targets a preview stack like
+        // rollback and db do — exec into a preview must not land in
+        // production. Explicit flags/env keep winning.
+        const namespacedOptions = withWorkspaceNamespace(options, cwd);
+        cluster = resolveCluster(namespacedOptions, cwd);
+        service = resolveService(namespacedOptions, cwd);
         expectedContainer = resolveContainer(options, cwd);
     } catch {
         return failProjectNotInitialized({ event: 'exec_run', noExit });

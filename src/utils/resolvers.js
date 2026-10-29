@@ -148,6 +148,30 @@ export function readTerraformOidcTrust(cwd = process.cwd()) {
     return { kind: 'string', value: raw.slice(1, -1) };
 }
 
+// Index just past the `]` matching the `[` at openIdx (quoted regions
+// skipped, so bracket-bearing strings can't mis-close it), or -1 when
+// the block never closes.
+function scanBracketBlock(content, openIdx) {
+    let depth = 0;
+    let i = openIdx;
+    while (i < content.length) {
+        const ch = content[i];
+        if (ch === '"') {
+            i += 1;
+            while (i < content.length && content[i] !== '"') i += content[i] === '\\' ? 2 : 1;
+            i += 1;
+            continue;
+        }
+        if (ch === '[') depth += 1;
+        else if (ch === ']') {
+            depth -= 1;
+            if (depth === 0) return i + 1;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
 // Reads container environment + static-secret names from the rendered
 // task definitions (main.tf + worker.tf). Covers every injection path —
 // scaffold DB/compose entries (`{ "name" : "X" }`), addon entries
@@ -156,18 +180,40 @@ export function readTerraformOidcTrust(cwd = process.cwd()) {
 // dynamic `for key in local.secret_keys` loop carries an unquoted key
 // reference, so it never matches; the shape filter drops resource names
 // (`${...}`, hyphens, paths). Sorted, deduplicated, [] when unreadable.
+//
+// Scoped to secret-receiving containers (BUG-93): ECS collides secrets
+// with environment per container definition, so sidecar `environment`
+// arrays (whose containers get no secrets) must not contribute names —
+// parsing them would falsely render same-named secrets undeployable.
+// An environment block counts when a `secrets =` assignment follows it
+// before the next environment block (the app/worker shape); hand-added
+// entries inside those blocks stay covered.
 export function readRenderedContainerEnvNames(cwd = process.cwd()) {
     const base = resolveCwd({}, cwd);
     const names = new Set();
-    const patterns = [/"name"\s*:\s*"([^"]+)"/g, /\bname\s*=\s*"([^"]+)"/g];
     const shape = /^[A-Za-z_][A-Za-z0-9_]*$/;
     for (const file of ['main.tf', 'worker.tf']) {
         const content = readFileSafe(path.join(base, 'terraform', file));
         if (!content) continue;
-        for (const pattern of patterns) {
-            for (const match of content.matchAll(pattern)) {
-                if (shape.test(match[1])) names.add(match[1]);
+        const envStarts = [...content.matchAll(/environment\s*=\s*\[/g)];
+        for (let bi = 0; bi < envStarts.length; bi += 1) {
+            const match = envStarts[bi];
+            const openIdx = match.index + match[0].length - 1;
+            const closeIdx = scanBracketBlock(content, openIdx);
+            if (closeIdx === -1) continue;
+            const nextEnvIdx = bi + 1 < envStarts.length ? envStarts[bi + 1].index : content.length;
+            if (!/\bsecrets\s*=/.test(content.slice(closeIdx, nextEnvIdx))) continue;
+            const block = content.slice(openIdx, closeIdx);
+            for (const pattern of [/"name"\s*:\s*"([^"]+)"/g, /\bname\s*=\s*"([^"]+)"/g]) {
+                for (const m of block.matchAll(pattern)) {
+                    if (shape.test(m[1])) names.add(m[1]);
+                }
             }
+        }
+        // Static secret entries (`{ "name" : "X", "valueFrom" : ... }`):
+        // quoted names reached by a valueFrom within the same object.
+        for (const m of content.matchAll(/"name"\s*:\s*"([^"]+)"(?=[^}]{0,300}"valueFrom")/g)) {
+            if (shape.test(m[1])) names.add(m[1]);
         }
     }
     return [...names].sort();
@@ -273,6 +319,21 @@ export function resolveHeadless(options = {}, env = process.env, stdin = process
 // (or undefined to auto-detect `.terraform/environment` under `cwd`).
 export function resolveAppName(projectName, workspace, cwd = process.cwd()) {
     return `${projectName}${resolveWorkspaceSuffix({ workspace, cwd }, cwd)}`;
+}
+
+// Workspace-namespaced project name for resource derivation: --workspace
+// (or the local .terraform/environment) targets a preview stack. Telemetry
+// keeps the raw project name; explicit --cluster/--service/--log-group
+// flags still win inside the resolvers.
+export function resolveNamespacedProject(projectName, options = {}, cwd = process.cwd()) {
+    return `${projectName}${resolveWorkspaceSuffix(options, cwd)}`;
+}
+
+// `options` with the project name workspace-namespaced, for commands that
+// derive several resource names (cluster/service/log group) at once.
+export function withWorkspaceNamespace(options = {}, cwd = process.cwd()) {
+    const opts = normalizeOptions(options);
+    return { ...opts, projectName: resolveNamespacedProject(resolveProjectName(opts, cwd), opts, cwd) };
 }
 
 // Reads the local Terraform workspace (e.g. a PR-preview environment).

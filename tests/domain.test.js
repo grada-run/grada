@@ -429,6 +429,33 @@ describe('us_east_1 provider backfill', () => {
         expect(fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8')).toContain('alias  = "us_east_1"');
     });
 
+    it('--force add to external-pending releases the previous ACTIVE aliases', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        writeMainTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'old.example.com', zoneId: 'Z1' });
+        const result = await runDomain({ cwd: dir, subcommand: 'add', domain: 'new.example.com', force: true });
+        expect(result.ok).toBe(true);
+        const cf = fs.readFileSync(path.join(dir, 'terraform', 'cloudfront.tf'), 'utf-8');
+        expect(cf).not.toContain('old.example.com');
+        expect(cf).not.toContain('new.example.com');
+    });
+
+    it('remove with unparseable domain.tf warns instead of claiming restore', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        writeMainTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com', zoneId: 'Z1' });
+        fs.writeFileSync(path.join(dir, 'terraform', 'domain.tf'), 'this is not valid tf {{{');
+        const result = await runDomain({ cwd: dir, subcommand: 'remove', yes: true });
+        expect(result).toMatchObject({ ok: true, removed: true });
+        expect(fs.existsSync(path.join(dir, 'terraform', 'domain.tf'))).toBe(false);
+        const text = capturedOutput();
+        expect(text).not.toContain('removed; CloudFront restored to the default certificate');
+        expect(text).toContain('CloudFront was NOT restored to the default certificate');
+        expect(text).toMatch(/unparseable|left untouched/i);
+    });
+
     it('ships the alias provider in the generated main.tf template', () => {
         const template = fs.readFileSync(new URL('../templates/terraform/main.tf', import.meta.url), 'utf-8');
         expect(template).toContain('alias  = "us_east_1"');

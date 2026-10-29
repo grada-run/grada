@@ -69,6 +69,7 @@ describe('exec: CLI args', () => {
 
     it('supports = syntax and bare exec', () => {
         expect(parseExecArgs(['exec', '--cluster=c1', '--region=us-west-2'])).toEqual({ cluster: 'c1', region: 'us-west-2' });
+        expect(parseExecArgs(['exec', '--workspace', 'pr-7'])).toEqual({ workspace: 'pr-7' });
         expect(parseExecArgs(['exec'])).toEqual({});
     });
 
@@ -135,6 +136,37 @@ describe('Command: exec (mocked ECS + spawn)', () => {
 
     afterEach(() => {
         exitSpy.mockRestore();
+    });
+
+    it('namespaces cluster and service with --workspace', async () => {
+        const taskArn = 'arn:aws:ecs:us-east-2:123:task/myapp-pr-7-cluster/abc123';
+        const ecsClient = mockEcsClient({
+            taskArns: [taskArn],
+            tasks: [{ taskArn, lastStatus: 'RUNNING', containers: [{ name: 'myapp-container', lastStatus: 'RUNNING' }] }],
+        });
+        const calls = [];
+        const spawnImpl = mockSpawnImpl(calls, 0);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await runExec({
+                projectName: 'myapp',
+                workspace: 'pr-7',
+                region: 'us-east-2',
+                ecsClient,
+                spawnImpl,
+                hasAwsCli: true,
+                hasSsmPlugin: true,
+            });
+            expect(result.ok).toBe(true);
+            const listCall = ecsClient.send.mock.calls.map(([c]) => c).find((c) => c instanceof MockListTasksCommand);
+            expect(listCall.serviceName).toBe('myapp-pr-7-service');
+            expect(listCall.cluster).toBe('myapp-pr-7-cluster');
+            const [, args] = spawnImpl.mock.calls[0];
+            expect(args).toEqual(expect.arrayContaining(['--cluster', 'myapp-pr-7-cluster']));
+        } finally {
+            consoleSpy.mockRestore();
+        }
     });
 
     it('spawns aws ecs execute-command with inherited stdio on success', async () => {

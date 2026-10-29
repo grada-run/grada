@@ -314,6 +314,17 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         expect(payload).not.toContain(SLACK_URL);
     });
 
+    it('redacts the webhook URL from stdout when scaffolding', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        const result = await runAlerts(alertOptions(dir, { webhook: SLACK_URL }));
+
+        expect(result).toMatchObject({ ok: true, destinations: 'webhook' });
+        const text = logSpy.mock.calls.map((call) => call.join(' ')).join('\n');
+        expect(text).toContain('TF_VAR_alerts_webhook_url');
+        expect(text).not.toContain(SLACK_URL);
+    });
+
     it('pins the archive provider in backend.tf when scaffolding a webhook', async () => {
         const dir = tmp.makeTmp('alerts-test-');
         writeMainTf(dir);

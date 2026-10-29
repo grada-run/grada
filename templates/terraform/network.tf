@@ -80,8 +80,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 

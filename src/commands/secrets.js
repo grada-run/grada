@@ -170,6 +170,12 @@ export async function getManagedEnvNames(cwd = process.cwd(), target = 'ecs') {
     } catch {
         return [...names].sort();
     }
+    // NODE_ENV is injected only when the worker renders (the generator
+    // scopes it to worker trees): on workerless trees it is a legitimate
+    // custom key and must not auto-skip (BUG-95). Unreadable dirs keep
+    // the base set above (fail-closed; the TF precondition backstops
+    // real collisions there).
+    if (!tfFiles.includes('worker.tf')) names.delete('NODE_ENV');
     const dbFile = tfFiles.find((file) => file.startsWith('database') && file.endsWith('.tf'));
     if (dbFile) {
         for (const name of DB_MANAGED_ENV) names.add(name);
@@ -393,13 +399,16 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         const skippedSet = new Set(skipped);
         const pushableSecrets = Object.fromEntries(Object.entries(parsedSecrets).filter(([key]) => !skippedSet.has(key)));
         const needsPreWriteOutput = skipped.length > 0 || wiringHits.length > 0
-            || (collisions.length > 0 && pushTarget === 'lambda');
+            || (collisions.length > 0 && (pushTarget === 'lambda' || skipBypassed));
         if (needsPreWriteOutput) s.stop('Pre-flight checks done.');
         for (const { key, indicator } of wiringHits) {
             console.log(color.yellow(`⚠️  Warning: "${key}" looks like a local-dev value (contains "${indicator}") — pushed as-is, production wiring would dial it.`));
         }
         if (collisions.length > 0 && pushTarget === 'lambda') {
             console.log(color.yellow(`⚠️  Warning: ${summarizeKeys(collisions)} ${collisions.length === 1 ? 'is' : 'are'} also injected by Grada as plain environment variables — the pushed vault value may be shadowed at runtime.`));
+        }
+        if (collisions.length > 0 && skipBypassed && pushTarget !== 'lambda') {
+            console.log(color.yellow(`⚠️  Warning: pushing ${summarizeKeys(collisions)} anyway (--yes) though Grada injects ${collisions.length === 1 ? 'it' : 'them'} — the apply preflight refuses until conflicting keys leave .env.`));
         }
         if (skipped.length > 0) {
             console.log(color.yellow(`⚠️  Skipping ${skipped.length} colliding ${skipped.length === 1 ? 'key' : 'keys'} (injected by Grada — remove from .env to silence this):`));
@@ -448,6 +457,16 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         // exclusion from the vault write is covered by the skip notice
         // above, not by this confirm.
         const removed = (existingKeys ?? []).filter((key) => !Object.hasOwn(parsedSecrets, key));
+        // BUG-89: skipped keys are present in .env (so they never land in
+        // `removed`) but excluded from the vault write — a stale vault
+        // value for a skipped key is wiped by the full-replace update.
+        // Name every such victim loudly. The skip notice above is the
+        // acknowledgment, so unlike BUG-80 removals these never confirm.
+        const staleSkipped = skipped.filter((key) => (existingKeys ?? []).includes(key));
+        if (staleSkipped.length > 0) {
+            console.log(color.yellow(`⚠️  ${staleSkipped.length} skipped ${staleSkipped.length === 1 ? 'key' : 'keys'} still ${staleSkipped.length === 1 ? 'has' : 'have'} a stale vault value that this push deletes (no longer pushed):`));
+            for (const key of staleSkipped) console.log(color.red(`- ${key} (stale vault value deleted — key is skipped)`));
+        }
         if (removed.length > 0) {
             s.stop('Pre-flight checks done.');
             console.log(color.yellow(`⚠️  ${removed.length} vault ${removed.length === 1 ? 'key' : 'keys'} not in ${resolvedFilePath} will be deleted:`));
@@ -512,7 +531,8 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     ecs_restart: false,
                     removed_count: removed.length,
                     managed_collisions: collisions.length,
-                    skipped_count: skipped.length
+                    skipped_count: skipped.length,
+                    stale_skipped_count: staleSkipped.length
                 });
                 return { keysChanged: false, restarted: false, skipped };
             }
@@ -528,7 +548,8 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     ecs_restart: false,
                     removed_count: removed.length,
                     managed_collisions: collisions.length,
-                    skipped_count: skipped.length
+                    skipped_count: skipped.length,
+                    stale_skipped_count: staleSkipped.length
                 });
                 return { keysChanged: false, restarted: false, skipped };
             }
@@ -544,7 +565,7 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                 message: 'Keys are unchanged. Trigger a rolling ECS restart to apply new values immediately?',
                 initialValue: false,
             });
-            if (shouldRestart) {
+            if (shouldRestart === true) {
                 const cluster = resolveEcsCluster(resolvedProjectName, opts);
                 const service = resolveEcsService(resolvedProjectName, opts);
                 const ecsClient = resolveClient(opts.ecsClient ?? opts.ecs, ECSClient, targetRegion ? { region: targetRegion } : {});
@@ -569,7 +590,8 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
                     ecs_restart: true,
                     removed_count: removed.length,
                     managed_collisions: collisions.length,
-                    skipped_count: skipped.length
+                    skipped_count: skipped.length,
+                    stale_skipped_count: staleSkipped.length
                 });
                 console.log(color.blue(`\n📘 Learn how secrets reach your app: ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/secrets-management.md')}`));
                 return { keysChanged: false, restarted: true, cluster, service, skipped };
@@ -583,7 +605,8 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
             keys_changed: keysChanged,
             removed_count: removed.length,
             managed_collisions: collisions.length,
-            skipped_count: skipped.length
+            skipped_count: skipped.length,
+            stale_skipped_count: staleSkipped.length
         });
         return { keysChanged, skipped };
 

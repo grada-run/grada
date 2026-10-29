@@ -290,6 +290,51 @@ describe('Command: diagnose', () => {
         );
     });
 
+    it('namespaces cluster and log group with --workspace', async () => {
+        mockEcsSend
+            .mockResolvedValueOnce({ taskArns: ['arn-task'] })
+            .mockResolvedValueOnce({
+                tasks: [{
+                    taskArn: 'arn:aws:ecs:us-east-2:123456789012:task/test-cluster/4ae4e44b8e484ac481d44fc408e3b9e7',
+                    stoppedReason: 'crash',
+                    stoppedAt: '2026-09-26T12:19:47.000Z',
+                    containers: [{ name: 'myapp-container', exitCode: 1 }],
+                }]
+            });
+        mockLogsSend.mockResolvedValueOnce({ events: [{ message: 'boom' }] });
+
+        await runDiagnose({ projectName: 'myapp', workspace: 'pr-7', region: 'us-east-2' });
+
+        const listCall = mockEcsSend.mock.calls.map(([c]) => c).find((c) => c instanceof MockListTasksCommand);
+        expect(listCall.cluster).toBe('myapp-pr-7-cluster');
+        const filterCall = mockLogsSend.mock.calls.map(([c]) => c).find((c) => c instanceof MockFilterLogEventsCommand);
+        expect(filterCall.logGroupName).toBe('/ecs/myapp-pr-7');
+    });
+
+    it('reads the newest task-stream lines on multi-page streams', async () => {
+        mockEcsSend
+            .mockResolvedValueOnce({ taskArns: ['arn-task'] })
+            .mockResolvedValueOnce({
+                tasks: [{
+                    taskArn: 'arn:aws:ecs:us-east-2:123456789012:task/test-cluster/4ae4e44b8e484ac481d44fc408e3b9e7',
+                    stoppedReason: 'crash',
+                    stoppedAt: '2026-09-26T12:19:47.000Z',
+                    containers: [{ name: 'myapp-container', exitCode: 1 }],
+                }]
+            });
+        const oldPage = Array.from({ length: 50 }, (_, i) => ({ message: `old line ${i + 1}` }));
+        const newPage = Array.from({ length: 60 }, (_, i) => ({ message: `new line ${i + 1}` }));
+        mockLogsSend.mockImplementation((cmd) => {
+            if (cmd.limit === 10000) return Promise.resolve({ events: [...oldPage, ...newPage] });
+            return Promise.resolve({ events: oldPage, nextToken: 't1' }); // small probe page
+        });
+
+        const result = await runDiagnose({ cluster: 'test-cluster', region: 'us-east-2', logGroup: '/ecs/test' });
+        expect(result.logs).toHaveLength(50);
+        expect(result.logs[0]).toBe('new line 11');
+        expect(result.logs[49]).toBe('new line 60');
+    });
+
     it('falls back to a group-wide 1h query when the task stream is empty', async () => {
         mockEcsSend
             .mockResolvedValueOnce({ taskArns: ['arn-task'] })

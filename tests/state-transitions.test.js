@@ -1023,6 +1023,8 @@ function rdsAvailableInstanceClient(instance = {}) {
                 throw Object.assign(new Error('not found'), { name: 'DBClusterNotFoundFault' });
             }
             if (name === 'CreateDBSnapshotCommand') return { DBSnapshot: { Status: 'creating' } };
+            if (name === 'DescribeDBSnapshotsCommand') return { DBSnapshots: [{ Status: 'available' }] };
+            if (name === 'DescribeDBClusterSnapshotsCommand') return { DBClusterSnapshots: [{ Status: 'available' }] };
             throw new Error(`unexpected RDS command: ${name}`);
         }),
     };

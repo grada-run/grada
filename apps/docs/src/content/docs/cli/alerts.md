@@ -26,9 +26,11 @@ npx grada-run alerts --force
 After scaffolding with `--webhook`:
 
 ```bash
-export TF_VAR_alerts_webhook_url='https://hooks.slack.com/services/XXX'
+export TF_VAR_alerts_webhook_url='<your-slack-webhook-url>'
 npx grada-run apply
 ```
+
+(The CLI prints this command with a redacted placeholder — paste your real webhook URL. The URL is a Bearer [REDACTED] and never appears in CLI output, so CI logs stay clean.)
 
 ## Flags
 

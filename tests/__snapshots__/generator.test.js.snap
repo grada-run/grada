@@ -161,6 +161,7 @@ env:
   ECS_TASK_FAMILY: test-aurora_serverless-task
   ECS_WORKER_SERVICE: test-aurora_serverless-worker-service
   ECS_WORKER_TASK_FAMILY: test-aurora_serverless-worker-task
+  CF_COMMENT: test-aurora_serverless-cdn
 
 permissions:
   id-token: write
@@ -316,6 +317,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -472,7 +491,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -555,6 +574,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -562,8 +591,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -634,6 +684,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -734,8 +788,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -1077,6 +1134,7 @@ env:
   ECS_TASK_FAMILY: test-django_postgres-task
   ECS_WORKER_SERVICE: test-django_postgres-worker-service
   ECS_WORKER_TASK_FAMILY: test-django_postgres-worker-task
+  CF_COMMENT: test-django_postgres-cdn
 
 permissions:
   id-token: write
@@ -1232,6 +1290,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -1388,7 +1464,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -1470,6 +1546,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -1477,8 +1563,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -1549,6 +1656,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -1649,8 +1760,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -1895,6 +2009,7 @@ env:
   ECS_TASK_FAMILY: test-docker_compose_sidecars-task
   ECS_WORKER_SERVICE: test-docker_compose_sidecars-worker-service
   ECS_WORKER_TASK_FAMILY: test-docker_compose_sidecars-worker-task
+  CF_COMMENT: test-docker_compose_sidecars-cdn
 
 permissions:
   id-token: write
@@ -2050,6 +2165,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -2206,7 +2339,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -2300,6 +2433,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -2307,8 +2450,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -2379,6 +2543,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -2479,8 +2647,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -2747,6 +2918,7 @@ env:
   ECS_TASK_FAMILY: test-fastapi_python-task
   ECS_WORKER_SERVICE: test-fastapi_python-worker-service
   ECS_WORKER_TASK_FAMILY: test-fastapi_python-worker-task
+  CF_COMMENT: test-fastapi_python-cdn
 
 permissions:
   id-token: write
@@ -2902,6 +3074,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -3058,7 +3248,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -3136,6 +3326,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -3143,8 +3343,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -3215,6 +3436,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -3315,8 +3540,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -3548,6 +3776,7 @@ env:
   ECS_TASK_FAMILY: test-go_distroless-task
   ECS_WORKER_SERVICE: test-go_distroless-worker-service
   ECS_WORKER_TASK_FAMILY: test-go_distroless-worker-task
+  CF_COMMENT: test-go_distroless-cdn
 
 permissions:
   id-token: write
@@ -3703,6 +3932,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -3859,7 +4106,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -3937,6 +4184,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -3944,8 +4201,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -4016,6 +4294,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -4116,8 +4398,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -4459,6 +4744,7 @@ env:
   ECS_TASK_FAMILY: test-heroku_procfile_migration-task
   ECS_WORKER_SERVICE: test-heroku_procfile_migration-worker-service
   ECS_WORKER_TASK_FAMILY: test-heroku_procfile_migration-worker-task
+  CF_COMMENT: test-heroku_procfile_migration-cdn
 
 permissions:
   id-token: write
@@ -4614,6 +4900,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -4770,7 +5074,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -4852,6 +5156,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -4859,8 +5173,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -4931,6 +5266,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -5031,8 +5370,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -5431,6 +5773,7 @@ env:
   ECS_TASK_FAMILY: test-mysql_rds-task
   ECS_WORKER_SERVICE: test-mysql_rds-worker-service
   ECS_WORKER_TASK_FAMILY: test-mysql_rds-worker-task
+  CF_COMMENT: test-mysql_rds-cdn
 
 permissions:
   id-token: write
@@ -5586,6 +5929,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -5742,7 +6103,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -5825,6 +6186,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -5832,8 +6203,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -5904,6 +6296,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -6004,8 +6400,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -6269,6 +6668,7 @@ env:
   ECS_TASK_FAMILY: test-nextjs_standalone-task
   ECS_WORKER_SERVICE: test-nextjs_standalone-worker-service
   ECS_WORKER_TASK_FAMILY: test-nextjs_standalone-worker-task
+  CF_COMMENT: test-nextjs_standalone-cdn
 
 permissions:
   id-token: write
@@ -6424,6 +6824,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -6580,7 +6998,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -6658,6 +7076,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -6665,8 +7093,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -6737,6 +7186,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -6837,8 +7290,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -7094,6 +7550,7 @@ env:
   ECS_TASK_FAMILY: test-nuxt_ssr-task
   ECS_WORKER_SERVICE: test-nuxt_ssr-worker-service
   ECS_WORKER_TASK_FAMILY: test-nuxt_ssr-worker-task
+  CF_COMMENT: test-nuxt_ssr-cdn
 
 permissions:
   id-token: write
@@ -7249,6 +7706,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -7405,7 +7880,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -7483,6 +7958,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -7490,8 +7975,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -7562,6 +8068,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -7662,8 +8172,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -8007,6 +8520,7 @@ env:
   ECS_TASK_FAMILY: test-rails_postgres-task
   ECS_WORKER_SERVICE: test-rails_postgres-worker-service
   ECS_WORKER_TASK_FAMILY: test-rails_postgres-worker-task
+  CF_COMMENT: test-rails_postgres-cdn
 
 permissions:
   id-token: write
@@ -8162,6 +8676,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -8318,7 +8850,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -8401,6 +8933,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -8408,8 +8950,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -8480,6 +9043,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -8580,8 +9147,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -8842,6 +9412,7 @@ env:
   ECS_TASK_FAMILY: test-sveltekit_node-task
   ECS_WORKER_SERVICE: test-sveltekit_node-worker-service
   ECS_WORKER_TASK_FAMILY: test-sveltekit_node-worker-task
+  CF_COMMENT: test-sveltekit_node-cdn
 
 permissions:
   id-token: write
@@ -8997,6 +9568,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -9153,7 +9742,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -9231,6 +9820,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -9238,8 +9837,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -9310,6 +9930,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -9410,8 +10034,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -9675,6 +10302,7 @@ env:
   ECS_TASK_FAMILY: test-vercel_edge_migration-task
   ECS_WORKER_SERVICE: test-vercel_edge_migration-worker-service
   ECS_WORKER_TASK_FAMILY: test-vercel_edge_migration-worker-task
+  CF_COMMENT: test-vercel_edge_migration-cdn
 
 permissions:
   id-token: write
@@ -9830,6 +10458,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -9986,7 +10632,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -10064,6 +10710,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -10071,8 +10727,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -10143,6 +10820,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -10243,8 +10924,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
@@ -10488,6 +11172,7 @@ env:
   ECS_TASK_FAMILY: test-vite_static_spa-task
   ECS_WORKER_SERVICE: test-vite_static_spa-worker-service
   ECS_WORKER_TASK_FAMILY: test-vite_static_spa-worker-task
+  CF_COMMENT: test-vite_static_spa-cdn
 
 permissions:
   id-token: write
@@ -10643,6 +11328,24 @@ jobs:
             --service \${{ env.ECS_WORKER_SERVICE }} \\
             --task-definition \${{ steps.register-worker-task-def.outputs.task-arn }} \\
             --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \\
+            --query "DistributionList.Items[?Comment=='\${{ env.CF_COMMENT }}'].Id | [0]" \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '\${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \\
+            --distribution-id "$DIST_ID" \\
+            --paths "/*" \\
             --region \${{ env.AWS_REGION }}"
 `;
 
@@ -10799,7 +11502,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: \${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -10877,6 +11580,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -10884,8 +11597,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -10956,6 +11690,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; \`grada alerts\` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "\${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -11056,8 +11794,11 @@ resource "aws_security_group" "alb" {
     to_port   = 80
     protocol  = "tcp"
     # CloudFront-only: the origin speaks plaintext HTTP, so direct browser
-    # access would bypass the CDN (and TLS on domained trees). Debugging
-    # via the direct URL needs a temporary personal-IP rule.
+    # access would bypass the CDN (and TLS on domained trees). The origin
+    # secret (random_password.origin_secret) proves WHICH distribution sent
+    # a request — the listener 403s anything without it. Debugging via the
+    # direct URL needs both a temporary personal-IP rule and the
+    # X-Grada-Origin-Secret header value from the Terraform state.
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 

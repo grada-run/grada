@@ -452,7 +452,7 @@ export function resolveMcpTransport(input = {}) {
 // every OS layout from one machine.
 export const MCP_INSTALL_EDITORS = ['windsurf', 'zed', 'cursor', 'vscode', 'claude-desktop', 'gemini-cli'];
 
-export const MCP_SERVER_CONFIG = { command: 'npx', args: ['grada-run', 'mcp'] };
+export const MCP_SERVER_CONFIG = { command: 'npx', args: ['--yes', 'grada-run', 'mcp'] };
 
 export function mcpInstallTarget(editor, homeDir = safeHomedir(), platform = os.platform()) {
     // No home, no target: null reads as "unresolvable" like an unknown

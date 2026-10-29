@@ -154,6 +154,7 @@ describe('logs: error filtering helpers', () => {
             region: 'eu-west-1',
         });
         expect(parseLogsArgs(['logs', '-f', '--tail=5'])).toEqual({ follow: true, tail: 5 });
+        expect(parseLogsArgs(['logs', '--workspace', 'pr-7'])).toEqual({ workspace: 'pr-7' });
         expect(parseLogsArgs(['logs'])).toEqual({});
     });
 });
@@ -193,6 +194,56 @@ describe('Command: logs (mocked CloudWatch Logs)', () => {
             expect(result.logs[0]).toContain('log line 71');
             expect(MockFilterLogEventsCommand).toHaveBeenCalledWith(expect.objectContaining({ limit: 10 }));
             expect(output).toHaveLength(10);
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('reads the newest N lines on groups larger than one page', async () => {
+        const oldPage = makeEvents(10).map((e, i) => ({ ...e, eventId: `p1-${i}`, message: `old line ${i + 1}` }));
+        const newPage = makeEvents(90).map((e, i) => ({ ...e, eventId: `p2-${i}`, message: `new line ${i + 1}` }));
+        mockLogsSend.mockImplementation((cmd) => {
+            if (cmd instanceof MockDescribeLogStreamsCommand) return Promise.resolve({ logStreams: [] });
+            if (cmd.nextToken === 's1') return Promise.resolve({ events: newPage });
+            if (cmd.limit === 10000) return Promise.resolve({ events: oldPage, nextToken: 's1' });
+            return Promise.resolve({ events: oldPage, nextToken: 't1' }); // small probe page
+        });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            const result = await runLogs({ service: 'api', tail: 10, region: 'us-east-2' });
+            expect(result.logs).toHaveLength(10);
+            expect(result.logs[0]).toContain('new line 81');
+            expect(result.logs[9]).toContain('new line 90');
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('fails loud on invalid --tail instead of silently defaulting', async () => {
+        const result = await runLogs({ tail: 'junk', region: 'us-east-2', json: true });
+        expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'invalid-tail', exitCode: 1 }));
+        expect(mockLogsSend).not.toHaveBeenCalled();
+        expect(trackEvent).toHaveBeenCalledWith('logs_streamed', expect.objectContaining({ success: false, error_code: 'INVALID_TAIL' }));
+    });
+
+    it('fails loud on invalid --since instead of silently defaulting', async () => {
+        const result = await runLogs({ since: 'not-a-duration', region: 'us-east-2', json: true });
+        expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'invalid-since', exitCode: 1 }));
+        expect(mockLogsSend).not.toHaveBeenCalled();
+        expect(trackEvent).toHaveBeenCalledWith('logs_streamed', expect.objectContaining({ success: false, error_code: 'INVALID_SINCE' }));
+    });
+
+    it('namespaces the log group with --workspace', async () => {
+        mockLogsSend.mockImplementation((cmd) => {
+            if (cmd instanceof MockDescribeLogStreamsCommand) return Promise.resolve({ logStreams: [] });
+            return Promise.resolve({ events: [] });
+        });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            const result = await runLogs({ projectName: 'myapp', workspace: 'pr-7', tail: 10, region: 'us-east-2' });
+            const filterCall = mockLogsSend.mock.calls.map(([c]) => c).find((c) => c instanceof MockFilterLogEventsCommand);
+            expect(filterCall.logGroupName).toBe('/ecs/myapp-pr-7');
+            expect(result.logGroup).toBe('/ecs/myapp-pr-7');
         } finally {
             consoleSpy.mockRestore();
         }

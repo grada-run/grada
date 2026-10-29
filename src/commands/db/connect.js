@@ -271,11 +271,7 @@ async function runDbConnectMain(input = {}) {
             region,
         });
 
-        // Telemetry carries only non-sensitive fields. Credentials never leave this process
-        // except to the terminal above and the local SSM session below.
-        await trackSuccess('db_connect_run', { projectName, db_engine: target.engine || 'unknown', db_kind: target.kind });
-
-        await new Promise((resolve) => {
+        const { code } = await new Promise((resolve) => {
             const child = spawnImpl('aws', ssmArgs, { stdio: 'inherit' });
             child.on('error', (err) => {
                 console.log(color.red(`\n✖ Failed to start AWS CLI: ${err?.message || err}`));
@@ -283,15 +279,26 @@ async function runDbConnectMain(input = {}) {
                 resolve({ code: 1 });
             });
             child.on('close', (code) => resolve({ code: code ?? 0 }));
-        }).then(async ({ code }) => {
-            if (code === 0) {
-                outro(color.green('Tunnel closed. 👋'));
-            } else {
-                console.log(color.yellow(`\nTunnel exited with code ${code}.`));
-                console.log(color.dim('If the connection failed, ensure the Session Manager plugin is installed and your AWS session is fresh.'));
-                outro(color.yellow('Db connect finished.'));
-            }
         });
+
+        // Telemetry carries only non-sensitive fields. Credentials never leave this process
+        // except to the terminal above and the local SSM session below.
+        // Success is recorded only for a clean tunnel exit: a failed tunnel
+        // reports the tunnel's own exit code instead of ok:true (BUG-103).
+        if (code !== 0) {
+            const tunnelCode = Number.isInteger(code) && code > 0 ? Math.min(code, 255) : 1;
+            return failCommand({
+                message: `\n✖ Database tunnel exited with code ${code}.`,
+                hint: '  If the connection failed, ensure the Session Manager plugin is installed and your AWS session is fresh.\n',
+                event: 'db_connect_run',
+                telemetry: { projectName, error_code: 'TUNNEL_EXIT_NONZERO', exit_code: tunnelCode },
+                reason: 'tunnel-exit-nonzero',
+                resultExtra: { cluster, service, dbIdentifier, localPort, region },
+                exitCode: tunnelCode,
+            });
+        }
+        await trackSuccess('db_connect_run', { projectName, db_engine: target.engine || 'unknown', db_kind: target.kind });
+        outro(color.green('Tunnel closed. 👋'));
 
         return { ok: true, cluster, service, dbIdentifier, taskArn: jumpHost.taskArn, localPort, region };
     } catch (error) {

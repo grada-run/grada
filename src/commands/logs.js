@@ -3,7 +3,7 @@ import color from 'picocolors';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, isComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveLogGroup, resolveCwd, isComputeTarget, withWorkspaceNamespace } from '../utils/resolvers.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { sleep } from '../utils/system.js';
 
@@ -38,6 +38,18 @@ export function normalizeTailLines(value) {
     const n = typeof value === 'string' && value.trim() === '' ? NaN : parseInt(value, 10);
     if (!Number.isFinite(n) || n < 1) return DEFAULT_TAIL_LINES;
     return n;
+}
+
+function isValidTailLines(value) {
+    if (typeof value === 'number') return Number.isInteger(value) && value >= 1;
+    if (typeof value === 'string') return /^\d+$/.test(value.trim()) && parseInt(value, 10) >= 1;
+    return false;
+}
+
+function isValidSinceDuration(value) {
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value === 'string') return SINCE_RE.test(value.trim());
+    return false;
 }
 
 export function parseSinceDuration(input) {
@@ -86,7 +98,7 @@ export function parseLogsArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'logs') args.shift();
     const { options, rest, unknown } = parseFlags(args, {
-        string: ['since', 'region'],
+        string: ['since', 'region', 'workspace'],
         number: ['tail'],
         boolean: ['headless'],
         bareBoolean: ['follow', 'error'],
@@ -101,6 +113,44 @@ export function parseLogsArgs(argv = []) {
 function eventKey(event) {
     if (event.eventId) return `id:${event.eventId}`;
     return `${event.timestamp}:${event.message}`;
+}
+
+// Fetches the most recent matching events from a log group.
+// FilterLogEvents pages oldest-first, so slicing the first page shows the
+// OLDEST N on groups larger than one page (BUG-87). This probes with a
+// small page (cheap when the group fits), and only multi-page groups pay
+// for a wide-page scan to the live edge; a rolling window keeps memory
+// O(tail). Returns `{ events, nextToken }` — the trailing window plus the
+// last valid page token (for follow-mode continuation).
+export async function fetchLatestEvents(logsClient, baseInput = {}, { tail = DEFAULT_TAIL_LINES, onlyErrors = false } = {}) {
+    const want = Math.max(1, tail);
+    const probeSize = Math.min(want, 10000);
+    const first = await logsClient.send(new FilterLogEventsCommand({ ...baseInput, limit: probeSize }));
+    if (!first.nextToken) {
+        const events = first.events || [];
+        return {
+            events: (onlyErrors ? events.filter((e) => isErrorLine(e.message)) : events).slice(-want),
+            nextToken: undefined,
+        };
+    }
+    const window = [];
+    let nextToken;
+    let lastToken;
+    do {
+        const resp = await logsClient.send(new FilterLogEventsCommand({
+            ...baseInput,
+            limit: 10000,
+            ...(nextToken ? { nextToken } : {}),
+        }));
+        const events = onlyErrors ? (resp.events || []).filter((e) => isErrorLine(e.message)) : (resp.events || []);
+        for (const event of events) {
+            window.push(event);
+            if (window.length > want) window.shift();
+        }
+        if (resp.nextToken) lastToken = resp.nextToken;
+        nextToken = resp.nextToken;
+    } while (nextToken);
+    return { events: window, nextToken: lastToken };
 }
 
 export function isNotFoundError(error) {
@@ -145,8 +195,12 @@ async function runLogsMain(input = {}) {
     try {
         cwd = resolveCwd(options);
         region = resolveRegion(options, cwd);
-        service = resolveServiceName(options, cwd);
-        logGroup = resolveLogGroup(options, cwd);
+        // Workspace-namespaced resources (BUG-90): --workspace (or the
+        // local .terraform/environment) targets a preview stack like
+        // rollback and db do. Explicit flags/env keep winning.
+        const namespacedOptions = withWorkspaceNamespace(options, cwd);
+        service = resolveServiceName(namespacedOptions, cwd);
+        logGroup = resolveLogGroup(namespacedOptions, cwd);
     } catch {
         return failProjectNotInitialized({ event: 'logs_streamed' });
     }
@@ -157,6 +211,32 @@ async function runLogsMain(input = {}) {
     // a service stream-prefix filter would hide every event on that target.
     const isLambda = isComputeTarget(cwd, 'lambda');
     const explicitService = hasExplicitService(options) && !isLambda;
+
+    // Explicit garbage fails loud (BUG-107): silently substituting defaults
+    // for a mistyped --tail/--since shows logs the user never asked for.
+    // Absent flags still default via the normalizers below.
+    const rawTail = options.tail ?? options.tailLines ?? options.lines;
+    if (rawTail !== undefined && !isValidTailLines(rawTail)) {
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: `\n✖ Invalid --tail "${rawTail}". Pass a positive integer (line count).\n`,
+            event: 'logs_streamed',
+            telemetry: { projectName: resolveProjectName(options, cwd) },
+            errorCode: 'INVALID_TAIL',
+            reason: 'invalid-tail',
+        });
+    }
+    const rawSince = options.since ?? options.sinceDuration;
+    if (rawSince !== undefined && !isValidSinceDuration(rawSince)) {
+        return failCommand({
+            noExit: isProgrammaticCall(options),
+            message: `\n✖ Invalid --since "${rawSince}". Pass a duration like 30s, 5m, 1h, or 7d.\n`,
+            event: 'logs_streamed',
+            telemetry: { projectName: resolveProjectName(options, cwd) },
+            errorCode: 'INVALID_SINCE',
+            reason: 'invalid-since',
+        });
+    }
 
     const sinceRaw = options.since ?? options.sinceDuration ?? (follow ? undefined : DEFAULT_SINCE);
     const startTime = sinceRaw === undefined ? undefined : Date.now() - parseSinceDuration(sinceRaw);
@@ -194,40 +274,47 @@ async function runLogsMain(input = {}) {
 
         const seen = new Set();
         const collected = [];
-        let nextToken;
-        let polls = 0;
-        let firstPoll = true;
+        const dedupe = (e) => {
+            const key = eventKey(e);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        };
+        const baseInput = { logGroupName: logGroup };
+        if (startTime !== undefined) baseInput.startTime = startTime;
+        if (explicitService) baseInput.logStreamNamePrefix = service;
 
-        do {
-            const input = { logGroupName: logGroup, limit: Math.min(Math.max(tail, 1), 10000) };
-            if (startTime !== undefined) input.startTime = startTime;
-            if (explicitService) input.logStreamNamePrefix = service;
-            if (nextToken) input.nextToken = nextToken;
+        // First poll starts at the live edge (see fetchLatestEvents):
+        // slicing an unscanned first page would show the OLDEST N.
+        const edge = await fetchLatestEvents(logsClient, baseInput, { tail, onlyErrors });
+        let nextToken = edge.nextToken;
+        let polls = 1;
+        for (const event of edge.events.filter(dedupe)) {
+            console.log(formatLogLine(event));
+            collected.push(String(event.message ?? ''));
+        }
+        if (follow && !stopped && polls < maxPolls) {
+            do {
+                await sleep(pollIntervalMs);
+                const input = { ...baseInput, limit: Math.min(Math.max(tail, 1), 10000) };
+                if (nextToken) input.nextToken = nextToken;
 
-            const resp = await logsClient.send(new FilterLogEventsCommand(input));
-            if (resp.nextToken) nextToken = resp.nextToken;
+                const resp = await logsClient.send(new FilterLogEventsCommand(input));
+                if (resp.nextToken) nextToken = resp.nextToken;
 
-            if (seen.size > 5000) seen.clear();
+                if (seen.size > 5000) seen.clear();
 
-            let fresh = (resp.events || []).filter((e) => {
-                const key = eventKey(e);
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
-            });
-            if (onlyErrors) fresh = fresh.filter((e) => isErrorLine(e.message));
-            if (firstPoll) fresh = fresh.slice(-tail);
+                let fresh = (resp.events || []).filter(dedupe);
+                if (onlyErrors) fresh = fresh.filter((e) => isErrorLine(e.message));
 
-            for (const event of fresh) {
-                console.log(formatLogLine(event));
-                collected.push(String(event.message ?? ''));
-            }
+                for (const event of fresh) {
+                    console.log(formatLogLine(event));
+                    collected.push(String(event.message ?? ''));
+                }
 
-            firstPoll = false;
-            polls += 1;
-            if (!follow || stopped || polls >= maxPolls) break;
-            await sleep(pollIntervalMs);
-        } while (true);
+                polls += 1;
+            } while (!stopped && polls < maxPolls);
+        }
 
         if (collected.length === 0) {
             console.log(color.cyan(`\nℹ Waiting for logs...`));

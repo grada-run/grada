@@ -150,7 +150,7 @@ resource "aws_ecs_task_definition" "app" {
   lifecycle {
     precondition {
       condition     = length(setintersection(toset(local.secret_keys), toset(local.managed_env_names))) == 0
-      error_message = "secret_keys.json collides with container environment: ${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically)."
+      error_message = "secret_keys.json collides with container environment: ${join(", ", setintersection(toset(local.secret_keys), toset(local.managed_env_names)))}. Remove the key(s) from .env and re-push (push skips them automatically). If push does not skip the key, this guard list is stale — remove the entry from managed_env_names in terraform/main.tf."
     }
   }
 
@@ -228,6 +228,16 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# Origin secret (BUG-91): only requests bearing the header CloudFront
+# injects may reach the app. The CloudFront edge-IP security group alone
+# cannot prove WHICH distribution sent a request — any tenant's distro
+# could point at this ALB — so the listener forwards solely on a header
+# match and 403s everything else (including direct ALB hits).
+resource "random_password" "origin_secret" {
+  length  = 32
+  special = false
+}
+
 # trivy:ignore:AVD-AWS-0054 - CloudFront handles HTTPS edge termination; ALB uses HTTP to avoid complex ACM DNS validation for users
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -235,8 +245,29 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_secret" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Grada-Origin-Secret"
+      values           = [random_password.origin_secret.result]
+    }
   }
 }
 
@@ -307,6 +338,10 @@ output "ecr_repository_url" {
 }
 
 # --- CloudWatch Alarms ---
+# State-only alarm: visible in the console, notifies nobody. There is no
+# notification destination at scaffold time; `grada alerts` provisions
+# separate alarms wired to SNS, and this one stays as a console signal so
+# quiet trees still show red (BUG-101).
 resource "aws_cloudwatch_metric_alarm" "alb_5xx_errors" {
   alarm_name          = "${local.app_name}-high-5xx-errors"
   comparison_operator = "GreaterThanThreshold"

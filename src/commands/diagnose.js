@@ -1,6 +1,6 @@
 import { spawnSync } from 'child_process';
 import { ECSClient, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/client-ecs';
-import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
@@ -8,8 +8,9 @@ import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, 
 import { normalizeOptions } from '../utils/args.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix, resolveNamespacedProject, withWorkspaceNamespace } from '../utils/resolvers.js';
 import { pickNewestRunningTask } from '../utils/ecs.js';
+import { fetchLatestEvents } from './logs.js';
 
 export const LOG_FETCH_LIMIT = 50;
 
@@ -106,9 +107,10 @@ export async function runLambdaDiagnose(input = {}) {
     const projectName = options.projectName;
     const region = options.region;
     const logGroup = options.logGroup;
+    const namespacedProject = resolveNamespacedProject(projectName, options, options.cwd);
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : `${projectName}${readResourceSuffix(options.cwd)}-fn`;
+        : `${namespacedProject}${readResourceSuffix(options.cwd)}-fn`;
     const runSync = options.spawnSyncImpl || spawnSync;
 
     intro(color.bgCyan(color.black(' grada diagnose 🩺 ')));
@@ -180,12 +182,11 @@ export async function runLambdaDiagnose(input = {}) {
     let logFetchFailed = false;
     let fetchError = '';
     try {
-        const logsResp = await logsClient.send(new FilterLogEventsCommand({
+        const { events } = await fetchLatestEvents(logsClient, {
             logGroupName: logGroup,
             startTime: Date.now() - 60 * 60 * 1000,
-            limit: LOG_FETCH_LIMIT,
-        }));
-        logs = (logsResp.events || []).slice(-LOG_FETCH_LIMIT).map((e) => e.message);
+        }, { tail: LOG_FETCH_LIMIT });
+        logs = events.map((e) => e.message);
     } catch (logsError) {
         if (handleAuthErrorBranch(logsError, s, options)) return;
         if (isLogGroupNotFoundError(logsError)) {
@@ -257,8 +258,13 @@ async function runDiagnoseMain(input = {}) {
         cwd = resolveCwd(options);
         projectName = resolveProjectName(options, cwd);
         region = resolveRegion(options, cwd);
-        cluster = resolveCluster(options, cwd);
-        logGroup = resolveLogGroup(options, cwd);
+        // Workspace-namespaced resources (BUG-90): --workspace (or the
+        // local .terraform/environment) targets a preview stack like
+        // rollback and db do. Explicit flags/env keep winning; telemetry
+        // keeps the raw project name.
+        const namespacedOptions = withWorkspaceNamespace(options, cwd);
+        cluster = resolveCluster(namespacedOptions, cwd);
+        logGroup = resolveLogGroup(namespacedOptions, cwd);
     } catch {
         return failProjectNotInitialized({ event: 'diagnose_run', noExit });
     }
@@ -410,8 +416,8 @@ async function runDiagnoseMain(input = {}) {
             : '';
 
         const fetchLogMessages = async (input) => {
-            const logsResp = await logsClient.send(new FilterLogEventsCommand(input));
-            return (logsResp.events || []).slice(-LOG_FETCH_LIMIT).map((e) => e.message);
+            const { events } = await fetchLatestEvents(logsClient, input, { tail: LOG_FETCH_LIMIT });
+            return events.map((e) => e.message);
         };
 
         let logs = [];

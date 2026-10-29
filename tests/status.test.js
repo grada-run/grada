@@ -67,6 +67,7 @@ describe('status: CLI args', () => {
         });
         expect(parseStatusArgs(['status', '--region=us-west-2'])).toEqual({ region: 'us-west-2' });
         expect(parseStatusArgs(['status', '--watch'])).toEqual({ watch: true });
+        expect(parseStatusArgs(['status', '--workspace', 'pr-7'])).toEqual({ workspace: 'pr-7' });
         expect(parseStatusArgs(['status'])).toEqual({});
     });
 });
@@ -128,6 +129,21 @@ describe('Command: status (mocked ECS + CloudWatch)', () => {
             expect(text).toContain('myapp-service');
             expect(text).toContain('2/2');
             expect(text).toContain('[OK]');
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('namespaces cluster and service with --workspace', async () => {
+        const ecsClient = mockEcsClient(healthyService);
+        const cloudWatchClient = mockCloudWatchClient([]);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await runStatus({ projectName: 'myapp', workspace: 'pr-7', region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients() });
+            expect(result.healthy).toBe(true);
+            const describeCall = ecsClient.send.mock.calls.map(([c]) => c).find((c) => c.constructor.name === 'DescribeServicesCommand');
+            expect(describeCall.input).toMatchObject({ cluster: 'myapp-pr-7-cluster', services: ['myapp-pr-7-service'] });
         } finally {
             consoleSpy.mockRestore();
         }

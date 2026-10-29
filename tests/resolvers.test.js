@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix, readRenderedContainerEnvNames } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix, readRenderedContainerEnvNames } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -127,6 +127,7 @@ describe('readRenderedContainerEnvNames', () => {
             'environment = [',
             '  { "name" : "PORT", "value" : "3000" },',
             ']',
+            'secrets = concat([], [])',
             '',
         ].join('\n'));
         expect(readRenderedContainerEnvNames(dir)).toEqual(['PORT']);
@@ -134,9 +135,33 @@ describe('readRenderedContainerEnvNames', () => {
 
     it('unions main.tf and worker.tf', () => {
         const dir = makeTmp();
-        writeTf(dir, 'main.tf', 'environment = [\n  { "name" : "PORT", "value" : "3000" },\n]\n');
-        writeTf(dir, 'worker.tf', 'environment = [\n  { "name" : "NODE_ENV", "value" : "production" },\n]\n');
+        writeTf(dir, 'main.tf', 'environment = [\n  { "name" : "PORT", "value" : "3000" },\n]\nsecrets = concat([], [])\n');
+        writeTf(dir, 'worker.tf', 'environment = [\n  { "name" : "NODE_ENV", "value" : "production" },\n]\nsecrets = concat([], [])\n');
         expect(readRenderedContainerEnvNames(dir)).toEqual(['NODE_ENV', 'PORT']);
+    });
+
+    it('excludes sidecar container names and env (no secrets block)', () => {
+        const dir = makeTmp();
+        writeTf(dir, 'main.tf', [
+            '{',
+            '  name      = "myapp-container"',
+            '  environment = [',
+            '    { "name" : "PORT", "value" : "3000" },',
+            '  ]',
+            '  secrets = concat([], [])',
+            '},',
+            '{',
+            '  name      = "otel_sidecar"',
+            '  environment = [',
+            '    { "name" : "OTEL_TOKEN", "value" : "x" },',
+            '  ]',
+            '  logConfiguration = {}',
+            '}',
+            '',
+        ].join('\n'));
+        // OTEL_TOKEN shares no container with any secret: pushing it is
+        // safe, so it must not enter the managed set (BUG-93).
+        expect(readRenderedContainerEnvNames(dir)).toEqual(['PORT']);
     });
 });
 
@@ -334,6 +359,16 @@ describe('resolveAppName', () => {
         fs.mkdirSync(path.join(dir, '.terraform'), { recursive: true });
         fs.writeFileSync(path.join(dir, '.terraform', 'environment'), 'pr-42\n');
         expect(resolveAppName('myapp', undefined, dir)).toBe('myapp-pr-42');
+    });
+
+    it('namespaces options for multi-resource commands', () => {
+        const dir = makeTmp();
+        const namespaced = withWorkspaceNamespace({ projectName: 'myapp', workspace: 'pr-7' }, dir);
+        expect(namespaced.projectName).toBe('myapp-pr-7');
+        expect(namespaced.workspace).toBe('pr-7');
+        expect(withWorkspaceNamespace({ projectName: 'myapp' }, dir).projectName).toBe('myapp');
+        expect(resolveNamespacedProject('myapp', { workspace: 'pr-7' }, dir)).toBe('myapp-pr-7');
+        expect(resolveNamespacedProject('myapp', {}, dir)).toBe('myapp');
     });
 });
 

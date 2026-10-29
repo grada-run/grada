@@ -268,6 +268,22 @@ describe('Secrets Push Command', () => {
         expect(result).toEqual(expect.objectContaining({ keysChanged: false }));
     });
 
+    it('skips the ECS restart when the user escapes the confirm prompt (cancel symbol)', async () => {
+        await fs.writeFile('.env', 'API_KEY=newvalue');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
+        mockSend.mockResolvedValueOnce({});
+        mockConfirm.mockResolvedValueOnce(Symbol('clack:cancel'));
+
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: false });
+
+        expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
+            message: 'Keys are unchanged. Trigger a rolling ECS restart to apply new values immediately?',
+        }));
+        expect(mockEcsSend).not.toHaveBeenCalled();
+        expect(result).toEqual(expect.objectContaining({ keysChanged: false }));
+        expect(result.restarted).not.toBe(true);
+    });
+
     it('skips the ECS restart prompt in headless mode without hanging', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
@@ -976,8 +992,15 @@ describe('Secrets managed-env helpers (BUG-79)', () => {
     });
 
     it('returns the target base set when no database or addon files exist', async () => {
-        await expect(getManagedEnvNames(testDir, 'ecs')).resolves.toEqual(['NODE_ENV', 'PORT']);
+        // Workerless ECS trees inject no NODE_ENV (BUG-95): it stays a
+        // legitimate custom key, not a managed name.
+        await expect(getManagedEnvNames(testDir, 'ecs')).resolves.toEqual(['PORT']);
         await expect(getManagedEnvNames(testDir, 'lambda')).resolves.toEqual(['APP_SECRETS_ARN', 'AWS_LWA_PORT', 'PORT']);
+    });
+
+    it('manages NODE_ENV only when the worker renders (worker.tf present)', async () => {
+        await fs.writeFile(path.join('terraform', 'worker.tf'), '# worker');
+        expect(await getManagedEnvNames(testDir, 'ecs')).toContain('NODE_ENV');
     });
 
     it('adds DB names for database files and addon names per enabled capability file', async () => {
@@ -998,7 +1021,7 @@ describe('Secrets managed-env helpers (BUG-79)', () => {
     it('unions rendered container env names over the map-based set', async () => {
         await fs.writeFile(
             path.join('terraform', 'main.tf'),
-            'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\n'
+            'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\nsecrets = concat([], [])\n'
         );
         const names = await getManagedEnvNames(process.cwd(), 'ecs');
         expect(names).toContain('CUSTOM_COMPOSE_VAR');
@@ -1237,6 +1260,28 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         expect(result).toMatchObject({ skipped: [] });
     });
 
+    it('--yes colliding push warns that the preflight backstops the bypass', async () => {
+        await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
+        await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            const result = await pushSecrets('.env', 'my-project', { isHeadless: true, yes: true });
+
+            expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+                SecretString: JSON.stringify({ REDIS_URL: 'redis://custom:6379' }),
+            }));
+            expect(result).toMatchObject({ skipped: [] });
+            const text = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+            expect(text).toContain('REDIS_URL');
+            expect(text).toMatch(/--yes|anyway/i);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
     it('skipped keys never trigger the removal confirm', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'KEPT=1\nREDIS_URL=redis://custom:6379');
@@ -1257,6 +1302,47 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         }
     });
 
+    it('names stale vault values deleted for skipped keys without confirming', async () => {
+        await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
+        await fs.writeFile('.env', 'KEPT=1\nREDIS_URL=redis://custom:6379');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', REDIS_URL: 'old' }) });
+        mockSend.mockResolvedValueOnce({});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            await pushSecrets('.env', 'my-project', { isHeadless: false });
+
+            // The stale REDIS_URL vault value is wiped by the full-replace
+            // write: named loudly, acknowledged by the skip (no confirm).
+            expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('REDIS_URL'));
+            expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/stale/i));
+            expect(mockConfirm).not.toHaveBeenCalled();
+            expect(trackEvent).toHaveBeenCalledWith('secrets_pushed', expect.objectContaining({
+                stale_skipped_count: 1,
+                skipped_count: 1,
+            }));
+            expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+                SecretString: JSON.stringify({ KEPT: '1' }),
+            }));
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('pushes NODE_ENV on workerless trees instead of false-skipping it', async () => {
+        // No worker.tf: nothing injects NODE_ENV, so it is deployable.
+        await fs.writeFile('.env', 'NODE_ENV=production\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({});
+
+        const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(MockUpdateSecretCommand).toHaveBeenCalledWith(expect.objectContaining({
+            SecretString: JSON.stringify({ NODE_ENV: 'production', API_KEY: 'abc' }),
+        }));
+        expect(result).toMatchObject({ skipped: [] });
+    });
+
     it('aborts rather than pushing an empty set when every key is skipped', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
@@ -1271,7 +1357,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('push guard covers rendered compose-injected env names', async () => {
         await fs.writeFile(
             path.join('terraform', 'main.tf'),
-            'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\n'
+            'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\nsecrets = concat([], [])\n'
         );
         await fs.writeFile('.env', 'CUSTOM_COMPOSE_VAR=1\nAPI_KEY=abc');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });

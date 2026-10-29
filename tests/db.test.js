@@ -463,6 +463,17 @@ describe('Command: db connect (mocked AWS + spawn)', () => {
         assertNoCredentialLeak();
     });
 
+    it('reports tunnel failure with the tunnel exit code instead of success', async () => {
+        const calls = [];
+        const result = await runDbConnect({ ...baseOptions(), ...healthyClients(), spawnImpl: mockSpawnImpl(calls, 3) });
+
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('tunnel-exit-nonzero');
+        expect(exitSpy).toHaveBeenCalledWith(3);
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: false, error_code: 'TUNNEL_EXIT_NONZERO', exit_code: 3 }));
+        expect(mockTrackEvent).not.toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: true }));
+    });
+
     it('reveals credentials and uses a custom local port when requested', async () => {
         const calls = [];
         const result = await runDbConnect({
@@ -1572,9 +1583,9 @@ describe('db migrate: gate helpers', () => {
     it('buildRunnerInvocation pins known versions and floats unknown ones', () => {
         expect(buildRunnerInvocation('0.40.15')).toBe('npx --yes @grada-run/grada@0.40.15');
         expect(buildRunnerInvocation('  0.40.15  ')).toBe('npx --yes @grada-run/grada@0.40.15');
-        expect(buildRunnerInvocation('unknown')).toBe('npx grada-run');
-        expect(buildRunnerInvocation('')).toBe('npx grada-run');
-        expect(buildRunnerInvocation(undefined)).toBe('npx grada-run');
+        expect(buildRunnerInvocation('unknown')).toBe('npx --yes grada-run');
+        expect(buildRunnerInvocation('')).toBe('npx --yes grada-run');
+        expect(buildRunnerInvocation(undefined)).toBe('npx --yes grada-run');
     });
 
     it('injected gates pin the installing CLI version', () => {
@@ -1591,7 +1602,7 @@ describe('db migrate: gate helpers', () => {
         const previewed = injectPreviewMigrationGate(preview, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.40.15' });
         expect(previewed).toContain('npx --yes @grada-run/grada@0.40.15 db migrate');
         const unpinned = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs' });
-        expect(unpinned).toContain('npx grada-run db migrate');
+        expect(unpinned).toContain('npx --yes grada-run db migrate');
         expect(unpinned).not.toContain('@grada-run/grada@');
     });
 

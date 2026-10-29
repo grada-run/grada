@@ -38,10 +38,10 @@ const HELP_TEXT = [
     '  deploy               Alias of apply',
     '  destroy              Tear down infrastructure (--yes, --allow-data-loss, --force-unlock, --force, --progress)',
     '  doctor               Run pre-flight dependency checks (--deep)',
-    '  logs [service]       Stream CloudWatch logs (--tail, -f/--follow, --error, --since, --region)',
-    '  status               Service health dashboard (--region, --json, --watch)',
+    '  logs [service]       Stream CloudWatch logs (--tail, -f/--follow, --error, --since, --region, --workspace)',
+    '  status               Service health dashboard (--region, --json, --watch, --workspace)',
     '  rollback [rev]       Roll back ECS service to a previous task revision (ECS only — Lambda uses image tags)',
-    '  exec                 Open an interactive shell in a running container (--cluster, --service, --container, --command, --region)',
+    '  exec                 Open an interactive shell in a running container (--cluster, --service, --container, --command, --region, --workspace)',
     '  db connect           Open a secure local tunnel to your database (--port, --show-credentials, --workspace, --region)',
     '  db enable-vector     Enable the pgvector extension via a one-off ECS task (--task-def, --timeout)',
     '  db import            Import a SQL dump into your database (--file, --from, --yes)',
@@ -95,12 +95,22 @@ const { positionalArgs, isHeadless, isDryRun, isPreconfigured, autoApprove, yes:
 const COMMAND_ALIASES = { deploy: 'apply' };
 const dispatchCommand = COMMAND_ALIASES[positionalArgs[0]] ?? positionalArgs[0];
 
-function parseRegionFlag(args) {
+function parseStringFlag(args, name) {
+    const flag = `--${name}`;
+    const prefix = `--${name}=`;
     for (let i = 0; i < args.length; i++) {
-        if (args[i] === '--region' && i + 1 < args.length) return args[i + 1];
-        if (args[i].startsWith('--region=')) return args[i].slice('--region='.length);
+        if (args[i] === flag && i + 1 < args.length) return args[i + 1];
+        if (args[i].startsWith(prefix)) return args[i].slice(prefix.length);
     }
     return undefined;
+}
+
+function parseRegionFlag(args) {
+    return parseStringFlag(args, 'region');
+}
+
+function parseWorkspaceFlag(args) {
+    return parseStringFlag(args, 'workspace');
 }
 
 // Dispatch guard: every command promise ends here so an unexpected rejection
@@ -153,7 +163,7 @@ if (wantsVersion) {
 } else if (positionalArgs[0] === 'sync-ai') {
     runCommand(syncAi());
 } else if (positionalArgs[0] === 'diagnose' || positionalArgs[0] === 'wtf') {
-    runCommand(runDiagnose(headlessOptions));
+    runCommand(runDiagnose({ ...headlessOptions, workspace: parseWorkspaceFlag(rawArgs) }));
 } else if (positionalArgs[0] === 'logs') {
     runCommand(runLogs({ ...parseLogsArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'status') {

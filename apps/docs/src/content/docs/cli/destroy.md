@@ -8,7 +8,7 @@ Permanently delete the AWS infrastructure created by `apply` when a project is r
 ## What it does
 
 - Finds your database first: with a live database, destruction needs the data-loss hatch — confirm the prompt naming the cluster, or pass `--allow-data-loss` in automation.
-- Takes a pre-destroy snapshot checkpoint before tearing anything down (skipped only with `--allow-data-loss`); a failed snapshot aborts the run.
+- Takes a pre-destroy snapshot checkpoint before tearing anything down (skipped only with `--allow-data-loss`); the destroy waits for the snapshot to complete, and a failed or timed-out snapshot aborts the run with the database untouched.
 - Wakes a stopped database back to `available` first, so retiring an asleep environment succeeds instead of failing mid-destroy.
 - Empties every Terraform-managed S3 bucket before handing off to Terraform, so destroys never trip `BucketNotEmpty`.
 - Asks whether to also delete the S3 state bucket — answering "No" keeps it so `apply` can restore the infrastructure later. `--yes` deletes without asking.

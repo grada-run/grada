@@ -691,7 +691,7 @@ describe('installMcpConfig', () => {
             expect(result).toMatchObject({ ok: true, editor: 'vscode' });
             expect(result.path).toBe(path.join(home, '.config', 'Code', 'User', 'mcp.json'));
             expect(JSON.parse(fs.readFileSync(result.path, 'utf-8'))).toEqual({
-                servers: { grada: { command: 'npx', args: ['grada-run', 'mcp'] } },
+                servers: { grada: { command: 'npx', args: ['--yes', 'grada-run', 'mcp'] } },
             });
         } finally {
             fs.rmSync(home, { recursive: true, force: true });
@@ -704,7 +704,7 @@ describe('installMcpConfig', () => {
             const result = installMcpConfig('windsurf', { homeDir: home });
             expect(result).toMatchObject({ ok: true, alreadyInstalled: false, editor: 'windsurf' });
             expect(JSON.parse(fs.readFileSync(result.path, 'utf-8'))).toEqual({
-                mcpServers: { grada: { command: 'npx', args: ['grada-run', 'mcp'] } },
+                mcpServers: { grada: { command: 'npx', args: ['--yes', 'grada-run', 'mcp'] } },
             });
         } finally {
             fs.rmSync(home, { recursive: true, force: true });
@@ -726,7 +726,7 @@ describe('installMcpConfig', () => {
                 theme: 'One Dark',
                 context_servers: {
                     other: { command: 'other-mcp' },
-                    grada: { command: 'npx', args: ['grada-run', 'mcp'] },
+                    grada: { command: 'npx', args: ['--yes', 'grada-run', 'mcp'] },
                 },
             });
         } finally {
@@ -747,6 +747,23 @@ describe('installMcpConfig', () => {
         }
     });
 
+    it('upgrades a legacy entry without --yes to the current block', () => {
+        const home = makeHome();
+        try {
+            const configPath = path.join(home, '.codeium', 'windsurf', 'mcp_config.json');
+            fs.mkdirSync(path.dirname(configPath), { recursive: true });
+            fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { grada: { command: 'npx', args: ['grada-run', 'mcp'] } } }));
+            const result = installMcpConfig('windsurf', { homeDir: home });
+            expect(result).toMatchObject({ ok: true, alreadyInstalled: false });
+            expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).mcpServers.grada).toEqual({
+                command: 'npx',
+                args: ['--yes', 'grada-run', 'mcp'],
+            });
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+
     it('overwrites a stale grada entry with the current block', () => {
         const home = makeHome();
         try {
@@ -757,7 +774,7 @@ describe('installMcpConfig', () => {
             expect(result).toMatchObject({ ok: true, alreadyInstalled: false });
             expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).mcpServers.grada).toEqual({
                 command: 'npx',
-                args: ['grada-run', 'mcp'],
+                args: ['--yes', 'grada-run', 'mcp'],
             });
         } finally {
             fs.rmSync(home, { recursive: true, force: true });
@@ -876,7 +893,7 @@ describe('runMcp --install', () => {
             expect(result).toMatchObject({ ok: true, editor: 'windsurf' });
             expect(JSON.parse(fs.readFileSync(result.path, 'utf-8')).mcpServers.grada).toEqual({
                 command: 'npx',
-                args: ['grada-run', 'mcp'],
+                args: ['--yes', 'grada-run', 'mcp'],
             });
             expect(trackSuccess).toHaveBeenCalledWith('mcp_install', { editor: 'windsurf', already_installed: false });
         } finally {

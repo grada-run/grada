@@ -465,8 +465,12 @@ async function removeUntaggedImages({ ecrClient }, images) {
     }
     for (const [repositoryName, imageIds] of byRepo) {
         for (const batch of chunkArray(imageIds, ECR_BATCH_DELETE_LIMIT)) {
-            await ecrClient.send(new BatchDeleteImageCommand({ repositoryName, imageIds: batch }));
-            deletedImages += batch.length;
+            const resp = await ecrClient.send(new BatchDeleteImageCommand({ repositoryName, imageIds: batch }));
+            const failed = resp?.failures?.length ?? 0;
+            if (failed > 0) {
+                console.log(color.yellow(`⚠ ${failed} of ${batch.length} image(s) in ${repositoryName} failed to delete (${resp.failures[0]?.failureCode || 'unknown'}).`));
+            }
+            deletedImages += batch.length - failed;
         }
     }
     return deletedImages;
@@ -492,8 +496,22 @@ async function releaseUnattachedEips({ ec2Client }, eips) {
 
 export async function deleteDiscoveredResources(clients, discovered) {
     const summary = {};
+    const errors = [];
     for (const target of GC_TARGETS.filter((entry) => entry.scope === 'standard' && typeof entry.remove === 'function')) {
-        summary[target.summary] = await target.remove(clients, discovered[target.field] || []);
+        try {
+            summary[target.summary] = await target.remove(clients, discovered[target.field] || []);
+        } catch (error) {
+            // One target's API failure must not strand the rest (BUG-105):
+            // record it, zero its count, and keep deleting.
+            errors.push({ target: target.summary, error });
+            summary[target.summary] = 0;
+        }
+    }
+    if (errors.length > 0) {
+        const failure = new Error(`gc deletion partially failed: ${errors.map(({ target, error }) => `${target} (${error?.message || error})`).join('; ')}`);
+        failure.partialSummary = summary;
+        failure.failures = errors;
+        throw failure;
     }
     return summary;
 }
@@ -718,7 +736,21 @@ async function runGcMain(input = {}) {
 
     const del = spinner();
     del.start('Deleting orphaned resources...');
-    const summary = await deleteDiscoveredResources({ ecrClient, logsClient, ec2Client }, discovered);
+    let summary;
+    try {
+        summary = await deleteDiscoveredResources({ ecrClient, logsClient, ec2Client }, discovered);
+    } catch (error) {
+        del.stop(color.red('❌ Deletion partially failed.'));
+        const partial = (error && typeof error === 'object' && error.partialSummary) || {};
+        return failCommand({
+            message: `\n✖ ${error?.message || error}\n`,
+            hint: '  Completed targets stay deleted; fix the cause and re-run to finish the rest.\n',
+            event: 'gc_run',
+            telemetry: { projectName, error_code: 'GC_PARTIAL_DELETE_FAILED', ...partial },
+            reason: 'gc-partial-delete-failed',
+            resultExtra: { ...partial },
+        });
+    }
     del.stop('Deletion complete.');
 
     outro(color.green(`Deleted ${summary.deletedImages} image(s), ${summary.deletedLogGroups} log group(s), released ${summary.releasedEips} Elastic IP(s). ✅`));

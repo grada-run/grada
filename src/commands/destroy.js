@@ -2,7 +2,7 @@ import fsSync from 'fs';
 import path from 'path';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import color from 'picocolors';
-import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, StartDBInstanceCommand, StartDBClusterCommand, CreateDBSnapshotCommand, CreateDBClusterSnapshotCommand, ModifyDBInstanceCommand, ModifyDBClusterCommand } from '@aws-sdk/client-rds';
+import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, DescribeDBSnapshotsCommand, DescribeDBClusterSnapshotsCommand, StartDBInstanceCommand, StartDBClusterCommand, CreateDBSnapshotCommand, CreateDBClusterSnapshotCommand, ModifyDBInstanceCommand, ModifyDBClusterCommand } from '@aws-sdk/client-rds';
 import { S3Client } from '@aws-sdk/client-s3';
 import { teardownStateBucket, drainBucketObjects, resolveClient } from '../utils/aws.js';
 import { checkDependency, pollUntil } from '../utils/system.js';
@@ -19,6 +19,7 @@ import { truncateSpinnerText } from '../utils/spinner-text.js';
 export const DEFAULT_DESTROY_DB_TIMEOUT_MS = 600000;
 export const DEFAULT_DESTROY_DB_SETTLE_TIMEOUT_MS = 1800000;
 export const DEFAULT_DESTROY_DB_POLL_INTERVAL_MS = 5000;
+export const DEFAULT_DESTROY_SNAPSHOT_TIMEOUT_MS = 1800000;
 
 // True when the tree's database template declares the data-loss variable
 // (new templates only). Destroy passes the -var override exclusively in
@@ -52,7 +53,8 @@ export function parseDestroyArgs(argv = []) {
 // other recognized failures get a named runbook instead of raw stderr.
 // Returns `{ retried: true }` when the destroy recovered so the caller
 // continues to bucket cleanup, else `{ retried: false, result }`.
-async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy, error }) {
+// Exported for unit tests: every branch must honor this contract.
+export async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy, error }) {
     const actualProjectName = path.basename(process.cwd());
     const errString = String(error.message || error);
     const structuredCode = typeof error.code === 'string' && ERROR_CODES.includes(error.code) ? error.code : null;
@@ -105,7 +107,7 @@ async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy,
                 telemetry: { projectName: actualProjectName },
                 errorCode: 'DESTROY_NON_INTERACTIVE',
             });
-            if (refused) return refused;
+            if (refused) return { retried: false, result: refused };
             const runbook = getRunbook('STATE_LOCK_HELD', { headless: false, lockId });
             console.error(color.red(`✖ ${runbook.message}`));
             console.log(`  ${runbook.hint}`);
@@ -196,6 +198,7 @@ async function destroyStackMain(input = {}) {
 
     const timeoutMs = options.timeoutMs ?? DEFAULT_DESTROY_DB_TIMEOUT_MS;
     const settleTimeoutMs = options.dbSettleTimeoutMs ?? DEFAULT_DESTROY_DB_SETTLE_TIMEOUT_MS;
+    const snapshotTimeoutMs = options.snapshotTimeoutMs ?? DEFAULT_DESTROY_SNAPSHOT_TIMEOUT_MS;
     const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_DESTROY_DB_POLL_INTERVAL_MS;
     const pollOverrides = {
         ...(options.sleepFn ? { sleepFn: options.sleepFn } : {}),
@@ -266,7 +269,7 @@ async function destroyStackMain(input = {}) {
         initialValue: false,
     });
 
-    if (!proceed) {
+    if (proceed !== true) {
         cancel('Destruction cancelled. Your infrastructure is safe.');
         process.exit(0);
     }
@@ -423,7 +426,49 @@ async function destroyStackMain(input = {}) {
                 reason: 'db-snapshot-failed',
             });
         }
-        s.stop(`Database snapshot ${snapshotId} started.`);
+        // Wait for the snapshot to reach `available` before touching the
+        // database: deleting while it is still `creating` races snapshot
+        // completion on large DBs (BUG-98). A failed snapshot or a timeout
+        // refuses the destroy — re-run with --allow-data-loss to skip.
+        s.start(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete...`));
+        const snapshotReady = await pollUntil({
+            intervalMs: pollIntervalMs,
+            timeoutMs: snapshotTimeoutMs,
+            ...pollOverrides,
+            onTick: async () => {
+                let status = null;
+                try {
+                    if (dbTarget.kind === 'cluster') {
+                        const resp = await rdsClient.send(new DescribeDBClusterSnapshotsCommand({ DBClusterSnapshotIdentifier: snapshotId }));
+                        status = resp.DBClusterSnapshots?.[0]?.Status ?? null;
+                    } else {
+                        const resp = await rdsClient.send(new DescribeDBSnapshotsCommand({ DBSnapshotIdentifier: snapshotId }));
+                        status = resp.DBSnapshots?.[0]?.Status ?? null;
+                    }
+                } catch (error) {
+                    return { done: true, value: { failed: true, reason: `snapshot describe failed (${error.message})` } };
+                }
+                if (status === 'available') return { done: true, value: { failed: false } };
+                if (status === 'failed' || status === 'deleted') {
+                    return { done: true, value: { failed: true, reason: `snapshot ${status}` } };
+                }
+                s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete... (${status || 'pending'})`));
+                return { done: false };
+            },
+        });
+        if (snapshotReady.timedOut || snapshotReady.value?.failed) {
+            s.stop(color.red('❌ Pre-destroy snapshot did not complete.'));
+            const errorCode = snapshotReady.timedOut ? 'DB_SNAPSHOT_TIMEOUT' : 'DB_SNAPSHOT_FAILED';
+            return failCommand({
+                message: `\n✖ Refusing to destroy: pre-destroy snapshot ${snapshotId} ${snapshotReady.timedOut ? 'did not complete in time' : snapshotReady.value.reason} — the database is untouched. Re-run with --allow-data-loss to destroy without a snapshot.`,
+                useErrorStream: true,
+                event: 'infrastructure_destroyed',
+                telemetry: { projectName: projectNameForTelemetry, error_code: errorCode },
+                errorCode,
+                reason: snapshotReady.timedOut ? 'db-snapshot-timeout' : 'db-snapshot-failed',
+            });
+        }
+        s.stop(`Database snapshot ${snapshotId} ready.`);
         console.log(color.green(`📸 Pre-destroy snapshot: ${snapshotId}`));
         trackEvent('db_destroy_checkpoint', { projectName: projectNameForTelemetry, db_kind: dbTarget.kind });
         await flushTelemetry();

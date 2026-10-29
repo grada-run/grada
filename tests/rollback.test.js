@@ -187,6 +187,139 @@ describe('Command: rollback (mocked ECS)', () => {
         expect(messages.some((msg) => String(msg).endsWith('...'))).toBe(true);
     });
 
+    it('rolls back the worker service alongside web on worker trees', async () => {
+        const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-worker-'));
+        fs.mkdirSync(path.join(workerDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(workerDir, 'terraform', 'worker.tf'), '# worker service\n');
+        try {
+            const workerArn = (rev) => `arn:aws:ecs:us-east-2:123456789012:task-definition/myapp-worker-task:${rev}`;
+            const activeWorker = (rev, deployments = []) => ({
+                serviceName: 'myapp-worker-service', status: 'ACTIVE', taskDefinition: workerArn(rev),
+                desiredCount: 1, runningCount: 1, deployments,
+            });
+            const completedWorker = (rev) => [{ status: 'PRIMARY', taskDefinition: workerArn(rev), rolloutState: 'COMPLETED', runningCount: 1, desiredCount: 1 }];
+            const seen = [];
+            const ecsClient = mockClient((command) => {
+                if (command instanceof DescribeServicesCommand) {
+                    const name = command.input?.services?.[0];
+                    seen.push(name);
+                    if (name === 'myapp-worker-service') {
+                        const calls = seen.filter((s) => s === name).length;
+                        return calls === 1
+                            ? { services: [activeWorker(8)] }
+                            : { services: [activeWorker(7, completedWorker(7))] };
+                    }
+                    const calls = seen.filter((s) => s === 'myapp-service').length;
+                    return calls === 1
+                        ? { services: [activeService(14)] }
+                        : { services: [activeService(12, completedPrimary(12))] };
+                }
+                if (command instanceof DescribeTaskDefinitionCommand) {
+                    return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
+                }
+                if (command instanceof ListTaskDefinitionsCommand) {
+                    expect(command.input?.familyPrefix).toBe('myapp-worker-task');
+                    return { taskDefinitionArns: [workerArn(7), workerArn(6)] };
+                }
+                if (command instanceof UpdateServiceCommand) return {};
+                throw new Error(`unexpected command ${command.constructor.name}`);
+            });
+
+            // No explicit service: worker auto-handling engages.
+            const result = await runRollback({
+                projectName: 'myapp', cluster: 'myapp-cluster', region: 'us-east-2',
+                cwd: workerDir, pollIntervalMs: 1, timeoutMs: 5000, isHeadless: true,
+                revision: '12', ecsClient,
+            });
+
+            expect(result.ok).toBe(true);
+            const updates = ecsClient.send.mock.calls
+                .map(([c]) => c)
+                .filter((c) => c instanceof UpdateServiceCommand);
+            expect(updates).toHaveLength(2);
+            expect(updates[0].input).toMatchObject({ service: 'myapp-service', taskDefinition: arn(12) });
+            expect(updates[1].input).toMatchObject({ service: 'myapp-worker-service', taskDefinition: workerArn(7) });
+            expect(result.worker).toMatchObject({ service: 'myapp-worker-service', targetRevision: '7' });
+            expect(trackEvent).toHaveBeenCalledWith('rollback_run', expect.objectContaining({
+                success: true,
+                targetRevision: '12',
+                workerTargetRevision: '7',
+            }));
+        } finally {
+            fs.rmSync(workerDir, { recursive: true, force: true });
+        }
+    });
+
+    it('refuses before any update when the worker has no prior revisions', async () => {
+        const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-worker-'));
+        fs.mkdirSync(path.join(workerDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(workerDir, 'terraform', 'worker.tf'), '# worker service\n');
+        try {
+            const workerArn = (rev) => `arn:aws:ecs:us-east-2:123456789012:task-definition/myapp-worker-task:${rev}`;
+            const ecsClient = mockClient((command) => {
+                if (command instanceof DescribeServicesCommand) {
+                    const name = command.input?.services?.[0];
+                    if (name === 'myapp-worker-service') {
+                        return { services: [{ serviceName: name, status: 'ACTIVE', taskDefinition: workerArn(8), desiredCount: 1, runningCount: 1, deployments: [] }] };
+                    }
+                    return { services: [activeService(14)] };
+                }
+                if (command instanceof DescribeTaskDefinitionCommand) {
+                    return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
+                }
+                if (command instanceof ListTaskDefinitionsCommand) {
+                    return { taskDefinitionArns: [] };
+                }
+                throw new Error(`unexpected command ${command.constructor.name}`);
+            });
+
+            const result = await runRollback({
+                projectName: 'myapp', cluster: 'myapp-cluster', region: 'us-east-2',
+                cwd: workerDir, pollIntervalMs: 1, timeoutMs: 5000, isHeadless: true,
+                revision: '12', ecsClient,
+            });
+
+            expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'worker-no-prior-revisions' }));
+            expect(ecsClient.send.mock.calls.some(([c]) => c instanceof UpdateServiceCommand)).toBe(false);
+            expect(exitSpy).toHaveBeenCalledWith(1);
+        } finally {
+            fs.rmSync(workerDir, { recursive: true, force: true });
+        }
+    });
+
+    it('explicit --service keeps single-service semantics on worker trees', async () => {
+        const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-worker-'));
+        fs.mkdirSync(path.join(workerDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(workerDir, 'terraform', 'worker.tf'), '# worker service\n');
+        try {
+            let describeCount = 0;
+            const ecsClient = mockClient((command) => {
+                if (command instanceof DescribeServicesCommand) {
+                    describeCount += 1;
+                    expect(command.input?.services?.[0]).toBe('myapp-service');
+                    return describeCount === 1
+                        ? { services: [activeService(14)] }
+                        : { services: [activeService(12, completedPrimary(12))] };
+                }
+                if (command instanceof DescribeTaskDefinitionCommand) {
+                    return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
+                }
+                if (command instanceof UpdateServiceCommand) return {};
+                throw new Error(`unexpected command ${command.constructor.name}`);
+            });
+
+            const result = await runRollback({
+                ...baseOptions({ cwd: workerDir, revision: '12', ecsClient }),
+            });
+
+            expect(result.ok).toBe(true);
+            expect(result.worker).toBeUndefined();
+            expect(ecsClient.send.mock.calls.filter(([c]) => c instanceof UpdateServiceCommand)).toHaveLength(1);
+        } finally {
+            fs.rmSync(workerDir, { recursive: true, force: true });
+        }
+    });
+
     it('explicit numeric revision describes family:12, updates service, waits for COMPLETED', async () => {
         let describeCount = 0;
         const ecsClient = mockClient((command) => {

@@ -9,6 +9,7 @@ Two layers of deployment safety: your infrastructure rolls back bad deployments 
 
 - Your ECS service ships with a deployment circuit breaker — failed deploys roll back automatically, with no action from you.
 - `rollback` returns to a previous task definition revision on demand: pass a revision number, or pick from an interactive list of images and dates.
+- On trees with a worker service, the worker rolls back alongside web to its own previous revision — the two never skew. Pass an explicit `--service` to roll back a single service.
 - Watches the rollback until it stabilizes (up to 5 minutes), pointing you to `status` and `logs` if it fails or times out.
 - On a fresh stack it says so precisely instead of failing opaquely — deploy again to create rollback history.
 - ECS only: on Lambda projects it prints the Lambda-native alternative (redeploy a previous image); static sites have no revisions, so push to redeploy.

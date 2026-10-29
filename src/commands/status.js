@@ -8,7 +8,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix, resolveNamespacedProject } from '../utils/resolvers.js';
 import { runDiagnose } from './diagnose.js';
 import { fetchGoldenSignals } from '../utils/golden-signals.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
@@ -38,7 +38,7 @@ export function parseStatusArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'status') args.shift();
     const { options, unknown } = parseFlags(args, {
-        string: ['region'],
+        string: ['region', 'workspace'],
         boolean: ['headless'],
         bareBoolean: ['json', 'watch'],
     });
@@ -128,9 +128,10 @@ export async function runLambdaStatus(input = {}) {
     const cwd = options.cwd || process.cwd();
     const region = options.region;
     const projectName = options.projectName;
+    const namespacedProject = resolveNamespacedProject(projectName, options, cwd);
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : `${projectName}${readResourceSuffix(cwd)}-fn`;
+        : `${namespacedProject}${readResourceSuffix(cwd)}-fn`;
     const asJson = Boolean(options.json);
     const runSync = options.spawnSyncImpl || spawnSync;
 
@@ -260,7 +261,8 @@ export async function runStaticStatus(input = {}) {
     const cwd = options.cwd || process.cwd();
     const region = options.region;
     const projectName = options.projectName;
-    const comment = `${projectName}${readResourceSuffix(cwd)}-cdn`;
+    const namespacedProject = resolveNamespacedProject(projectName, options, cwd);
+    const comment = `${namespacedProject}${readResourceSuffix(cwd)}-cdn`;
     const asJson = Boolean(options.json);
     const cloudFrontClient = resolveClient(options.cloudFrontClient, CloudFrontClient, { region });
 
@@ -451,9 +453,13 @@ async function runStatusMain(input = {}) {
         return runStaticStatus({ ...options, cwd, region, projectName });
     }
     const resourceSuffix = readResourceSuffix(cwd);
-    const cluster = options.cluster || process.env.ECS_CLUSTER || `${projectName}${resourceSuffix}-cluster`;
-    const serviceName = options.service || process.env.ECS_SERVICE || `${projectName}${resourceSuffix}-service`;
-    const logGroup = options.logGroup || process.env.ECS_LOG_GROUP || `/ecs/${projectName}${resourceSuffix}`;
+    // Workspace-namespaced resources (BUG-90): --workspace (or the local
+    // .terraform/environment) targets a preview stack like rollback and db
+    // do. Explicit flags/env keep winning; telemetry keeps the raw name.
+    const namespacedProject = resolveNamespacedProject(projectName, options, cwd);
+    const cluster = options.cluster || process.env.ECS_CLUSTER || `${namespacedProject}${resourceSuffix}-cluster`;
+    const serviceName = options.service || process.env.ECS_SERVICE || `${namespacedProject}${resourceSuffix}-service`;
+    const logGroup = options.logGroup || process.env.ECS_LOG_GROUP || `/ecs/${namespacedProject}${resourceSuffix}`;
 
     // --watch repaints the human dashboard; --json stays a single shot.
     if (Boolean(options.watch) && !asJson) {

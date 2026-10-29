@@ -213,8 +213,17 @@ export function buildDbEntries(engine, target = 'ecs') {
     };
 }
 
-// Adds the `random` provider to a rendered backend.tf (Lambda + database
-// projects only, for `random_password.db_password`). No-op when present.
+// Whether a target's rendered backend.tf needs the `random` provider:
+// always on ECS (the ALB origin secret), on Lambda only with a database
+// (`random_password.db_password`), never on static.
+export function backendNeedsRandomProvider(target, needsDatabase = false) {
+    if (target === 'static') return false;
+    if (target === 'lambda') return needsDatabase === true;
+    return true;
+}
+
+// Adds the `random` provider to a rendered backend.tf (see
+// backendNeedsRandomProvider for which trees need it). No-op when present.
 // Resolves the compose service to merge for a render config. init
 // pre-selects through DOCKER_COMPOSE_WEB (a service name, or null when
 // init already warned and declined the merge); direct callers run the
@@ -584,7 +593,7 @@ resource "aws_lb_listener_rule" "vercel_redirect_${index}" {
             content = convertDatabaseTfForLambda(content);
         }
 
-        if (isLambda && config.NEEDS_DATABASE && file.dest === 'terraform/backend.tf') {
+        if (file.dest === 'terraform/backend.tf' && backendNeedsRandomProvider(target, config.NEEDS_DATABASE)) {
             content = addRandomProvider(content);
         }
 

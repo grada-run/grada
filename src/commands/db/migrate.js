@@ -120,7 +120,7 @@ function stripPreviousGateBlock(content) {
 // (source checkouts report 'unknown').
 export function buildRunnerInvocation(cliVersion) {
     const ver = typeof cliVersion === 'string' ? cliVersion.trim() : '';
-    if (ver === '' || ver === 'unknown') return 'npx grada-run';
+    if (ver === '' || ver === 'unknown') return 'npx --yes grada-run';
     return `npx --yes @grada-run/grada@${ver}`;
 }
 

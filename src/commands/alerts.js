@@ -552,7 +552,9 @@ async function runAlertsMain(input = {}) {
     if (archiveAdded) console.log(color.dim('  Pinned the archive provider in terraform/backend.tf (forwarder packaging).'));
     console.log(color.dim('  Next steps:'));
     if (webhook) {
-        console.log(color.dim(`    1. export TF_VAR_alerts_webhook_url='${webhook}'   # ${kind} webhook; never commit it`));
+        // The URL is a Bearer [REDACTED] (CI logs are the leak vector): print a
+        // redacted placeholder — the operator already holds the real value.
+        console.log(color.dim(`    1. export TF_VAR_alerts_webhook_url='<your-${kind}-webhook-url>'   # ${kind} webhook; never commit it`));
         console.log(color.dim('    2. npx grada-run apply'));
         if (email) console.log(color.dim('    3. Click the confirmation link in the email.'));
         console.log('');

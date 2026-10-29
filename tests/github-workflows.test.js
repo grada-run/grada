@@ -49,6 +49,18 @@ describe('github workflow templates', () => {
         }
     });
 
+    it('deploy.yml and deploy-lambda.yml invalidate the app CDN after deploy', () => {
+        for (const filename of ['deploy.yml', 'deploy-lambda.yml']) {
+            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            // Same lookup convention as the static workflow: the distro
+            // carries comment "${local.app_name}-cdn" (BUG-82).
+            expect(raw).toContain('CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn');
+            expect(raw).toContain('- name: Invalidate CloudFront');
+            expect(raw).toContain('aws cloudfront create-invalidation');
+            expect(raw).toContain('--paths "/*"');
+        }
+    });
+
     it('deploy.yml redeploys the worker service alongside web', () => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
         // Worker identity (mirrors the ECS_SERVICE/ECS_TASK_FAMILY pair).

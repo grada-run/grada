@@ -20,6 +20,7 @@ env:
   ECS_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-task
   ECS_WORKER_SERVICE: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-service
   ECS_WORKER_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-task
+  CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn
 
 permissions:
   id-token: write
@@ -175,4 +176,22 @@ jobs:
             --service ${{ env.ECS_WORKER_SERVICE }} \
             --task-definition ${{ steps.register-worker-task-def.outputs.task-arn }} \
             --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      # --- 6. CACHE INVALIDATION ---
+      # New code means new HTML: clear the CDN so deploys go live
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='${{ env.CF_COMMENT }}'].Id | [0]" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*" \
             --region ${{ env.AWS_REGION }}

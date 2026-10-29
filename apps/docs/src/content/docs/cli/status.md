@@ -26,11 +26,12 @@ npx grada-run status --watch
 | `--json` | Output the raw status payload as JSON; disables auto-diagnose. |
 | `--watch` | Repaint the dashboard every 10 seconds until interrupted; skips auto-diagnose (diagnosis stays manual). Ignored when combined with `--json`. |
 | `--region <region>` | Explicit AWS region override. |
+| `--workspace <name>` | Target a PR-preview environment (e.g. `--workspace pr-123`). Falls back to the workspace in `.terraform/environment`. |
 
 ## Automation & edge cases
 
 - Degraded means `runningCount < desiredCount` or any alarm firing. Signals read standard AWS metrics only (no custom metrics); a metrics failure degrades to `null` sections without failing the check, and signals are `null` on Lambda.
-- Inputs resolve automatically: region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`), cluster/service/log group from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE` / `ECS_LOG_GROUP`).
+- Inputs resolve automatically: region (`--region` → `AWS_REGION` → `terraform/main.tf` → `us-east-2`), cluster/service/log group from the project name (overridable via `ECS_CLUSTER` / `ECS_SERVICE` / `ECS_LOG_GROUP`); `--workspace` targets a PR-preview environment's namespaced service.
 - On [ejected](/grada/cli/eject/) projects, warns that the tree is user-owned but still reports — read-only commands never refuse.
 - `--json` always emits exactly one JSON document: failures print an `{ok: false, ...}` envelope and exit 1, missing infrastructure prints the `{healthy: false, missing: true}` state and exits 0 — pipes never see prose.
 

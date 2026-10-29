@@ -550,6 +550,30 @@ describe('gc: safety guards', () => {
         }
     });
 
+    it('names partial deletion failure instead of crashing raw', async () => {
+        clack.mockConfirm.mockResolvedValue(true);
+        const prev = mockEcrSend.getMockImplementation();
+        mockEcrSend.mockImplementation(async (cmd) => {
+            if (cmd instanceof MockBatchDeleteImageCommand) throw new Error('ECR boom');
+            return prev(cmd);
+        });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
+            expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'gc-partial-delete-failed' }));
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(MockDeleteLogGroupCommand).toHaveBeenCalled();
+            expect(trackEvent).toHaveBeenCalledWith('gc_run', expect.objectContaining({ success: false, error_code: 'GC_PARTIAL_DELETE_FAILED' }));
+            const text = consoleSpy.mock.calls.map((c) => String(c[0])).join('\n');
+            expect(text).toContain('ECR boom');
+            expect(text).not.toMatch(/at .*\(.*:\d+:\d+\)/);
+        } finally {
+            consoleSpy.mockRestore();
+            exitSpy.mockRestore();
+        }
+    });
+
     it('refuses loudly when headless without approval flags instead of abandoning the delete prompt', async () => {
         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
         const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
@@ -631,6 +655,38 @@ describe('gc: ECR batch-delete chunking', () => {
         const sentDigests = ecrSend.mock.calls.flatMap((call) => call[0].imageIds.map((id) => id.imageDigest));
         expect(sentDigests).toHaveLength(250);
         expect(new Set(sentDigests).size).toBe(250);
+    });
+
+    it('excludes BatchDeleteImage failures from the deleted count', async () => {
+        const untaggedImages = Array.from({ length: 10 }, (_, i) => ({
+            repositoryName: `${PROJECT}-repo`,
+            imageDigest: `sha256:orphan-${i}`,
+        }));
+        const ecrSend = vi.fn().mockResolvedValue({
+            failures: [{ imageId: { imageDigest: 'sha256:orphan-3' }, failureCode: 'ImageNotFound', failureReason: 'not found' }],
+        });
+
+        const summary = await deleteDiscoveredResources(
+            { ecrClient: { send: ecrSend }, logsClient: { send: vi.fn() }, ec2Client: { send: vi.fn() } },
+            { untaggedImages, orphanedLogGroups: [], unattachedEips: [] }
+        );
+
+        expect(summary.deletedImages).toBe(9);
+    });
+
+    it('attempts every target and reports partial failure by name', async () => {
+        const ecrSend = vi.fn().mockRejectedValue(new Error('ECR boom'));
+        const logsSend = vi.fn().mockResolvedValue({});
+
+        await expect(deleteDiscoveredResources(
+            { ecrClient: { send: ecrSend }, logsClient: { send: logsSend }, ec2Client: { send: vi.fn() } },
+            {
+                untaggedImages: [{ repositoryName: `${PROJECT}-repo`, imageDigest: 'sha256:x' }],
+                orphanedLogGroups: [{ logGroupName: '/ecs/x' }],
+                unattachedEips: [],
+            }
+        )).rejects.toThrow(/partially failed/);
+        expect(logsSend).toHaveBeenCalled();
     });
 
     it('sends exactly one request for 100 images', async () => {

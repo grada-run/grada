@@ -654,7 +654,7 @@ describe('ai:bedrock generated terraform', () => {
         delete process.env.AWS_REGION;
         let result;
         try {
-            result = await runAdd({ cwd: dir, capability: 'ai:bedrock' });
+            result = await runAdd({ cwd: dir, capability: 'ai:bedrock', region: 'us-east-2' });
         } finally {
             if (savedRegion !== undefined) process.env.AWS_REGION = savedRegion;
         }
@@ -665,8 +665,10 @@ describe('ai:bedrock generated terraform', () => {
         expect(rendered).toContain('role = aws_iam_role.task_role.id');
         expect(rendered).toContain('"bedrock:InvokeModel"');
         expect(rendered).toContain('"bedrock:InvokeModelWithResponseStream"');
-        expect(rendered).toContain('"arn:aws:bedrock:*::foundation-model/*"');
-        expect(rendered).toContain('"arn:aws:bedrock:*:*:inference-profile/*"');
+        expect(rendered).toContain(`"arn:aws:bedrock:us-east-2::foundation-model/${DEFAULT_BEDROCK_MODEL}"`);
+        expect(rendered).toContain('"arn:aws:bedrock:us-east-2:*:inference-profile/*"');
+        expect(rendered).not.toContain('bedrock:*::foundation-model/*');
+        expect(rendered).not.toContain('bedrock:*:*:inference-profile/*');
         expect(rendered).toContain(`value = "${DEFAULT_BEDROCK_MODEL}"`);
         expect(rendered).not.toContain('{{BEDROCK_MODEL_ID}}');
         const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
