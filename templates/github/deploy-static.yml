@@ -26,10 +26,11 @@ jobs:
   deploy:
     name: Build & Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # --- 1. IaC SECURITY SCAN ---
       - name: Scan Terraform for Misconfigurations
@@ -55,7 +56,7 @@ jobs:
 
       # --- 2. INFRASTRUCTURE SYNC (The New Marketplace Action) ---
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@v1
+        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
@@ -63,7 +64,7 @@ jobs:
 
       # --- 3. BUILD ---
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: 'npm'

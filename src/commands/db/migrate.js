@@ -3,7 +3,7 @@ import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner, text, isCancel } from '@clack/prompts';
 import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName, getCliVersion } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
+import { failCommand, failAwsError, failNamedContainerMissing, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
@@ -22,6 +22,8 @@ import { detectMigrationCommand, isNpmShimCommand, dockerfileStripsNpmShims } fr
 import { resolveContainer } from '../../utils/ecs.js';
 import { runEphemeralEcsTask } from '../../utils/ecs-runner.js';
 import { parseTimeoutSeconds } from '../../utils/system.js';
+import { atomicWriteFile } from '../../utils/atomic-write.js';
+import { pinnedActionUse } from '../../data/action-pins.js';
 import fsSync from 'fs';
 import path from 'path';
 
@@ -89,7 +91,7 @@ function renderGateBlock({ includeSetupNode, stepName, runLine }) {
     if (includeSetupNode) {
         lines.push(
             '      - name: Setup Node.js for migrations',
-            '        uses: actions/setup-node@v4',
+            `        uses: ${pinnedActionUse('actions/setup-node')}`,
             '        with:',
             "          node-version: '20'",
             ''
@@ -97,6 +99,10 @@ function renderGateBlock({ includeSetupNode, stepName, runLine }) {
     }
     lines.push(
         `      - name: ${stepName}`,
+        // Gates run AWS calls: honor the credential-skip outcome like
+        // every other post-assume step (BUG-138). Neutral on deploy
+        // (a failed assume fails the run before any gate runs).
+        `        if: steps.aws-creds.outcome == 'success'`,
         '        run: |',
         `          ${runLine}`,
         `      ${GATE_END_MARKER}`
@@ -160,6 +166,41 @@ export function injectPreviewMigrationGate(workflowContent, { cmd, cliVersion } 
     });
 }
 
+// Sniffs the URL scheme from discrete credentials. Explicit values win;
+// when DB_ENGINE/DB_PORT are secrets-sourced (valueFrom, values unknown
+// to the CLI) the reference text is sniffed for engine/port hints
+// instead (BUG-171). Indeterminate stays postgresql (back-compat).
+function sniffMigrationScheme(entries, values) {
+    const engine = values.get('DB_ENGINE');
+    if (typeof engine === 'string' && engine !== '') {
+        return /mysql|maria/i.test(engine) ? 'mysql' : 'postgresql';
+    }
+    const port = values.get('DB_PORT');
+    if (typeof port === 'string' && port !== '') {
+        return port === '3306' ? 'mysql' : 'postgresql';
+    }
+    const refs = entries.map((entry) => entry?.valueFrom).filter((ref) => typeof ref === 'string').join('\n');
+    if (/mysql|maria|3306/i.test(refs)) return 'mysql';
+    return 'postgresql';
+}
+
+// Runtime userinfo encoder for the synthesized URL (BUG-139): node sees
+// only shell references, never the values, so the encoding ladder ships
+// inside the script — node (encodeURIComponent) → sed (the URL-breaking
+// subset: %, ?, #, @, :, /) → warned raw. Quoting alone cannot save a
+// `?` or `#` in the password: the URL parser (not the shell) is what
+// breaks, so the shell refs must be encoded, not quoted.
+function buildEncodedUrlExport({ scheme, defaultPort, defaultName }) {
+    const nodeEncode = `node -e 'var s="${scheme}",a=process.argv.slice(1);console.log(s+"://"+encodeURIComponent(a[0])+":"+encodeURIComponent(a[1])+"@"+a[2]+":"+a[3]+"/"+a[4])' "$_u" "$_p" "$_h" "$_o" "$_n"`;
+    const sedEncode = `printf '${scheme}://%s:%s@%s:%s/%s' "$(_grada_enc "$_u")" "$(_grada_enc "$_p")" "$_h" "$_o" "$_n"`;
+    const rawEncode = `printf '${scheme}://%s:%s@%s:%s/%s' "$_u" "$_p" "$_h" "$_o" "$_n"`;
+    return `_grada_db_url() { _u="\${DB_USER}"; _p="\${DB_PASSWORD}"; _h="\${DB_HOST}"; _o="\${DB_PORT:-${defaultPort}}"; _n="\${DB_NAME:-${defaultName}}"; `
+        + `if command -v node >/dev/null 2>&1; then ${nodeEncode}; `
+        + `elif command -v sed >/dev/null 2>&1; then _grada_enc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's|/|%2F|g'; }; ${sedEncode}; `
+        + `else echo "grada: warning: DATABASE_URL built without userinfo encoding (no node or sed in image)" >&2; ${rawEncode}; fi; }; `
+        + `if [ -z "\${DATABASE_URL:-}" ]; then export DATABASE_URL="$(_grada_db_url)"; fi`;
+}
+
 // Builds the container override command for the migration task. When the
 // task definition provides discrete `DB_*` credentials but no
 // `DATABASE_URL`, the command exports a runtime-synthesized URL (from the
@@ -176,76 +217,17 @@ export function buildMigrationCommand(resolvedCmd, containerDef) {
         return ['sh', '-c', cmd];
     }
     const values = new Map(entries.map((entry) => [entry?.name, entry?.value]));
-    const scheme = values.get('DB_PORT') === '3306' || values.get('DB_ENGINE') === 'mysql' ? 'mysql' : 'postgresql';
+    const scheme = sniffMigrationScheme(entries, values);
     // RDS/Aurora enforces `rds.force_ssl = 1` by default: require TLS for
     // synthesized postgres URLs so libpq-based migrations never fail on a
     // plaintext connection (MySQL clients ignore PGSSLMODE; leave them alone).
     const tlsPrefix = scheme === 'postgresql' ? 'export PGSSLMODE="${PGSSLMODE:-require}"; ' : '';
-    return ['sh', '-c', `${tlsPrefix}export DATABASE_URL="\${DATABASE_URL:-${scheme}://\${DB_USER}:\${DB_PASSWORD}@\${DB_HOST}:\${DB_PORT:-5432}/\${DB_NAME:-postgres}}"; ${cmd}`];
-}
-
-// Identity keys for one log line. FilterLogEvents results carry `eventId`
-// but GetLogEvents results do not, so every line registers its
-// timestamp:message fingerprint (present in both APIs) plus its `eventId`
-// when it has one — the final head-flush then never reprints live lines.
-function eventKeys(event) {
-    const keys = [`${event.timestamp ?? ''}:${event.message ?? ''}`];
-    if (event.eventId) keys.push(`id:${event.eventId}`);
-    return keys;
-}
-
-function printNewEvents(events, seen) {
-    if (seen.size > 5000) seen.clear();
-    for (const event of events || []) {
-        const keys = eventKeys(event);
-        if (keys.some((key) => seen.has(key))) continue;
-        for (const key of keys) seen.add(key);
-        console.log(String(event.message ?? '').replace(/\n$/, ''));
-    }
-}
-
-// Live tail: FilterLogEvents scoped to the single task stream. `startTime`
-// is deliberately omitted — the stream is unique per task run, so there is
-// nothing stale to exclude and local clock skew can never drop early lines.
-async function fetchNewLogEvents({ logsClient, logGroupName, logStreamName, seen }) {
-    let events = [];
-    try {
-        const resp = await logsClient.send(new FilterLogEventsCommand({
-            logGroupName,
-            logStreamNames: [logStreamName],
-        }));
-        events = resp.events || [];
-    } catch (error) {
-        // The stream does not exist until the container starts emitting.
-        if (isNotFoundError(error)) return;
-        throw error;
-    }
-    printNewEvents(events, seen);
-}
-
-// Final flush: GetLogEvents reads the exact stream from the head, catching
-// anything the live tail missed (Fargate ingestion lags several seconds on
-// sub-second commands). Shares the `seen` set so lines print exactly once.
-async function flushRemainingLogs({ logsClient, logGroupName, logStreamName, seen }) {
-    let nextToken;
-    for (;;) {
-        let resp;
-        try {
-            resp = await logsClient.send(new GetLogEventsCommand({
-                logGroupName,
-                logStreamName,
-                startFromHead: true,
-                ...(nextToken ? { nextToken } : {}),
-            }));
-        } catch (error) {
-            if (isNotFoundError(error)) return;
-            throw error;
-        }
-        printNewEvents(resp.events, seen);
-        const forward = resp.nextForwardToken;
-        if (!forward || forward === nextToken) return;
-        nextToken = forward;
-    }
+    const urlExport = buildEncodedUrlExport({
+        scheme,
+        defaultPort: scheme === 'mysql' ? '3306' : '5432',
+        defaultName: scheme === 'mysql' ? 'mysql' : 'postgres',
+    });
+    return ['sh', '-c', `${tlsPrefix}${urlExport}; ${cmd}`];
 }
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
@@ -357,7 +339,7 @@ async function runDbMigrateMain(input = {}) {
         if (headless) {
             return failCommand({
                 message: `\n✖ Refusing to run "${resolvedCmd}": your Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" inside the task.\n`,
-                hint: '  Bundle a framework-compiled runner instead and re-run with an explicit node-based command, e.g. --cmd "node ./dist/migrate.cjs".\n',
+                hint: '  Bundle a framework-compiled runner instead and re-run with an explicit node-based command, e.g. --cmd "node ./dist/migrate.cjs". Ensure your Dockerfile builds the bundle and copies it into the runner image.\n',
                 event: 'db_migrate_run',
                 telemetry: { projectName, cmd_source: cmdSource, ci_setup: setupCi, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
                 errorCode: 'NPM_CMD_STRIPPED_RUNNER',
@@ -365,12 +347,26 @@ async function runDbMigrateMain(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
-        console.log(color.yellow(`⚠️  "${resolvedCmd}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs").`));
+        console.log(color.yellow(`⚠️  "${resolvedCmd}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.`));
         trackEvent('npm_cmd_stripped_runner', { projectName, cmd_source: cmdSource, ci_setup: setupCi });
     }
 
     // 2. --setup-ci: patch the workflow file, no AWS calls.
     if (setupCi) {
+        // BUG-191: the gate runs migrations as an ephemeral ECS task —
+        // refuse on lambda/static (no ECS to run on). Init auto-skips
+        // with a warning; this explicit command fails closed.
+        const setupTarget = readTerraformComputeTarget(cwd);
+        if (setupTarget !== 'ecs') {
+            return failCommand({
+                message: `\n✖ --setup-ci wires an ECS pre-deploy migration gate, but this tree targets ${color.cyan(setupTarget)} (no ECS service to run it on).\n`,
+                event: 'db_migrate_run',
+                telemetry: { projectName, cmd_source: cmdSource, ci_setup: true },
+                errorCode: 'MIGRATE_SETUP_CI_UNSUPPORTED_TARGET',
+                reason: 'migrate-setup-ci-unsupported-target',
+                resultExtra: { cluster, service, region },
+            });
+        }
         const workflowFile = path.join(cwd, '.github', 'workflows', 'deploy.yml');
         let workflowContent = null;
         try {
@@ -399,7 +395,7 @@ async function runDbMigrateMain(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
-        fsSync.writeFileSync(workflowFile, updated, 'utf8');
+        await atomicWriteFile(workflowFile, updated, 'utf8');
         console.log(color.green('\n✅ Pre-deploy migration gate installed in .github/workflows/deploy.yml.'));
         console.log(color.dim('  Migrations now run against the new image revision before the ECS service updates.\n'));
         if (readTerraformComputeTarget(cwd) === 'ecs') {
@@ -413,7 +409,7 @@ async function runDbMigrateMain(input = {}) {
             if (previewContent !== null) {
                 const previewUpdated = injectPreviewMigrationGate(previewContent, { cmd: resolvedCmd, cliVersion: getCliVersion() });
                 if (previewUpdated !== null) {
-                    fsSync.writeFileSync(previewFile, previewUpdated, 'utf8');
+                    await atomicWriteFile(previewFile, previewUpdated, 'utf8');
                     console.log(color.green('✅ Preview migration gate installed in .github/workflows/preview.yml.'));
                 } else {
                     console.log(color.yellow('⚠️  Could not wire the preview migration gate: the Comment PR anchor was not found in .github/workflows/preview.yml.'));
@@ -505,6 +501,14 @@ async function runDbMigrateMain(input = {}) {
                 errorCode: 'RUN_TASK_FAILED',
                 reason: 'run-task-failed',
                 resultExtra: { cluster, service, region },
+            });
+        }
+        if (!outcome.ok && outcome.code === 'NAMED_CONTAINER_MISSING') {
+            return failNamedContainerMissing({
+                spinner: s, outcome, cluster, service, region,
+                event: 'db_migrate_run',
+                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
+                noun: 'Migration',
             });
         }
         if (!outcome.ok && outcome.code === 'TIMEOUT') {

@@ -30,10 +30,11 @@ jobs:
   deploy:
     name: Build & Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # --- 1. IaC SECURITY SCAN ---
       - name: Scan Terraform for Misconfigurations
@@ -57,18 +58,39 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      # --- 2. INFRASTRUCTURE SYNC (The New Marketplace Action) ---
-      - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@v1
+      # --- 2. AWS AUTH (job-level credentials for every step below) ---
+      - name: Configure AWS credentials
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
         with:
-          aws-region: ${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
-          terraform-dir: 'terraform'
+          aws-region: ${{ env.AWS_REGION }}
 
-      # --- 3. BUILD & PUSH ---
+      # Deploy never skips: a failed assume fails the run with the
+      # bootstrap pointer (BUG-138).
+      - name: Interpret credential failure
+        if: steps.aws-creds.outcome == 'failure'
+        run: |
+          echo "::error::AWS credential assumption failed — if the stack was never provisioned, bootstrap it first (npx grada-run apply); otherwise check terraform/oidc.tf trust."
+          exit 1
+
+      # --- 3. ECR BOOTSTRAP ---
+      # The image is pushed BEFORE the full apply (fresh stacks must never
+      # start tasks on an unpushed tag), but the repository itself is
+      # Terraform-managed — so it is bootstrapped with a targeted apply
+      # first. Idempotent on existing stacks.
+      - name: Bootstrap ECR repository
+        working-directory: ./terraform
+        run: |
+          terraform init -input=false
+          terraform workspace select default
+          terraform apply -target=aws_ecr_repository.app -auto-approve -input=false
+
+      # --- 4. BUILD ---
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
 
       - name: Build Docker image
         id: build-image
@@ -80,8 +102,8 @@ jobs:
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$SHA_TAG .
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$SHA_TAG $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-      # --- 4. CONTAINER SECURITY SCAN ---
-      - name: Scan Container for Vulnerabilities (SARIF Output)
+      # --- 5. CONTAINER SECURITY SCAN ---
+      - name: Scan Container for Vulnerabilities (table summary)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest'
@@ -102,8 +124,9 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      # --- 5. DEPLOY ---
+      # --- 6. PUSH ---
       - name: Push image to Amazon ECR
+        id: push
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: latest
@@ -113,6 +136,18 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$SHA_TAG" >> $GITHUB_OUTPUT
 
+      # --- 7. INFRASTRUCTURE SYNC (The New Marketplace Action) ---
+      # Runs AFTER the push: by the time apply moves tasks onto `:latest`,
+      # the tag exists. A gate failure below can therefore never strand
+      # the service on an unpullable revision.
+      - name: Apply Infrastructure Changes
+        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
+          terraform-dir: 'terraform'
+
+      # --- 8. DEPLOY ---
       # Each code push registers a new task definition revision pinned to the
       # immutable SHA-tagged image, so `rollback` always has history to
       # return to (and `latest` is never overwritten in place as the deploy
@@ -144,6 +179,27 @@ jobs:
             --task-definition ${{ steps.register-task-def.outputs.task-arn }} \
             --force-new-deployment \
             --region ${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for web rollout
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "${{ steps.register-task-def.outputs.task-arn }}" ]; then
+            echo "Web rollout of ${{ steps.register-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # The background worker ships the same image as web, so it gets the
       # same SHA-pinned revision treatment — otherwise it would run stale
@@ -178,7 +234,25 @@ jobs:
             --force-new-deployment \
             --region ${{ env.AWS_REGION }}
 
-      # --- 6. CACHE INVALIDATION ---
+      - name: Wait for worker rollout
+        if: hashFiles('terraform/worker.tf') != ''
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_WORKER_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_WORKER_SERVICE }} \
+            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "${{ steps.register-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Worker rollout of ${{ steps.register-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # --- 9. CACHE INVALIDATION ---
       # New code means new HTML: clear the CDN so deploys go live
       # immediately instead of serving stale pages until TTL expiry.
       - name: Invalidate CloudFront
@@ -195,3 +269,12 @@ jobs:
             --distribution-id "$DIST_ID" \
             --paths "/*" \
             --region ${{ env.AWS_REGION }}
+
+      # A cancelled apply/destroy can strand the S3 state lockfile: point
+      # at recovery instead of leaving the next run to fail obscurely
+      # (BUG-194). Generic by necessity — the lock ID only exists in the
+      # follow-up run's own error.
+      - name: Cancellation recovery note
+        if: cancelled()
+        run: |
+          echo "::warning::This run was cancelled while Terraform may have held the state lock. If the next run fails with 'Error acquiring the state lock', run terraform force-unlock <LOCK_ID> (the ID is printed in that error) inside ./terraform — or delete the .tflock object beside the state file in S3 — then re-run."

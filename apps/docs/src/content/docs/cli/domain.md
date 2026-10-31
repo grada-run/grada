@@ -51,6 +51,7 @@ Requires a project initialized with `grada` (`terraform/cloudfront.tf` must exis
 ## Automation & edge cases
 
 - Domain resources are scoped to the production workspace: previews keep serving over their own `*.cloudfront.net` URL, and preview teardowns never touch your certificate, aliases, or DNS.
+- `domain status` only prints the DNS records you must act on: in `--zone-id` (Route 53) mode the records Grada manages are hidden, and apex domains show the `ALIAS` record instead of a `CNAME` (which DNS forbids at the apex).
 - `domain remove` needs `--yes` in headless/CI mode (non-interactive runs without it fail with `DOMAIN_NON_INTERACTIVE`).
 
 ## See also

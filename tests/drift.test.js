@@ -117,7 +117,7 @@ describe('scaffoldDriftWorkflow', () => {
         expect(parsed.on).toHaveProperty('workflow_dispatch');
         expect(parsed.permissions).toMatchObject({ 'id-token': 'write', contents: 'read', issues: 'write' });
         const steps = parsed.jobs.drift.steps;
-        expect(steps.some((step) => step.uses === 'actions/github-script@v7')).toBe(true);
+        expect(steps.some((step) => step.uses === 'actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b')).toBe(true);
         expect(steps.some((step) => step.with?.terraform_wrapper === false)).toBe(true);
     });
 

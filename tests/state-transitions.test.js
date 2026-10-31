@@ -944,8 +944,21 @@ describe('S11: post-init database', () => {
             '{ "name": "NODE_ENV", "value": "production" }',
             '{ "name" : "DB_HOST", "value" : aws_db_instance.postgres.address }'
         ));
-        const result = await runAdd({ cwd: dir, capability: 'db:postgres' });
-        expect(result).toMatchObject({ ok: false, reason: 'db-already-referenced' });
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            // The engine is unknowable here (database.tf is absent), so the
+            // refusal names a generic relational database — never Postgres.
+            const result = await runAdd({ cwd: dir, capability: 'db:mysql' });
+            expect(result).toMatchObject({ ok: false, reason: 'db-already-referenced' });
+            const text = output.join('\n');
+            expect(text).toContain('already references a relational database');
+            expect(text).not.toContain('Postgres');
+        } finally {
+            consoleSpy.mockRestore();
+        }
         const forced = await runAdd({ cwd: dir, capability: 'db:postgres', force: true });
         expect(forced.ok).toBe(true);
     });
@@ -2050,6 +2063,7 @@ describe('S31: outputs contract', () => {
         const result = await applyStack({ isHeadless: true, allowPartialOutputs: true });
         expect(result).toMatchObject({ ok: true });
         expect(output()).toMatch(/partial/i);
+        expect(output()).not.toMatch(/pass --allow-partial-outputs/);
         expect(exitSpy).not.toHaveBeenCalled();
     });
 
@@ -2069,14 +2083,15 @@ describe('S31: outputs contract', () => {
 });
 
 describe('S32: static add policy', () => {
-    it('S32a: queue:sqs on static warns with a machine-readable code', async () => {
+    it('S32a: queue:sqs on static is refused by the policy table', async () => {
         const dir = makeTmp();
         writeStaticMainTf(dir);
         const result = await runAdd({ cwd: dir, capability: 'queue:sqs' });
-        expect(result.ok).toBe(true);
-        expect(result.warning).toBe('static-target-unwired');
-        expect(fs.existsSync(path.join(dir, 'terraform', 'sqs.tf'))).toBe(true);
-        expect(output()).toMatch(/without a worker/);
+        expect(result).toMatchObject({ ok: false, reason: 'static-target-unsupported' });
+        expect(fs.existsSync(path.join(dir, 'terraform', 'sqs.tf'))).toBe(false);
+        expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({
+            error_code: 'STATIC_TARGET_UNSUPPORTED',
+        }));
     });
 
     it('S32b: cron on static is refused by the policy table', async () => {

@@ -59,6 +59,10 @@ On `--target static` projects the workflow has no build-and-push stages: after t
 - `preview.yml` / `teardown.yml` exist only when ephemeral PR previews are enabled. See [Ephemeral PR Previews](/grada/guides/ephemeral-pr-previews/).
 - Secrets are injected at deploy time from AWS Secrets Manager, never from the repo. See [Secrets Management](/grada/guides/secrets-management/).
 
+## Supply-chain pinning
+
+Every third-party GitHub Action in the generated workflows is pinned to an immutable commit SHA rather than a floating tag, so a compromised or re-pointed upstream tag cannot silently change what your pipeline runs. Re-running setup refreshes the pins.
+
 ## See also
 
 - [Quickstart](/grada/guides/quickstart/) for the 5-minute path that ends here.

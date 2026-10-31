@@ -8,6 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { getCliVersion, trackSuccess, setActiveCommandName, resetActiveCommandName, rotateRunId } from '../core/telemetry.js';
+import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { safeHomedir } from '../core/homedir.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { failCommand, refuseUnknownFlags } from '../utils/command.js';
@@ -629,7 +630,7 @@ export function installMcpConfig(editor, { homeDir = safeHomedir(), platform = o
     }
     try {
         fsSync.mkdirSync(path.dirname(target.path), { recursive: true });
-        fsSync.writeFileSync(
+        atomicWriteFileSync(
             target.path,
             `${JSON.stringify({ ...existing, [target.key]: { ...servers, grada: { ...MCP_SERVER_CONFIG, args: [...MCP_SERVER_CONFIG.args] } } }, null, 4)}\n`,
             'utf-8'

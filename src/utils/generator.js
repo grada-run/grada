@@ -17,6 +17,9 @@ const __dirname = path.dirname(__filename);
 // name stays a writable candidate so pre-rebrand docs keep updating.
 export const MANAGED_DOC_FALLBACK = 'GRADA.md';
 export const LEGACY_MANAGED_DOC_FALLBACK = 'DEPLOY-STACK.md';
+// Greppable, boot-failing Rails master-key seed (BUG-146): Rails cannot
+// boot on it, so a tree that never pushes the real key fails closed.
+export const RAILS_MASTER_KEY_PLACEHOLDER = 'REPLACE_ME_PUSH_REAL_RAILS_MASTER_KEY';
 
 // A doc is ours when it carries our cost-estimate marker (current or legacy).
 export function isManagedDoc(content) {
@@ -27,7 +30,9 @@ export function isManagedDoc(content) {
 export function buildReadmeNotice(docFile, target = 'ecs') {
     const what = target === 'static'
         ? 'Static site infrastructure (S3 + CloudFront) is managed'
-        : 'AWS Fargate infrastructure is managed';
+        : target === 'lambda'
+            ? 'AWS Lambda infrastructure is managed'
+            : 'AWS Fargate infrastructure is managed';
     return `\n## 🚀 Deployment\n${what} via [grada](./${docFile}).\n`;
 }
 
@@ -500,21 +505,21 @@ export async function generateTemplates(targetDir, config) {
     // Build the initial HCL map for AWS Secrets Manager
     let initialSecretMap = `{\n    EXAMPLE_API_KEY = "replace_me_in_aws_console"`;
 
-    // 4.1. Inject Rails Master Key if applicable
+    // 4.1. Seed a placeholder for the Rails master key (BUG-146): the
+    // live key must never render into committed .tf (or linger in
+    // state), and no constant dummy may boot prod. The placeholder is
+    // greppable and boot-failing; the loud instruction tells the
+    // operator to push the real key before going live.
     if (config.finalFramework === 'rails') {
         secretsArray.push(`{ "name" : "RAILS_MASTER_KEY", "valueFrom" : "\${local.secret_arn}:RAILS_MASTER_KEY::" }`);
 
         if (!isLambda) managedEnvNames.push('RAILS_MASTER_KEY');
 
-        let initialMasterKey = "1234567890abcdef1234567890abcdef"; // Dummy fallback for CI/CD
-        const masterKeyPath = path.join(targetDir, 'config', 'master.key');
-
-        if (fsSync.existsSync(masterKeyPath)) {
-            initialMasterKey = fsSync.readFileSync(masterKeyPath, 'utf-8').trim();
-        }
-
         // Inject the string literal directly, avoiding Terraform variables entirely
-        initialSecretMap += `,\n    RAILS_MASTER_KEY = "${initialMasterKey}"`;
+        initialSecretMap += `,\n    RAILS_MASTER_KEY = "${RAILS_MASTER_KEY_PLACEHOLDER}"`;
+        if (!isLambda) {
+            console.log(color.yellow(`⚠️  Rails app detected: terraform/secrets.tf seeds RAILS_MASTER_KEY with the placeholder "${RAILS_MASTER_KEY_PLACEHOLDER}" — push the real key before going live: npx grada-run secrets push .env (with RAILS_MASTER_KEY set from config/master.key).`));
+        }
     }
 
     initialSecretMap += `\n  }`;
@@ -528,7 +533,7 @@ export async function generateTemplates(targetDir, config) {
     config.TASK_SECRETS = isLambda ? '' : secretsArray.join(',\n          ');
     // Collision-guard list for the task-definition precondition. Unused on
     // Lambda/static targets (their templates carry no task definitions).
-    config.MANAGED_ENV_NAMES = `[${[...new Set(managedEnvNames)].map((name) => JSON.stringify(name)).join(', ')}]`;
+    config.MANAGED_ENV_NAMES = `[${[...new Set(managedEnvNames)].sort().map((name) => JSON.stringify(name)).join(', ')}]`;
     config.INITIAL_SECRET_MAP = initialSecretMap;
 
     config.SAFE_ALB_NAME = config.PROJECT_NAME.length > 27
@@ -580,9 +585,12 @@ resource "aws_lb_listener_rule" "vercel_redirect_${index}" {
     for (const file of filesToProcess) {
         let content = await fs.readFile(path.join(templatesDir, file.src), 'utf-8');
 
-        // Inject variables
+        // Inject variables. Replacement FUNCTION (not string): `$&`/`$'`/
+        // `$$` in values (Procfile commands, compose env vars) must land
+        // byte-identical, not interpolate match text (BUG-156).
         for (const [key, value] of Object.entries(config)) {
-            content = content.replace(new RegExp(`{{${key}}}`, 'g'), value);
+            const literal = String(value ?? '');
+            content = content.replace(new RegExp(`{{${key}}}`, 'g'), () => literal);
         }
 
         if (isLambda && file.dest === 'Dockerfile') {

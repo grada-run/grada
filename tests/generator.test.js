@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { generateTemplates, resolveDocDest, isManagedDoc, MANAGED_DOC_FALLBACK, LEGACY_MANAGED_DOC_FALLBACK, injectLambdaAdapter, convertDatabaseTfForLambda, addRandomProvider, backendNeedsRandomProvider } from '../src/utils/generator.js';
+import { generateTemplates, resolveDocDest, isManagedDoc, buildReadmeNotice, MANAGED_DOC_FALLBACK, LEGACY_MANAGED_DOC_FALLBACK, injectLambdaAdapter, convertDatabaseTfForLambda, addRandomProvider, backendNeedsRandomProvider, RAILS_MASTER_KEY_PLACEHOLDER } from '../src/utils/generator.js';
 
 describe('Infrastructure Generator', () => {
     const testTargetDir = path.join(process.cwd(), 'tests', '.tmp-test-env');
@@ -743,7 +743,8 @@ describe('Infrastructure Generator: --target lambda', () => {
         const mainTf = await readTf('main.tf');
         expect(mainTf).not.toContain('vpc_config');
         await expect(fs.stat(path.join(lambdaTargetDir, 'terraform', 'database.tf'))).rejects.toThrow();
-        expect(await readTf('backend.tf')).not.toContain('hashicorp/random');
+        // BUG-137: the random pin is unconditional now (harmless when unused).
+        expect(await readTf('backend.tf')).toContain('hashicorp/random');
     });
 
     it('injects the Lambda Web Adapter into every framework Dockerfile', async () => {
@@ -861,7 +862,25 @@ describe('ALB origin secret (BUG-91)', () => {
         expect(main).toContain('resource "random_password" "origin_secret"');
     });
 
-    it('requires the random provider on ECS renders only (plus Lambda with a DB)', async () => {
+    // BUG-163: an instant-delete vault (recovery 0) turns any destroy
+    // bug into unrecoverable secret loss — keep the 30-day window.
+    it('keeps a 30-day recovery window on the secrets vault', async () => {
+        const template = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'secrets.tf'), 'utf-8');
+        expect(template).toContain('recovery_window_in_days = 30');
+    });
+
+    // BUG-137: the random pin must live in template backend.tf — the
+    // conditional injection left pre-existing trees' backend.tf without
+    // the pin when the DB arrived via `add database`.
+    it('declares the random provider pin in template backend.tf', async () => {
+        const template = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'backend.tf'), 'utf-8');
+        expect(template).toMatch(/source\s*=\s*"hashicorp\/random"/);
+        expect(template).toMatch(/version\s*=\s*"~> 3\.0"/);
+        // Injection stays idempotent for fresh renders (repair for old trees).
+        expect(addRandomProvider(template)).toBe(template);
+    });
+
+    it('declares the random provider on every render (predicate kept for old-tree repair)', async () => {
         expect(backendNeedsRandomProvider('ecs', false)).toBe(true);
         expect(backendNeedsRandomProvider('lambda', true)).toBe(true);
         expect(backendNeedsRandomProvider('lambda', false)).toBe(false);
@@ -1439,7 +1458,16 @@ describe('Managed env names list (BUG-81 CI cover)', () => {
     it('renders the managed list with base, DB, and static-secret names', async () => {
         await generateTemplates(dir, ecsConfig({ NEEDS_DATABASE: true, DB_ENGINE: 'postgres' }));
         const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
-        expect(mainTf).toContain('managed_env_names = ["PORT", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]');
+        expect(mainTf).toContain('managed_env_names = ["DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "PORT"]');
+    });
+
+    it('emits the managed list sorted so the first add does not churn main.tf', async () => {
+        await generateTemplates(dir, ecsConfig({ NEEDS_DATABASE: true, DB_ENGINE: 'postgres' }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        const line = managedLine(mainTf);
+        const names = [...line.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+        expect(names.length).toBeGreaterThan(1);
+        expect([...names].sort()).toEqual(names);
     });
 
     it('includes DB_ENGINE only for non-postgres engines', async () => {
@@ -1482,5 +1510,80 @@ describe('Managed env names list (BUG-81 CI cover)', () => {
         await generateTemplates(dir, ecsConfig({ finalFramework: 'rails' }));
         const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
         expect(managedLine(mainTf)).toContain('"RAILS_MASTER_KEY"');
+    });
+
+    // BUG-156: `{{VAR}}` substitution used the string-replacement form,
+    // so `$&`/`$'`/`$$` in values interpolated match text into output.
+    it('renders `$` patterns in Procfile commands byte-identical', async () => {
+        await generateTemplates(dir, ecsConfig({ PROCFILE: { web: ['sh', '-c', "echo {print $&} $' $$"] } }));
+        const mainTf = await fs.readFile(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
+        expect(mainTf).toContain("echo {print $&} $' $$");
+        expect(mainTf).not.toContain('{{TASK_COMMAND}}');
+    });
+
+    // BUG-146: the live master key must never render into committed .tf
+    // (or linger in state), and no constant dummy may boot prod — seed
+    // a greppable, boot-failing placeholder plus a loud push instruction.
+    it('seeds a placeholder Rails master key, never the live key or a dummy', async () => {
+        await fs.mkdir(path.join(dir, 'config'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'config', 'master.key'), 'livekey-livekey-livekey-livekey12');
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            await generateTemplates(dir, ecsConfig({ finalFramework: 'rails' }));
+            const secretsTf = await fs.readFile(path.join(dir, 'terraform', 'secrets.tf'), 'utf-8');
+            expect(secretsTf).not.toContain('livekey-livekey');
+            expect(secretsTf).not.toContain('1234567890abcdef1234567890abcdef');
+            expect(secretsTf).toContain(RAILS_MASTER_KEY_PLACEHOLDER);
+            const output = consoleSpy.mock.calls.map(([line]) => String(line)).join('\n');
+            expect(output).toContain('RAILS_MASTER_KEY');
+            expect(output).toContain('secrets push');
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+});
+
+describe('buildReadmeNotice target pointer', () => {
+    it('names the actual compute target (lambda is not Fargate)', () => {
+        expect(buildReadmeNotice('GRADA.md', 'lambda')).toContain('AWS Lambda infrastructure is managed');
+        expect(buildReadmeNotice('GRADA.md', 'lambda')).not.toContain('Fargate');
+        expect(buildReadmeNotice('GRADA.md', 'ecs')).toContain('AWS Fargate infrastructure is managed');
+        expect(buildReadmeNotice('GRADA.md')).toContain('AWS Fargate infrastructure is managed');
+        expect(buildReadmeNotice('GRADA.md', 'static')).toContain('Static site infrastructure (S3 + CloudFront) is managed');
+    });
+});
+
+describe('terraform template safety nets (carried P4s)', () => {
+    const TF_TEMPLATES = path.join(process.cwd(), 'templates', 'terraform');
+
+    function readTf(...segments) {
+        return fs.readFile(path.join(TF_TEMPLATES, ...segments), 'utf-8');
+    }
+
+    it('worker service carries the deployment circuit breaker like the app service', async () => {
+        const workerTf = await readTf('worker.tf');
+        expect(workerTf).toContain('deployment_circuit_breaker');
+        expect(workerTf).toMatch(/enable\s*=\s*true/);
+        expect(workerTf).toMatch(/rollback\s*=\s*true/);
+    });
+
+    it.each(['database.tf', 'database-mysql.tf'])('%s caps storage autoscaling and keeps backups', async (file) => {
+        const content = await readTf(file);
+        expect(content).toMatch(/max_allocated_storage\s*=\s*200/);
+        expect(content).toMatch(/backup_retention_period\s*=\s*7/);
+    });
+
+    it('storage addon versions the bucket and expires old versions', async () => {
+        const s3 = await readTf('addons', 's3.tf');
+        expect(s3).toContain('aws_s3_bucket_versioning');
+        expect(s3).toMatch(/status\s*=\s*"Enabled"/);
+        expect(s3).toContain('aws_s3_bucket_lifecycle_configuration');
+        expect(s3).toContain('noncurrent_version_expiration');
+    });
+
+    it('storage CDN declares its price class and logging decision', async () => {
+        const s3 = await readTf('addons', 's3.tf');
+        expect(s3).toMatch(/price_class\s*=\s*"PriceClass_All"/);
+        expect(s3).toMatch(/logging.*disabled|disabled.*logging/i);
     });
 });

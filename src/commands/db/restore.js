@@ -7,8 +7,9 @@ import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../.
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveAppName, resolveHeadless, resolveCwd } from '../../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveHeadless, resolveCwd } from '../../utils/resolvers.js';
 import { findResourceBlock } from '../../utils/hcl.js';
+import { atomicWriteFile } from '../../utils/atomic-write.js';
 import { resolveDbIdentifier, resolveDbClusterIdentifier } from '../../utils/rds.js';
 
 const SNAPSHOT_NOT_FOUND_NAMES = new Set(['DBSnapshotNotFound', 'DBSnapshotNotFoundFault']);
@@ -44,14 +45,17 @@ export function parseDbRestoreArgs(argv = []) {
 // `resource "<resourceType>" "postgres"` (an `aws_db_instance` or an
 // `aws_rds_cluster`): replaces the existing attribute or inserts it (with a
 // keep-in-place comment) after the identity line. Returns the content
-// unchanged when the resource block cannot be found. Pure and unit-tested.
+// unchanged when the resource block cannot be found. Throws
+// `SNAPSHOT_PIN_EXTERNAL` when the block already pins the attribute to a
+// non-literal (var reference, local) that restore must not overwrite or
+// duplicate. Pure and unit-tested.
 export function upsertSnapshotIdentifier(hclContent, snapshotId, resourceType = 'aws_db_instance') {
     const content = String(hclContent ?? '');
     const bounds = findResourceBlock(content, resourceType, 'postgres');
     if (!bounds) return content;
 
     const block = content.slice(bounds.openIdx, bounds.closeIdx + 1);
-    const attrPattern = /^[ \t]*snapshot_identifier\s*=\s*"[^"]*"\s*$/m;
+    const attrPattern = /^[ \t]*snapshot_identifier\s*=\s*"[^"]*"\s*(?:#.*|\/\/.*)?$/m;
     const attrMatch = attrPattern.exec(block);
 
     const indent = '  ';
@@ -66,6 +70,19 @@ export function upsertSnapshotIdentifier(hclContent, snapshotId, resourceType = 
             next = `${next.slice(0, lineStart)}${commentLine}\n${next.slice(lineStart)}`;
         }
         return content.slice(0, bounds.openIdx) + next + content.slice(bounds.closeIdx + 1);
+    }
+
+    // Any other snapshot_identifier line (a var reference, local, or
+    // function call) is user-managed config: replacing it would destroy
+    // the reference and inserting beside it would duplicate the
+    // attribute, so refuse loud instead of either.
+    const existingPattern = /^[ \t]*snapshot_identifier\s*=[^\n]*/m;
+    const existingMatch = existingPattern.exec(block);
+    if (existingMatch) {
+        throw Object.assign(
+            new Error(`terraform/database.tf already sets ${existingMatch[0].trim()} — remove it or pin a literal snapshot id before restoring.`),
+            { code: 'SNAPSHOT_PIN_EXTERNAL' }
+        );
     }
 
     // Insert after the identity line (`identifier` or `cluster_identifier`)
@@ -184,7 +201,6 @@ async function runDbRestoreMain(input = {}) {
         cwd = resolveCwd(options);
         region = resolveRegion(options, cwd);
         projectName = resolveProjectName(options, cwd);
-        const appName = resolveAppName(projectName, options.workspace, cwd);
         dbIdentifier = resolveDbIdentifier({ ...options, projectName }, cwd);
         dbClusterIdentifier = resolveDbClusterIdentifier({ ...options, projectName }, cwd);
     } catch {
@@ -345,8 +361,24 @@ async function runDbRestoreMain(input = {}) {
             s.stop('Snapshot selected.');
         }
 
-        const updated = upsertSnapshotIdentifier(hclContent, snapshotId, isCluster ? 'aws_rds_cluster' : 'aws_db_instance');
-        fsSync.writeFileSync(databaseTf, updated, 'utf8');
+        let updated;
+        try {
+            updated = upsertSnapshotIdentifier(hclContent, snapshotId, isCluster ? 'aws_rds_cluster' : 'aws_db_instance');
+        } catch (error) {
+            if (error?.code === 'SNAPSHOT_PIN_EXTERNAL') {
+                try { s.stop(color.red('Snapshot pin is externally managed.')); } catch { /* already stopped */ }
+                return failCommand({
+                    message: `\n✖ ${error.message}\n`,
+                    event: 'db_restore_run',
+                    telemetry: { projectName },
+                    errorCode: 'SNAPSHOT_PIN_EXTERNAL',
+                    reason: 'snapshot-pin-external',
+                    resultExtra: { dbIdentifier, region },
+                });
+            }
+            throw error;
+        }
+        await atomicWriteFile(databaseTf, updated, 'utf8');
         console.log(color.green(`\n✅ terraform/database.tf now pins snapshot_identifier = "${snapshotId}".`));
         console.log(`  Run ${color.green('npx grada-run apply')} to restore the database.`);
         console.log(color.dim('  Keep snapshot_identifier in place afterwards so future applies stay no-op.\n'));

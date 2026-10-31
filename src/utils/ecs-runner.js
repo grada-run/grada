@@ -97,6 +97,7 @@ async function flushRemainingLogs({ logsClient, logGroupName, logStreamName, see
 //   { ok: false, code: 'CONTAINER_NOT_FOUND', targetTaskDef, available: [names] }
 //   { ok: false, code: 'RUN_TASK_FAILED', reason }
 //   { ok: false, code: 'TIMEOUT', taskArn } (task stop attempted best-effort)
+//   { ok: false, code: 'NAMED_CONTAINER_MISSING', taskArn, containerName, available, stoppedReason }
 //
 // `command` is the container override: either the array itself or a builder
 // `(containerDef) => string[]` invoked with the selected task-definition
@@ -283,8 +284,20 @@ export async function runEphemeralEcsTask({
     }
 
     const containers = finalTask?.containers || [];
-    const match = containers.find((c) => c.name === containerName) || containers[0];
-    const exitCode = match?.exitCode;
-    const stoppedReason = match?.reason || finalTask?.stoppedReason || 'unknown';
+    const match = containers.find((c) => c.name === containerName) || null;
+    if (!match) {
+        // Strict by name only — never the containers[0] fallback: a
+        // sidecar's exit 0 must not masquerade as the named container's.
+        return {
+            ok: false,
+            code: 'NAMED_CONTAINER_MISSING',
+            taskArn,
+            containerName,
+            available: containers.map((c) => c.name),
+            stoppedReason: finalTask?.stoppedReason || 'unknown',
+        };
+    }
+    const exitCode = match.exitCode;
+    const stoppedReason = match.reason || finalTask?.stoppedReason || 'unknown';
     return { ok: true, taskArn, exitCode, stoppedReason };
 }

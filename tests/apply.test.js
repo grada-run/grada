@@ -599,10 +599,16 @@ describe('Command: apply (mocked terraform spawn)', () => {
     const result = await applyStack({});
     expect(result).toMatchObject({ ok: false });
     expect(mockSpawn).not.toHaveBeenCalled();
+    // A malformed keys file is not a collision: distinct code, no
+    // collision_count (which would wrongly read 0).
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_applied',
-      expect.objectContaining({ success: false, error_code: 'SECRETS_ENV_COLLISION' })
+      expect.objectContaining({ success: false, error_code: 'MALFORMED_KEYS_FILE' })
     );
+    const calls = trackEvent.mock.calls.filter(([event]) => event === 'infrastructure_applied');
+    for (const [, payload] of calls) {
+      expect(payload).not.toHaveProperty('collision_count');
+    }
   });
 
   it('preflight passes clean trees and skips lambda targets', async () => {
@@ -721,6 +727,21 @@ describe('Command: apply on --target lambda projects', () => {
     expect(outroText).toContain('API URL: https://abc.execute-api.us-east-2.amazonaws.com (bypasses the CDN — for debugging)');
     expect(outroText).not.toContain('Direct URL:');
     expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('presents the API URL as the primary link when no CDN fronts it (lambda)', async () => {
+    mockOutputs({
+      api_gateway_url: { value: 'https://abc.execute-api.us-east-2.amazonaws.com' },
+    });
+    const runTerraformImpl = vi.fn(async () => { });
+    const spawnSyncImpl = mockAws({ imageExists: true });
+
+    const result = await applyStack({ autoApprove: true, runTerraformImpl, spawnSyncImpl });
+
+    expect(result).toMatchObject({ ok: true });
+    const outroText = stripVTControlCharacters(clack.mockOutro.mock.calls.map((call) => call[0]).join('\n'));
+    expect(outroText).toContain('API URL: https://abc.execute-api.us-east-2.amazonaws.com (share this link)');
+    expect(outroText).not.toContain('bypasses the CDN');
   });
 
   it('seeds the suffixed ECR repo on suffixed trees', async () => {

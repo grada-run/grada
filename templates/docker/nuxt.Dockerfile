@@ -1,5 +1,5 @@
 # Stage 1: Build the Nuxt Nitro output
-FROM node:22-alpine AS builder
+FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS builder
 WORKDIR /app
 
 # Install native build tools required to compile C++ Node modules (like better-sqlite3)
@@ -16,7 +16,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Production runner
-FROM node:22-alpine AS runner
+FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production

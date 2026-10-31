@@ -29,7 +29,13 @@ function collectManifestFiles(targetDir) {
         }
     };
     walk(tfDir);
-    for (const rel of ['Dockerfile', path.join('.github', 'workflows', 'deploy.yml')]) {
+    // Preview/teardown/drift carry project names + role ARNs and invite
+    // hand edits like deploy.yml — manifest them so re-init refuses
+    // dirty trees and backs them up instead of silently overwriting or
+    // leaving them stale (BUG-158).
+    for (const rel of ['Dockerfile', 'preview.yml', 'teardown.yml', 'drift.yml'].map((name) => (
+        name === 'Dockerfile' ? name : path.join('.github', 'workflows', name)
+    ))) {
         if (fs.existsSync(path.join(targetDir, rel))) relPaths.push(rel);
     }
     return relPaths.sort();
@@ -220,12 +226,15 @@ export async function planExistingFiles(targetDir, { isHeadless = false, force =
     const tfPath = path.join(targetDir, 'terraform');
     const dockerfilePath = path.join(targetDir, 'Dockerfile');
     const wfPath = path.join(targetDir, '.github', 'workflows', 'deploy.yml');
+    const extraWorkflows = ['preview.yml', 'teardown.yml', 'drift.yml']
+        .map((workflow) => path.join('.github', 'workflows', workflow))
+        .filter((rel) => fs.existsSync(path.join(targetDir, rel)));
 
     const tfExists = fs.existsSync(tfPath);
     const dockerfileExists = fs.existsSync(dockerfilePath);
     const wfExists = fs.existsSync(wfPath);
 
-    if (!tfExists && !dockerfileExists && !wfExists) {
+    if (!tfExists && !dockerfileExists && !wfExists && extraWorkflows.length === 0) {
         return { decision: 'clean', foundFiles: [], dirty: [] };
     }
 
@@ -233,6 +242,7 @@ export async function planExistingFiles(targetDir, { isHeadless = false, force =
     if (tfExists) foundFiles.push('terraform/');
     if (dockerfileExists) foundFiles.push('Dockerfile');
     if (wfExists) foundFiles.push('.github/workflows/deploy.yml');
+    foundFiles.push(...extraWorkflows);
 
     const treeStatus = detectModifiedTree(targetDir);
     const dirty = treeStatus ? [...treeStatus.modified, ...treeStatus.missing] : [];
@@ -293,6 +303,10 @@ export async function executeBackup(targetDir, plan = {}) {
         ['terraform/', path.join(targetDir, 'terraform')],
         ['Dockerfile', path.join(targetDir, 'Dockerfile')],
         ['.github/workflows/deploy.yml', path.join(targetDir, '.github', 'workflows', 'deploy.yml')],
+        ...['preview.yml', 'teardown.yml', 'drift.yml'].map((workflow) => {
+            const rel = path.join('.github', 'workflows', workflow);
+            return [rel, path.join(targetDir, rel)];
+        }),
     ];
     for (const [rel, fullPath] of renames) {
         if (!foundFiles.includes(rel)) continue;

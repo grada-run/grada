@@ -205,4 +205,36 @@ describe('eject backup purge', () => {
     ])('isGradaBackupName(%s) is %s', (name, expected) => {
         expect(isGradaBackupName(name)).toBe(expected);
     });
+
+    it('never purges through symlinks pointing outside the tree', async () => {
+        const originalCwd = process.cwd();
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eject-symlink-test-'));
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'eject-outside-'));
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            process.chdir(tmpDir);
+            fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(tmpDir, 'terraform', 'main.tf'), '# fake stack\n');
+            fs.writeFileSync(path.join(outside, 'precious.tf.bak.123'), 'precious');
+            fs.writeFileSync(path.join(outside, 'keep.txt'), 'keep');
+            fs.symlinkSync(outside, path.join(tmpDir, 'linkdir'));
+            fs.symlinkSync(path.join(outside, 'keep.txt'), path.join(tmpDir, 'evil.bak.456'));
+            fs.writeFileSync(path.join(tmpDir, 'terraform', 'old.tf.bak.789'), 'stale');
+
+            await ejectStack({ yes: true });
+
+            expect(fs.readFileSync(path.join(outside, 'precious.tf.bak.123'), 'utf8')).toBe('precious');
+            expect(fs.existsSync(path.join(tmpDir, 'linkdir'))).toBe(true);
+            expect(fs.existsSync(path.join(tmpDir, 'evil.bak.456'))).toBe(false);
+            expect(fs.existsSync(path.join(outside, 'keep.txt'))).toBe(true);
+            expect(fs.existsSync(path.join(tmpDir, 'terraform', 'old.tf.bak.789'))).toBe(false);
+        } finally {
+            process.chdir(originalCwd);
+            exitSpy.mockRestore();
+            consoleSpy.mockRestore();
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+            fs.rmSync(outside, { recursive: true, force: true });
+        }
+    });
 });

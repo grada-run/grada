@@ -842,6 +842,54 @@ describe('domain status', () => {
         expect(output).not.toContain('…');
     });
 
+    it('suppresses manual rows in route53 mode (Terraform manages them)', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com', zoneId: 'Z1' });
+        const getOutputs = vi.fn(async () => ({
+            acm_validation_records: { value: [{ name: '_abc.example.com', type: 'CNAME', value: '_xyz.acm-validations.aws.' }] },
+            custom_domain_cname_target: { value: 'd123.cloudfront.net' },
+        }));
+        const result = await runDomain({ cwd: dir, subcommand: 'status', getOutputs });
+        expect(result).toMatchObject({ ok: true, mode: 'route53' });
+        const output = capturedOutput();
+        expect(output).toContain('managed by Terraform');
+        expect(output).not.toContain('Add these records at your DNS provider');
+        expect(output).not.toContain('_abc.example.com');
+    });
+
+    it('never prints a CNAME row for an apex domain (ALIAS instead)', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com' });
+        const getOutputs = vi.fn(async () => ({
+            acm_validation_records: { value: [{ name: '_abc.example.com', type: 'CNAME', value: '_xyz.acm-validations.aws.' }] },
+            custom_domain_cname_target: { value: 'd123.cloudfront.net' },
+        }));
+        await runDomain({ cwd: dir, subcommand: 'status', getOutputs });
+        const output = capturedOutput();
+        // Validation CNAMEs are subdomains — always valid; the apex row is not.
+        expect(output).toContain('_abc.example.com');
+        expect(output).toContain('ALIAS');
+        expect(output).toContain('d123.cloudfront.net');
+        const apexLine = output.split('\n').find((line) => line.includes('example.com') && line.includes('d123.cloudfront.net'));
+        expect(apexLine).not.toContain('CNAME');
+    });
+
+    it('keeps the CNAME row for subdomains with an apex caveat', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        await runDomain({ cwd: dir, subcommand: 'add', domain: 'app.example.com' });
+        const getOutputs = vi.fn(async () => ({
+            custom_domain_cname_target: { value: 'd123.cloudfront.net' },
+        }));
+        await runDomain({ cwd: dir, subcommand: 'status', getOutputs });
+        const output = capturedOutput();
+        const rowLine = output.split('\n').find((line) => line.includes('app.example.com') && line.includes('d123.cloudfront.net'));
+        expect(rowLine).toContain('CNAME');
+        expect(output).toMatch(/apex/i);
+    });
+
     it('closes with an outro reflecting the wired state', async () => {
         const dir = makeTmp();
         writeCloudfrontTf(dir);

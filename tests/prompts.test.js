@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // during module evaluation and need the factories initialized.
 import { clackMocks as clack } from './helpers/clack.js';
 import { promptGitHubRepo } from '../src/utils/prompts.js';
+import { resolveDjangoWsgi } from '../src/utils/frameworks.js';
 
 
 beforeEach(() => {
@@ -27,5 +28,26 @@ describe('promptGitHubRepo', () => {
         expect(validate('acme/widgets')).toBeUndefined();
         expect(validate('')).toBeUndefined();
         expect(validate('not-a-slug')).toMatch(/owner\/name/);
+    });
+});
+
+describe('resolveDjangoWsgi prompt validation', () => {
+    it('re-prompts on module paths outside [A-Za-z0-9_.]', async () => {
+        clack.mockText.mockResolvedValue('core.wsgi');
+        await resolveDjangoWsgi('/tmp/nowhere', null, 'django', false);
+        const validate = clack.mockText.mock.calls[0][0].validate;
+        expect(validate).toBeTypeOf('function');
+        expect(validate('core.wsgi')).toBeUndefined();
+        expect(validate('my_project.wsgi')).toBeUndefined();
+        expect(validate('my project.wsgi')).toMatch(/letters, numbers, dots/);
+        expect(validate('core.wsgi"')).toMatch(/letters, numbers, dots/);
+        expect(validate('')).toMatch(/letters, numbers, dots/);
+    });
+
+    it('skips the prompt for non-django, procfile, and headless paths', async () => {
+        await expect(resolveDjangoWsgi('/tmp/nowhere', null, 'rails', false)).resolves.toBe('core.wsgi');
+        await expect(resolveDjangoWsgi('/tmp/nowhere', { web: ['gunicorn', 'shop.wsgi'] }, 'django', false)).resolves.toBe('shop.wsgi');
+        await expect(resolveDjangoWsgi('/tmp/nowhere', null, 'django', true)).resolves.toBe('core.wsgi');
+        expect(clack.mockText).not.toHaveBeenCalled();
     });
 });

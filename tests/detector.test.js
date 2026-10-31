@@ -76,6 +76,24 @@ describe('detectMigrationCommand', () => {
         });
         expect(detectMigrationCommand(dir)).toBe('npm run migrate');
     });
+
+    it('prefers the prescribed migration bundle over npm shims and framework markers', () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({ scripts: { migrate: 'drizzle-kit migrate' } }),
+            'drizzle.config.ts': 'export default {}',
+            'dist/migrate.cjs': 'module.exports = {}',
+        });
+        expect(detectMigrationCommand(dir)).toBe('node ./dist/migrate.cjs');
+    });
+
+    it('falls back through dist .mjs and scripts/ bundles', () => {
+        expect(detectMigrationCommand(makeProject({ 'dist/migrate.mjs': 'export default {}' })))
+            .toBe('node ./dist/migrate.mjs');
+        expect(detectMigrationCommand(makeProject({ 'scripts/migrate.cjs': 'module.exports = {}' })))
+            .toBe('node ./scripts/migrate.cjs');
+        expect(detectMigrationCommand(makeProject({ 'scripts/migrate.mjs': 'export default {}' })))
+            .toBe('node ./scripts/migrate.mjs');
+    });
 });
 
 describe('detectFramework SvelteKit contract', () => {

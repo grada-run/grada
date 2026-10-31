@@ -1,14 +1,19 @@
 name: Destroy PR Preview
 
 on:
-  pull_request:
+  # pull_request_target (not pull_request): this file comes from the base
+  # branch, so a fork PR cannot smuggle privileged steps into its own
+  # teardown run (BUG-140). The PR head is checked out explicitly by SHA
+  # in the guarded step instead.
+  pull_request_target:
     types: [closed]
 
-# Shared with the preview workflow: teardown queues behind an in-flight
-# deploy instead of racing it on the state lock. No cancel-in-progress —
-# a teardown must run to completion, never be skipped.
+# Own group (never preview's): a reopen must never cancel an in-flight
+# destroy. No cancel-in-progress — a teardown must run to completion,
+# never be skipped. The state lock serializes the destroy/apply race
+# instead (see -lock-timeout below).
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: teardown-${{ github.event.pull_request.number }}
 
 env:
   AWS_REGION: {{REGION}}
@@ -21,22 +26,71 @@ permissions:
 jobs:
   destroy-preview:
     name: Teardown Preview Environment
+    # Same-repo PRs only: fork previews are never provisioned (see the
+    # preview workflow guard), so fork teardowns have nothing to destroy.
+    # Trustworthy because this file comes from base (see trigger above).
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Pinned SHA: destroy exactly the tree the preview applied, so
+          # PR-only resources are torn down instead of leaked.
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
         with:
           role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
+      # A missing role means the stack is absent (never provisioned or
+      # destroyed): skip loud instead of bursting red assume noise. Any
+      # other assume failure fails loud with both cases named (BUG-138).
+      - name: Interpret credential failure
+        if: steps.aws-creds.outcome == 'failure'
+        run: |
+          ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role"
+          TOKEN="$(curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
+          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
+          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
+            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
+          else
+            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
+            exit 1
+          fi
+
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+
+      # Preview databases carry deletion protection (database.tf) and
+      # `terraform destroy` never applies var updates, so protection is
+      # lifted out-of-band first — instance and Aurora-cluster forms.
+      # DB-less previews skip quietly (describes find nothing).
+      - name: Lift preview deletion protection
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          APP_NAME="{{PROJECT_NAME}}-${{ env.WORKSPACE }}{{RESOURCE_SUFFIX}}"
+          DB_ID="$APP_NAME-db"
+          if aws rds describe-db-instances --db-instance-identifier "$DB_ID" --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+            echo "Lifting deletion protection on $DB_ID..."
+            aws rds modify-db-instance --db-instance-identifier "$DB_ID" --no-deletion-protection --apply-immediately --region ${{ env.AWS_REGION }}
+            aws rds wait db-instance-available --db-instance-identifier "$DB_ID" --region ${{ env.AWS_REGION }}
+          fi
+          CLUSTER_ID="$APP_NAME-db-cluster"
+          if aws rds describe-db-clusters --db-cluster-identifier "$CLUSTER_ID" --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+            echo "Lifting deletion protection on $CLUSTER_ID..."
+            aws rds modify-db-cluster --db-cluster-identifier "$CLUSTER_ID" --no-deletion-protection --apply-immediately --region ${{ env.AWS_REGION }}
+            aws rds wait db-cluster-available --db-cluster-identifier "$CLUSTER_ID" --region ${{ env.AWS_REGION }}
+          fi
 
       - name: Terraform Init & Destroy
+        if: steps.aws-creds.outcome == 'success'
         working-directory: ./terraform
         run: |
           terraform init -input=false
@@ -51,8 +105,19 @@ jobs:
           fi
           # Select the PR workspace
           terraform workspace select ${{ env.WORKSPACE }}
-          # Destroy all resources in this workspace safely
-          terraform destroy -auto-approve
+          # Destroy all resources in this workspace safely. A close during
+          # an in-flight preview waits on the state lock instead of
+          # racing it (teardown has its own concurrency group now).
+          terraform destroy -auto-approve -input=false -lock-timeout=10m
           # Switch back to default and delete the PR workspace
           terraform workspace select default
           terraform workspace delete ${{ env.WORKSPACE }}
+
+      # A cancelled destroy can strand the S3 state lockfile: point at
+      # recovery instead of leaving the next run to fail obscurely
+      # (BUG-194). Generic by necessity — the lock ID only exists in the
+      # follow-up run's own error.
+      - name: Cancellation recovery note
+        if: cancelled()
+        run: |
+          echo "::warning::This run was cancelled while Terraform may have held the state lock. If the next run fails with 'Error acquiring the state lock', run terraform force-unlock <LOCK_ID> (the ID is printed in that error) inside ./terraform — or delete the .tflock object beside the state file in S3 — then re-run."

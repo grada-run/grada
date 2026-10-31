@@ -319,6 +319,14 @@ export function detectMigrationCommand(cwd = process.cwd()) {
         }
     };
 
+    // 0. Prescribed migration bundle first: a built dist/migrate.cjs
+    // (then .mjs, then scripts/) is the stripped-runner-safe convention,
+    // so a bundle-ready tree must never detect a runner-refused npx shim.
+    if (exists(path.join('dist', 'migrate.cjs'))) return 'node ./dist/migrate.cjs';
+    if (exists(path.join('dist', 'migrate.mjs'))) return 'node ./dist/migrate.mjs';
+    if (exists(path.join('scripts', 'migrate.cjs'))) return 'node ./scripts/migrate.cjs';
+    if (exists(path.join('scripts', 'migrate.mjs'))) return 'node ./scripts/migrate.mjs';
+
     // 1. Explicit package.json migration scripts win over framework markers.
     const pkg = readJson('package.json');
     const scripts = pkg && typeof pkg === 'object' ? pkg.scripts || {} : {};

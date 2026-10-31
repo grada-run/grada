@@ -176,6 +176,55 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('warns loudly when a detection-driven worker is skipped headless (no worker.tf, no silence)', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({
+            dependencies: { bullmq: '^5.0.0' },
+            scripts: { worker: 'node worker.js' },
+        }));
+        const { exitCalls } = await runHeadlessInit([
+            '--headless', '--preconfigured', '--framework=nestjs', '--port=3000', '--region=eu-west-1',
+        ]);
+        expect(exitCalls).toEqual([]);
+        const warnings = clack.mockLogWarn.mock.calls.map(([message]) => String(message));
+        const skipped = warnings.find((message) => message.includes('Skipping the background worker'));
+        expect(skipped).toBeDefined();
+        expect(skipped).toContain('bullmq');
+        expect(skipped).toContain('npm run worker');
+        expect(skipped).toContain('Re-run init interactively');
+        let workerTf = null;
+        try {
+            workerTf = await fs.readFile(path.join(tmpDir, 'terraform', 'worker.tf'), 'utf-8');
+        } catch {
+            workerTf = null;
+        }
+        expect(workerTf).toBeNull();
+        expectNoInteractivePrompts();
+    });
+
+    it('warns loudly naming dropped vercel.json headers/rewrites (only redirects migrate)', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'vercel.json'), JSON.stringify({
+            redirects: [{ source: '/old', destination: '/new', permanent: true }],
+            headers: [
+                { source: '/a', headers: [{ key: 'x-a', value: '1' }] },
+                { source: '/b', headers: [{ key: 'x-b', value: '2' }] },
+            ],
+            rewrites: [{ source: '/c', destination: '/d' }],
+        }));
+        const { exitCalls } = await runHeadlessInit([
+            '--headless', '--preconfigured', '--framework=nestjs', '--port=3000', '--region=eu-west-1',
+        ]);
+        expect(exitCalls).toEqual([]);
+        const warnings = clack.mockLogWarn.mock.calls.map(([message]) => String(message));
+        const dropped = warnings.find((message) => message.includes('not migrated'));
+        expect(dropped).toBeDefined();
+        expect(dropped).toContain('2 header rules');
+        expect(dropped).toContain('1 rewrite');
+        expect(dropped).toContain('1 migrated');
+        expectNoInteractivePrompts();
+    });
+
     it('refuses loudly when inferred-headless without --headless instead of abandoning the wizard', async () => {
         // Simulate: bare `init` in CI (no TTY, no mode flags). Under vitest
         // resolveHeadless is true via the environment, matching CI.
@@ -385,6 +434,38 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    // BUG-158: re-init kept an existing drift.yml with zero output —
+    // now the old file is backed up and a fresh one scaffolded.
+    it('regenerates drift.yml on re-init instead of silently keeping it', async () => {
+        process.chdir(tmpDir);
+        await runHeadlessInit(['--headless', '--framework=node', '--setup-ci-drift']);
+        const second = await runHeadlessInit(['--headless', '--framework=node', '--setup-ci-drift']);
+        expect(second.exitCalls).toEqual([]);
+        expect(second.logText).toContain('Scaffolded .github/workflows/drift.yml');
+        const entries = await fs.readdir(path.join(tmpDir, '.github', 'workflows'));
+        expect(entries.some((entry) => entry.startsWith('drift.yml.bak.'))).toBe(true);
+    });
+
+    // BUG-158: on a rename, carried-over workflows must not linger
+    // referencing the OLD project — re-init backs them up loudly and
+    // regenerates (or baks) every in-place file.
+    it('backs up carried-over workflows on rename instead of leaving them stale', async () => {
+        process.chdir(tmpDir);
+        await runHeadlessInit(['--headless', '--framework=node', '--project-name=origapp', '--enablePrPreviews', '--setup-ci-drift']);
+        const second = await runHeadlessInit(['--headless', '--framework=node', '--project-name=newname', '--force']);
+        expect(second.exitCalls).toEqual([]);
+        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml', 'deploy.yml']) {
+            const wfPath = path.join(tmpDir, '.github', 'workflows', wf);
+            try {
+                const content = await fs.readFile(wfPath, 'utf-8');
+                expect(content).not.toContain('origapp');
+            } catch (error) {
+                if (error?.code !== 'ENOENT') throw error;
+            }
+        }
+        expect(second.logText).toContain('backed up');
+    });
+
     it('does not scaffold drift.yml without the flag', async () => {
         process.chdir(tmpDir);
         const parsed = parseCliArgs(['--headless', '--framework=node']);
@@ -410,6 +491,7 @@ describe('Headless contract (automation-safe)', () => {
     });
 
     it.each([
+        [['--headless', '--framework=static', '--target=static', '--with=storage:s3'], 'static-target-unsupported', 'STATIC_TARGET_UNSUPPORTED'],
         [['--headless', '--with=db:nope'], 'unsupported-capability', 'UNSUPPORTED_CAPABILITY'],
         [['--headless', '--with=ai:bedrock', '--model=bad model!'], 'invalid-model-id', 'INVALID_MODEL_ID'],
         [['--headless', '--with=email:ses'], 'missing-ses-domain', 'MISSING_SES_DOMAIN'],
@@ -649,6 +731,62 @@ describe('Headless contract (automation-safe)', () => {
             const config = await getTargetDirectory(true, { dir: '.' }, { projectName: 'Custom_Name' });
             expect(config.actualProjectName).toBe('custom-name');
             expect(config.targetDir).toBe(process.cwd());
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('headless Rails init keeps user CI files without --force', async () => {
+        process.chdir(tmpDir);
+        await fs.mkdir(path.join(tmpDir, '.github', 'workflows'), { recursive: true });
+        await fs.writeFile(path.join(tmpDir, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+        await fs.writeFile(path.join(tmpDir, '.github', 'dependabot.yml'), 'version: 2\n');
+        const { exitCalls } = await runHeadlessInit([
+            '--headless', '--preconfigured', '--framework=rails', '--port=3000', '--region=eu-west-1',
+        ]);
+        expect(exitCalls).toEqual([]);
+        expect(await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'ci.yml'), 'utf-8')).toBe('name: ci\n');
+        expect(await fs.readFile(path.join(tmpDir, '.github', 'dependabot.yml'), 'utf-8')).toBe('version: 2\n');
+        const warnings = clack.mockLogWarn.mock.calls.map(([message]) => String(message));
+        expect(warnings.some((message) => message.includes('ci.yml') && message.includes('--force'))).toBe(true);
+        expectNoInteractivePrompts();
+    });
+
+    it('headless Rails init renames user CI files loudly with --force', async () => {
+        process.chdir(tmpDir);
+        await fs.mkdir(path.join(tmpDir, '.github', 'workflows'), { recursive: true });
+        await fs.writeFile(path.join(tmpDir, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+        await fs.writeFile(path.join(tmpDir, '.github', 'dependabot.yml'), 'version: 2\n');
+        const { exitCalls, logText } = await runHeadlessInit([
+            '--headless', '--preconfigured', '--framework=rails', '--port=3000', '--region=eu-west-1', '--force',
+        ]);
+        expect(exitCalls).toEqual([]);
+        let kept = null;
+        try {
+            kept = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'ci.yml'), 'utf-8');
+        } catch {
+            kept = null;
+        }
+        expect(kept).toBeNull();
+        expect(await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'ci.yml.bak'), 'utf-8')).toBe('name: ci\n');
+        expect(await fs.readFile(path.join(tmpDir, '.github', 'dependabot.yml.bak'), 'utf-8')).toBe('version: 2\n');
+        expect(logText).toContain('.bak');
+        expectNoInteractivePrompts();
+    });
+
+    it('getTargetDirectory resolves an absolute --dir exactly there with a sane derived name', async () => {
+        process.chdir(tmpDir);
+        const absolute = path.join(tmpDir, 'w');
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            const headless = await getTargetDirectory(true, { dir: absolute });
+            expect(headless.targetDir).toBe(absolute);
+            expect(headless.actualProjectName).toBe('w');
+
+            clack.mockText.mockResolvedValueOnce(absolute);
+            const interactive = await getTargetDirectory(false, {});
+            expect(interactive.targetDir).toBe(absolute);
+            expect(interactive.actualProjectName).toBe('w');
         } finally {
             logSpy.mockRestore();
         }
@@ -965,6 +1103,25 @@ describe('Headless contract (automation-safe)', () => {
             expect(logged).not.toContain('LocationConstraint');
             expect(logged).toContain('put-bucket-tagging');
             expect(logged).toContain('put-bucket-versioning');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('offline checklist names only the workflows the scaffold emitted', async () => {
+        const { printOfflineChecklist } = await import('../src/commands/init.js');
+        const spies = mockConsoleTrio();
+        try {
+            printOfflineChecklist({ bucket: 'b', region: 'us-east-2', workflows: ['deploy'] });
+            const minimal = spies.logSpy.mock.calls.flat().join('\n');
+            expect(minimal).toContain('(deploy)');
+            expect(minimal).not.toContain('preview');
+            expect(minimal).not.toContain('drift');
+
+            spies.logSpy.mockClear();
+            printOfflineChecklist({ bucket: 'b', region: 'us-east-2', workflows: ['deploy', 'preview', 'teardown', 'drift'] });
+            const full = spies.logSpy.mock.calls.flat().join('\n');
+            expect(full).toContain('(deploy, preview, teardown, drift)');
         } finally {
             spies.restore();
         }

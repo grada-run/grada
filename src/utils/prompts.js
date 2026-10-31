@@ -27,15 +27,31 @@ function resolveActualProjectName(rawName) {
     return actualProjectName;
 }
 
+function resolveTargetDir(projectName) {
+    if (projectName === '.') return process.cwd();
+    // path.join does not reset on absolute segments — an absolute --dir
+    // would scaffold under $PWD/<abs> instead of exactly there.
+    if (path.isAbsolute(projectName)) return path.normalize(projectName);
+    return path.join(process.cwd(), projectName);
+}
+
+function deriveRawName(projectName, explicitName) {
+    if (explicitName !== '') return explicitName;
+    if (projectName === '.') return path.basename(process.cwd());
+    // An absolute dir derives from its own basename, never the whole path.
+    if (path.isAbsolute(projectName)) return path.basename(projectName);
+    return projectName;
+}
+
 export async function getTargetDirectory(isHeadless, headlessOptions, overrides = {}) {
     const explicitName = typeof overrides.projectName === 'string' ? overrides.projectName.trim() : '';
     if (isHeadless) {
         const projectName = headlessOptions.dir || '.';
-        const rawName = explicitName !== '' ? explicitName : (projectName === '.' ? path.basename(process.cwd()) : projectName);
+        const rawName = deriveRawName(projectName, explicitName);
         return {
             projectName,
             actualProjectName: resolveActualProjectName(rawName),
-            targetDir: projectName === '.' ? process.cwd() : path.join(process.cwd(), projectName)
+            targetDir: resolveTargetDir(projectName)
         };
     }
 
@@ -54,11 +70,11 @@ export async function getTargetDirectory(isHeadless, headlessOptions, overrides 
         process.exit(0);
     }
 
-    const rawName = explicitName !== '' ? explicitName : (projectName === '.' ? path.basename(process.cwd()) : projectName);
+    const rawName = deriveRawName(projectName, explicitName);
     return {
         projectName,
         actualProjectName: resolveActualProjectName(rawName),
-        targetDir: projectName === '.' ? process.cwd() : path.join(process.cwd(), projectName)
+        targetDir: resolveTargetDir(projectName)
     };
 }
 

@@ -141,6 +141,8 @@ npx grada-run db restore my-snapshot-id --yes   # skip confirmation (for CI)
 
 After `apply` completes, leave `snapshot_identifier` in `terraform/database.tf` — it keeps subsequent applies drift-free.
 
+> If `snapshot_identifier` is set through a variable or reference instead of a literal snapshot id, `restore` refuses to overwrite it — pin a literal id first.
+
 ## db enable-vector
 
 Enable the `pgvector` extension on RDS PostgreSQL or Aurora PostgreSQL for AI/RAG embeddings — no OpenSearch cluster required. Runs a one-off task inside your VPC that creates the extension with whatever Postgres client your image already has, then verifies the installed version. Refuses to run on MySQL projects.
@@ -171,11 +173,12 @@ Stream a local SQL dump or a remote database (Heroku, Supabase, Render, Railway)
 npx grada-run db import --file ./prod.sql --yes
 npx grada-run db import --file ./prod.sql.gz --yes   # gzipped dumps stream through gunzip
 npx grada-run db import --file ./prod.dump --yes     # Postgres custom archives via pg_restore
+npx grada-run db import --file ./prod.backup --yes   # .backup / .dump.gz custom archives via pg_restore
 npx grada-run db import --from "postgresql://user:pass@host:5432/db" --yes
 ```
 
 - Pass exactly one of `--file` / `--from` (or pick interactively when neither is given).
-- `.dump` archives restore with `pg_restore --no-owner --no-acl`; `--from` pipes `pg_dump` (`mysqldump` for MySQL targets) straight into the target client, so multi-gigabyte databases never touch your disk.
+- Custom-format dumps (`.dump`, `.backup`, `.dump.gz`) restore with `pg_restore --no-owner --no-acl`; `--from` pipes `pg_dump` (`mysqldump` for MySQL targets) straight into the target client, so multi-gigabyte databases never touch your disk.
 - **Secrets never touch argv or disk.** Target credentials come from Secrets Manager and travel via `PGPASSWORD` / `MYSQL_PWD`; `--from` passwords are parsed out of the URL and passed the same way. Validation errors print the URL with the password masked as `****`.
 - **TLS by default.** Postgres clients on both sides run with `PGSSLMODE=require` (unless you pinned `PGSSLMODE`), since RDS/Aurora enforces `rds.force_ssl = 1`.
 - The tunnel binds an ephemeral loopback port (never `5432`/`3306`, which may already serve a local database) and is always torn down afterwards, even on failure or Ctrl+C.
@@ -183,7 +186,7 @@ npx grada-run db import --from "postgresql://user:pass@host:5432/db" --yes
 
 | Flag | Description |
 | ---- | ----------- |
-| `--file <path>` | Local `.sql`, `.sql.gz`, or `.dump` file to import. |
+| `--file <path>` | Local `.sql`, `.sql.gz`, `.dump`, `.backup`, or `.dump.gz` file to import. |
 | `--from <url>` | Source `postgresql://` or `mysql://` URL (must include a database name). |
 | `--yes` | Skip the confirmation prompt. Required in non-interactive environments. |
 | `--project-name <name>` | Explicit project name override. |

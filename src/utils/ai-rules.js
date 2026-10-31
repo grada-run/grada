@@ -1,4 +1,5 @@
 import fsSync from 'fs';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 // Per-target architecture lines so generated rules describe the actual
 // topology instead of hardcoding ECS. Unknown/legacy contexts fall back
@@ -89,9 +90,9 @@ export function injectManagedBlock(filePath, content, isMarkdown = true) {
         } else {
             fileContent = fileContent.trim() + '\n' + block; // Append to bottom
         }
-        fsSync.writeFileSync(filePath, fileContent);
+        atomicWriteFileSync(filePath, fileContent);
     } else {
         // File doesn't exist, create it cleanly
-        fsSync.writeFileSync(filePath, block.trim() + '\n');
+        atomicWriteFileSync(filePath, block.trim() + '\n');
     }
 }

@@ -125,13 +125,51 @@ export async function reconcileOfflineTree({ targetDir, options = {}, projectNam
             return { proceed: false, result: { ok: false, reason: 'cancelled' } };
         }
     }
-    for (const file of files) {
-        const abs = path.join(targetDir, file);
-        fs.writeFileSync(abs, fs.readFileSync(abs, 'utf8').split(PLACEHOLDER_ACCOUNT_ID).join(accountId));
+    // Pre-validate everything before stamping anything: a missing or
+    // bucket-less backend.tf must fail BEFORE the first placeholder is
+    // rewritten, or the tree is left half-stamped with a raw throw.
+    const failBackendInvalid = async (message, hint = '  Restore terraform/backend.tf from version control and re-run apply.\n') => ({
+        proceed: false,
+        result: await failCommand({
+            noExit: isProgrammaticCall(options),
+            message,
+            hint,
+            event: 'infrastructure_applied',
+            telemetry: { projectName },
+            errorCode: 'RECONCILE_BACKEND_INVALID',
+            reason: 'reconcile-backend-invalid',
+        }),
+    });
+    let backend;
+    try {
+        backend = fs.readFileSync(path.join(targetDir, 'terraform', 'backend.tf'), 'utf8');
+    } catch (error) {
+        return failBackendInvalid(`\n✖ Cannot reconcile: terraform/backend.tf is unreadable (${error?.message ?? error}). Nothing was rewritten.\n`);
+    }
+    const parsedBackend = parseStateBucketBackend(backend);
+    const backendRegion = parsedBackend.region;
+    // The bucket may still carry the placeholder (we now read before
+    // stamping): resolve it to the account being reconciled with.
+    const bucket = parsedBackend.bucket ? parsedBackend.bucket.split(PLACEHOLDER_ACCOUNT_ID).join(accountId) : null;
+    if (!bucket) {
+        return failBackendInvalid('\n✖ Cannot reconcile: terraform/backend.tf has no state bucket. Nothing was rewritten.\n');
+    }
+    let staged;
+    try {
+        staged = files.map((file) => {
+            const abs = path.join(targetDir, file);
+            return { abs, content: fs.readFileSync(abs, 'utf8').split(PLACEHOLDER_ACCOUNT_ID).join(accountId) };
+        });
+    } catch (error) {
+        return failBackendInvalid(
+            `\n✖ Cannot reconcile: a placeholder file is unreadable (${error?.message ?? error}). Nothing was rewritten.\n`,
+            '  Restore the tree from version control and re-run apply.\n'
+        );
+    }
+    for (const { abs, content } of staged) {
+        fs.writeFileSync(abs, content);
     }
     log.message(color.green(`Rewrote ${files.length} file(s).`));
-    const backend = fs.readFileSync(path.join(targetDir, 'terraform', 'backend.tf'), 'utf8');
-    const { bucket, region: backendRegion } = parseStateBucketBackend(backend);
     let ensured;
     try {
         ensured = await ensureStateBucketExists({
@@ -476,8 +514,13 @@ async function applyStackMain(input = {}) {
                 ? '  ECS rejects task definitions where a secret shares a name with an environment variable. Remove the key(s) from .env and re-push (colliding keys are skipped automatically), then re-run apply.\n'
                 : '  Re-push your secrets to regenerate it: npx grada-run secrets push .env\n',
             event: 'infrastructure_applied',
-            telemetry: { projectName: path.basename(targetDir), collision_count: secretPreflight.keys.length },
-            errorCode: 'SECRETS_ENV_COLLISION',
+            // A malformed keys file is not a collision: it gets its own
+            // code and no collision_count (0 would lie).
+            telemetry: {
+                projectName: path.basename(targetDir),
+                ...(isCollision ? { collision_count: secretPreflight.keys.length } : {}),
+            },
+            errorCode: isCollision ? 'SECRETS_ENV_COLLISION' : 'MALFORMED_KEYS_FILE',
             reason: isCollision ? 'secrets-env-collision' : 'malformed-keys-file',
         });
     }
@@ -613,7 +656,10 @@ async function applyStackMain(input = {}) {
             });
         }
         if (outputsCheck.missing.length > 0 || outputsCheck.empty) {
-            console.log(color.yellow(`⚠ Partial outputs: expected [${expectedList}] for ${diskTarget}, got ${gotList} — proceeding; pass --allow-partial-outputs to silence this.`));
+            const tail = allowPartialOutputs
+                ? 'proceeding per --allow-partial-outputs.'
+                : 'proceeding; pass --allow-partial-outputs to silence this.';
+            console.log(color.yellow(`⚠ Partial outputs: expected [${expectedList}] for ${diskTarget}, got ${gotList} — ${tail}`));
         }
 
         const cfUrl = outputs.cloudfront_url?.value;
@@ -624,7 +670,13 @@ async function applyStackMain(input = {}) {
         let finalMessage = color.green('✅ Infrastructure is live!');
         if (cfUrl) finalMessage += `\n  🌍 App URL: ${color.cyan(cfUrl)} ${color.dim('(global CDN — share this link)')}`;
         if (albUrl) finalMessage += `\n  🚦 Direct URL: ${color.gray(albUrl)} ${color.dim('(bypasses the CDN — for debugging)')}`;
-        if (apiUrl) finalMessage += `\n  🔌 API URL: ${color.gray(apiUrl)} ${color.dim('(bypasses the CDN — for debugging)')}`;
+        // Lambda stacks have no CDN: without a CloudFront URL the API
+        // URL is the primary link, not a debug bypass.
+        if (apiUrl) {
+            finalMessage += cfUrl
+                ? `\n  🔌 API URL: ${color.gray(apiUrl)} ${color.dim('(bypasses the CDN — for debugging)')}`
+                : `\n  🔌 API URL: ${color.cyan(apiUrl)} ${color.dim('(share this link)')}`;
+        }
         if (siteUrl) finalMessage += `\n  🌍 Site URL: ${color.cyan(siteUrl)} ${color.dim('(global CDN — share this link)')}`;
 
         outro(`${finalMessage}\n\n  ${color.yellow('Push code to deploy your app and clear the 503 error:')}\n  ${color.cyan('git add . && git commit -m "ci: infra" && git push origin main')}`);

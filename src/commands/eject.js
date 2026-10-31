@@ -208,9 +208,20 @@ async function ejectStackMain(input = {}) {
             const files = fs.readdirSync(dir);
             for (const file of files) {
                 const fullPath = path.join(dir, file);
-                if (isGradaBackupName(file)) {
+                // lstat, never stat: a symlinked dir pointing outside the
+                // tree must neither be descended into nor deleted
+                // through. Backup-named links remove the link only.
+                let st;
+                try {
+                    st = fs.lstatSync(fullPath);
+                } catch {
+                    continue;
+                }
+                if (st.isSymbolicLink()) {
+                    if (isGradaBackupName(file)) fs.rmSync(fullPath, { force: true });
+                } else if (isGradaBackupName(file)) {
                     fs.rmSync(fullPath, { recursive: true, force: true });
-                } else if (fs.statSync(fullPath).isDirectory() && file !== 'node_modules' && file !== '.git') {
+                } else if (st.isDirectory() && file !== 'node_modules' && file !== '.git') {
                     cleanBackups(fullPath); // Recursively check subdirectories like .github/workflows
                 }
             }

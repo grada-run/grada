@@ -7,6 +7,7 @@ import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-ru
 import { readTerraformComputeTarget, resolveHeadless } from '../utils/resolvers.js';
 import { trackEvent, flushTelemetry, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
+import { atomicWriteFile } from '../utils/atomic-write.js';
 
 function getProjectContext(cwd) {
     const context = { region: '', port: '', target: readTerraformComputeTarget(cwd) };
@@ -72,13 +73,13 @@ async function syncAiMain(options = {}) {
         if (assistants.includes('cursor')) {
             const cursorDir = path.join(cwd, '.cursor', 'rules');
             if (!fsSync.existsSync(cursorDir)) fsSync.mkdirSync(cursorDir, { recursive: true });
-            fsSync.writeFileSync(path.join(cursorDir, 'grada.mdc'), getCursorRules(context));
+            await atomicWriteFile(path.join(cursorDir, 'grada.mdc'), getCursorRules(context));
         }
 
         if (assistants.includes('roo')) {
             const rooDir = path.join(cwd, '.roo', 'rules');
             if (!fsSync.existsSync(rooDir)) fsSync.mkdirSync(rooDir, { recursive: true });
-            fsSync.writeFileSync(path.join(rooDir, 'grada.md'), getBaseRules(context));
+            await atomicWriteFile(path.join(rooDir, 'grada.md'), getBaseRules(context));
         }
 
         if (assistants.includes('trae')) {
@@ -90,7 +91,7 @@ async function syncAiMain(options = {}) {
         if (assistants.includes('continue')) {
             const promptsDir = path.join(cwd, '.prompts');
             if (!fsSync.existsSync(promptsDir)) fsSync.mkdirSync(promptsDir, { recursive: true });
-            fsSync.writeFileSync(path.join(promptsDir, 'grada.prompt'), getBaseRules(context));
+            await atomicWriteFile(path.join(promptsDir, 'grada.prompt'), getBaseRules(context));
         }
 
         if (assistants.includes('windsurf')) {

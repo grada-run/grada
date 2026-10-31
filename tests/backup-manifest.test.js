@@ -87,6 +87,30 @@ describe('R15: preserved files across regenerate', () => {
     });
 });
 
+describe('BUG-158: preview/teardown/drift manifest + backup coverage', () => {
+    it('flags hand edits to the three workflows and backs them up under --force', async () => {
+        writeTree();
+        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml']) {
+            fs.mkdirSync(path.join(tmpDir, '.github', 'workflows'), { recursive: true });
+            fs.writeFileSync(path.join(tmpDir, '.github', 'workflows', wf), `# ${wf}\n`);
+        }
+        backup.writeInitManifest(tmpDir, { target: 'ecs' });
+        const manifest = JSON.parse(fs.readFileSync(path.join(tmpDir, '.grada', 'manifest.json'), 'utf-8'));
+        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml']) {
+            expect(manifest.files[path.join('.github', 'workflows', wf)]).toBeTruthy();
+        }
+        fs.writeFileSync(path.join(tmpDir, '.github', 'workflows', 'preview.yml'), '# hand-edited\n');
+        const refused = await backup.planExistingFiles(tmpDir, { isHeadless: true });
+        expect(refused.decision).toBe('refuse-dirty');
+        expect(refused.dirty).toContain(path.join('.github', 'workflows', 'preview.yml'));
+        const plan = await backup.planExistingFiles(tmpDir, { isHeadless: true, force: true });
+        await backup.executeBackup(tmpDir, plan);
+        const kept = fs.readdirSync(path.join(tmpDir, '.github', 'workflows'));
+        expect(kept.some((entry) => entry.startsWith('preview.yml.bak.'))).toBe(true);
+        expect(kept.some((entry) => entry.startsWith('drift.yml.bak.'))).toBe(true);
+    });
+});
+
 describe('R20: plan/execute split for existing files', () => {
     it('planExistingFiles classifies clean, dirty, and ejected trees without touching them', async () => {
         writeTree();

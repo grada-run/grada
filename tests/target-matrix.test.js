@@ -230,14 +230,14 @@ describe('matrix: logs (ADAPT static via missing-group guidance)', () => {
     });
 });
 
-describe('matrix: add queue:sqs (WARN static)', () => {
-    it('warns on static and never creates worker.tf', async () => {
+describe('matrix: add queue:sqs (REFUSE static)', () => {
+    it('refuses on static and scaffolds nothing', async () => {
         const dir = makeProject('add-sqs-static');
         const result = await runAdd({ cwd: dir, capability: 'queue:sqs' });
-        expect(result.ok).toBe(true);
-        expect(fs.existsSync(path.join(dir, 'terraform', 'sqs.tf'))).toBe(true);
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('static-target-unsupported');
+        expect(fs.existsSync(path.join(dir, 'terraform', 'sqs.tf'))).toBe(false);
         expect(fs.existsSync(path.join(dir, 'terraform', 'worker.tf'))).toBe(false);
-        expect(vi.mocked(log.warn)).toHaveBeenCalledWith(expect.stringContaining('long-running workers require ECS'));
     });
 });
 
@@ -336,7 +336,7 @@ describe('R12: addon target policy covers every capability', () => {
     it('pins the warn/refuse cells the matrix depends on', () => {
         expect(addonTargetDisposition('queue:sqs', 'ecs')).toBe('allow');
         expect(addonTargetDisposition('queue:sqs', 'lambda')).toBe('warn');
-        expect(addonTargetDisposition('queue:sqs', 'static')).toBe('warn');
+        expect(addonTargetDisposition('queue:sqs', 'static')).toBe('refuse');
         expect(addonTargetDisposition('cron', 'static')).toBe('refuse');
         expect(addonTargetDisposition('cron', 'ecs')).toBe('allow');
         expect(addonTargetDisposition('cron', 'lambda')).toBe('allow');

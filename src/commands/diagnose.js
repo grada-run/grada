@@ -13,6 +13,10 @@ import { pickNewestRunningTask } from '../utils/ecs.js';
 import { fetchLatestEvents } from './logs.js';
 
 export const LOG_FETCH_LIMIT = 50;
+// Stopped-task discovery bounds: 3 ListTasks pages (300 ARNs max),
+// described in DescribeTasks-sized chunks.
+export const STOPPED_LIST_MAX_PAGES = 3;
+export const DESCRIBE_TASKS_ARN_LIMIT = 100;
 
 export function extractStoppedReason(task) {
     return task?.stoppedReason || 'Unknown';
@@ -301,16 +305,27 @@ async function runDiagnoseMain(input = {}) {
     const logsClient = resolveClient(options.logsClient, CloudWatchLogsClient, { region });
 
     try {
-        const listResp = await ecsClient.send(
-            new ListTasksCommand({
-                cluster,
-                desiredStatus: 'STOPPED',
-                sort: 'DESC',
-                maxResults: 100
-            })
-        );
-
-        const taskArns = listResp.taskArns || [];
+        // A crash-looping service exceeds 100 stopped tasks within the ~1h
+        // retention, and ListTasks order is arbitrary — one page may miss
+        // the true latest crash. Paginate (bounded) before describing.
+        const taskArns = [];
+        let listToken;
+        let truncated = false;
+        for (let page = 0; page < STOPPED_LIST_MAX_PAGES; page++) {
+            const listResp = await ecsClient.send(
+                new ListTasksCommand({
+                    cluster,
+                    desiredStatus: 'STOPPED',
+                    sort: 'DESC',
+                    maxResults: 100,
+                    ...(listToken ? { nextToken: listToken } : {}),
+                })
+            );
+            taskArns.push(...(listResp.taskArns || []));
+            listToken = listResp.nextToken;
+            if (!listToken) break;
+            if (page + 1 >= STOPPED_LIST_MAX_PAGES) truncated = true;
+        }
 
         if (taskArns.length === 0) {
             s.stop('No stopped tasks found.');
@@ -320,17 +335,21 @@ async function runDiagnoseMain(input = {}) {
             return { healthy: true, stoppedReason: null, logs: [] };
         }
 
-        // ListTasks order is arbitrary — describe the full batch (up to the
-        // DescribeTasks 100-ARN limit) and pick the latest stopped task below.
-        s.message(`Describing ${Math.min(taskArns.length, 100)} stopped task(s)...`);
-        const descResp = await ecsClient.send(
-            new DescribeTasksCommand({
-                cluster,
-                tasks: taskArns.slice(0, 100)
-            })
-        );
-
-        const tasks = descResp.tasks || [];
+        // DescribeTasks caps at 100 ARNs per call — chunk the pages.
+        s.message(`Describing ${taskArns.length} stopped task(s)...`);
+        const tasks = [];
+        for (let i = 0; i < taskArns.length; i += DESCRIBE_TASKS_ARN_LIMIT) {
+            const descResp = await ecsClient.send(
+                new DescribeTasksCommand({
+                    cluster,
+                    tasks: taskArns.slice(i, i + DESCRIBE_TASKS_ARN_LIMIT)
+                })
+            );
+            tasks.push(...(descResp.tasks || []));
+        }
+        if (truncated) {
+            console.log(color.dim(`  Note: more than ${STOPPED_LIST_MAX_PAGES * 100} stopped tasks exist — diagnosing the latest of the first ${STOPPED_LIST_MAX_PAGES * 100}.`));
+        }
         if (tasks.length === 0) {
             s.stop('No task details returned.');
             console.log(color.yellow('⚠ Stopped task ARNs were listed, but ECS returned no task details.'));

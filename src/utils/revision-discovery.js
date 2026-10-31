@@ -31,16 +31,28 @@ export function pickNewestEligible(eligibleArns) {
     return eligibleArns.length > 0 ? eligibleArns[0] : null;
 }
 
+// Discovery horizon: 5 pages × 10 ACTIVE revisions. Past it, Case B
+// still refuses — but only after a genuine look, not a one-page peek.
+export const REVISION_DISCOVERY_MAX_PAGES = 5;
+
 export function createEcsRevisionAdapter(ecsClient) {
     return {
         listRevisionArns: async (family) => {
-            const listResp = await ecsClient.send(new ListTaskDefinitionsCommand({
-                familyPrefix: family,
-                status: 'ACTIVE',
-                sort: 'DESC',
-                maxResults: 10,
-            }));
-            return listResp.taskDefinitionArns || [];
+            const arns = [];
+            let nextToken;
+            for (let page = 0; page < REVISION_DISCOVERY_MAX_PAGES; page += 1) {
+                const listResp = await ecsClient.send(new ListTaskDefinitionsCommand({
+                    familyPrefix: family,
+                    status: 'ACTIVE',
+                    sort: 'DESC',
+                    maxResults: 10,
+                    ...(nextToken ? { nextToken } : {}),
+                }));
+                arns.push(...(listResp.taskDefinitionArns || []));
+                nextToken = listResp.nextToken;
+                if (!nextToken) break;
+            }
+            return arns;
         },
     };
 }

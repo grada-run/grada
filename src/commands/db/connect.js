@@ -271,14 +271,18 @@ async function runDbConnectMain(input = {}) {
             region,
         });
 
-        const { code } = await new Promise((resolve) => {
+        // Node reports signal death as code null — a killed tunnel is a
+        // failure naming the signal, never `?? 0` success (BUG-149).
+        const { code, signal } = await new Promise((resolve) => {
             const child = spawnImpl('aws', ssmArgs, { stdio: 'inherit' });
             child.on('error', (err) => {
                 console.log(color.red(`\n✖ Failed to start AWS CLI: ${err?.message || err}`));
                 console.log(color.dim(`Install help: ${AWS_CLI_INSTALL_URL}`));
                 resolve({ code: 1 });
             });
-            child.on('close', (code) => resolve({ code: code ?? 0 }));
+            child.on('close', (closeCode, closeSignal) => resolve(closeSignal
+                ? { code: 1, signal: closeSignal }
+                : { code: closeCode ?? 0 }));
         });
 
         // Telemetry carries only non-sensitive fields. Credentials never leave this process
@@ -288,10 +292,12 @@ async function runDbConnectMain(input = {}) {
         if (code !== 0) {
             const tunnelCode = Number.isInteger(code) && code > 0 ? Math.min(code, 255) : 1;
             return failCommand({
-                message: `\n✖ Database tunnel exited with code ${code}.`,
+                message: signal
+                    ? `\n✖ Database tunnel was killed by ${signal}.`
+                    : `\n✖ Database tunnel exited with code ${code}.`,
                 hint: '  If the connection failed, ensure the Session Manager plugin is installed and your AWS session is fresh.\n',
                 event: 'db_connect_run',
-                telemetry: { projectName, error_code: 'TUNNEL_EXIT_NONZERO', exit_code: tunnelCode },
+                telemetry: { projectName, error_code: 'TUNNEL_EXIT_NONZERO', exit_code: tunnelCode, ...(signal ? { signal } : {}) },
                 reason: 'tunnel-exit-nonzero',
                 resultExtra: { cluster, service, dbIdentifier, localPort, region },
                 exitCode: tunnelCode,

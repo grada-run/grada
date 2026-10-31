@@ -642,6 +642,100 @@ describe('runWake', () => {
         expect(output).toContain('Check your AWS credentials and region');
     });
 
+    // BUG-152: waking during a DB transition (e.g. `stopping`)
+    // restored ECS immediately and reported success while the database
+    // settled to stopped, never started. Wake must settle → start →
+    // wait (mirroring destroy) or fail loud naming the transition.
+    it('settles a transitional database before starting it', async () => {
+        const dir = makeTmp();
+        writeSleepState(dir, { staging: { env: 'staging', services: { app: 1, worker: 0 } } });
+        let describes = 0;
+        let started = false;
+        const order = [];
+        const ecsClient = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'DescribeServicesCommand') {
+                    return { services: (command.input.services || []).map((serviceName) => ({ serviceName, status: 'ACTIVE', desiredCount: 0, runningCount: 1 })) };
+                }
+                if (command.constructor.name === 'UpdateServiceCommand') {
+                    order.push('restore-ecs');
+                    return {};
+                }
+                throw new Error(`unexpected ECS command: ${command.constructor.name}`);
+            }),
+        };
+        const rdsClient = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'DescribeDBInstancesCommand') {
+                    describes += 1;
+                    // Initial probe + settle poll: stopping; then stopped;
+                    // after the start lands: available.
+                    if (started) return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'available' }] };
+                    if (describes <= 2) return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'stopping' }] };
+                    return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'stopped' }] };
+                }
+                if (command.constructor.name === 'DescribeDBClustersCommand') throw Object.assign(new Error('x'), { name: 'DBClusterNotFoundFault' });
+                if (command.constructor.name === 'StartDBInstanceCommand') {
+                    order.push('start-db');
+                    started = true;
+                    return {};
+                }
+                throw new Error(`unexpected RDS command: ${command.constructor.name}`);
+            }),
+        };
+        const result = await runWake(wakeOptions(dir, { ecsClient, rdsClient }));
+        expect(result.ok).toBe(true);
+        expect(result.dbStarted).toBe(true);
+        expect(order[0]).toBe('start-db');
+        expect(order).toContain('restore-ecs');
+    });
+
+    it('fails loud when the database never settles out of transition', async () => {
+        const dir = makeTmp();
+        writeSleepState(dir, { staging: { env: 'staging', services: { app: 1, worker: 0 } } });
+        const ecsClient = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'DescribeServicesCommand') return { services: [] };
+                throw new Error(`unexpected ECS command: ${command.constructor.name}`);
+            }),
+        };
+        const rdsClient = {
+            send: vi.fn(async (command) => {
+                if (command.constructor.name === 'DescribeDBInstancesCommand') {
+                    return { DBInstances: [{ Engine: 'postgres', DBInstanceStatus: 'stopping' }] };
+                }
+                if (command.constructor.name === 'DescribeDBClustersCommand') throw Object.assign(new Error('x'), { name: 'DBClusterNotFoundFault' });
+                throw new Error(`unexpected RDS command: ${command.constructor.name}`);
+            }),
+        };
+        const result = await runWake(wakeOptions(dir, { ecsClient, rdsClient, timeoutMs: 30 }));
+        expect(result.ok).toBe(false);
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const output = logSpy.mock.calls.map(([line]) => stripVTControlCharacters(String(line))).join('\n');
+        expect(output).toContain('stopping');
+        expect(ecsClient.send.mock.calls.some(([command]) => command.constructor.name === 'UpdateServiceCommand')).toBe(false);
+    });
+
+    it('bypasses the already-awake skip for a stopping database without a ledger', async () => {
+        const dir = makeTmp();
+        const target = resolveSleepTarget({ projectName: 'myapp', region: 'us-east-2', env: 'staging' }, dir);
+        const ecs = {
+            [target.appService]: activeService(target.appService, 1),
+            [target.workerService]: activeService(target.workerService, 1),
+        };
+        const { ecsClient, rdsClient } = mockClients({
+            ecs,
+            db: { instance: { Engine: 'postgres', DBInstanceStatus: 'stopping' } },
+        });
+        // No ledger, services awake, DB stopping forever: the skip must
+        // not fire (that would be success-with-stopped-DB) — the main
+        // flow settles and times out loud instead.
+        const result = await runWake(wakeOptions(dir, { ecsClient, rdsClient, timeoutMs: 30 }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('db-transition-timeout');
+        expect(result.skipped).toBeUndefined();
+    });
+
     it('fails on RDS wake timeout and keeps the ledger for retry', async () => {
         const dir = makeTmp();
         writeSleepState(dir, { staging: { env: 'staging', services: { app: 1, worker: 0 } } });

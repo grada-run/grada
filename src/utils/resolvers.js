@@ -61,17 +61,19 @@ function prettyTargetName(target) {
 // to failCommand ({ actual, reason, errorCode, message, hint }).
 // The message names every unsupported target ("…is not supported on
 // Lambda or Static targets.") so one call site covers all of them.
-export function guardComputeTarget({ cwd = process.cwd(), command, supported = ['ecs'], hint = null } = {}) {
-    const actual = readTerraformComputeTarget(cwd);
-    if (supported.includes(actual)) return null;
+export function guardComputeTarget({ cwd = process.cwd(), command, supported = ['ecs'], hint = null, actual = null } = {}) {
+    // `actual` overrides the disk read for callers validating a REQUESTED
+    // target (init --with on a fresh dir has no main.tf to read).
+    const resolved = actual ?? readTerraformComputeTarget(cwd);
+    if (supported.includes(resolved)) return null;
     const unsupported = COMPUTE_TARGETS.filter((target) => !supported.includes(target)).map(prettyTargetName);
     const targetList = unsupported.length > 1
         ? `${unsupported.slice(0, -1).join(', ')} or ${unsupported[unsupported.length - 1]} targets`
-        : `${unsupported[0] ?? prettyTargetName(actual)} targets`;
+        : `${unsupported[0] ?? prettyTargetName(resolved)} targets`;
     return {
-        actual,
-        reason: `${actual}-target-unsupported`,
-        errorCode: `${actual.toUpperCase()}_TARGET_UNSUPPORTED`,
+        actual: resolved,
+        reason: `${resolved}-target-unsupported`,
+        errorCode: `${resolved.toUpperCase()}_TARGET_UNSUPPORTED`,
         message: `\n✖ ${command} is not supported on ${targetList}.`,
         hint,
     };

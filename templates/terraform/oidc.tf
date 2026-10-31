@@ -48,8 +48,9 @@ resource "aws_iam_role" "github_actions" {
             # remote, or the setup prompt. "repo:*" means any GitHub repo's
             # Actions can assume this role — re-scope before going live.
             # Scoped trusts render both subject-claim formats: the classic
-            # `repo:<owner>/<name>:*` plus the immutable-claim companion
-            # `repo:<owner>@*/<name>@*:*` (repos created after 2026-07-15).
+            # `repo:<owner>/<name>:<suffix>` plus the immutable-claim
+            # companion `repo:<owner>@*/<name>@*:<same suffix>`
+            # (repos created after 2026-07-15).
             "token.actions.githubusercontent.com:sub" : {{GITHUB_REPO_SUB}}
           }
           StringEquals = {

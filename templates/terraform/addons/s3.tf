@@ -35,6 +35,34 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "storage" {
   }
 }
 
+# Versioning: an overwrite or bad deploy never destroys the previous
+# object. Old versions expire via the lifecycle rule below so storage
+# does not grow without bound.
+resource "aws_s3_bucket_versioning" "storage" {
+  bucket = aws_s3_bucket.storage.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "storage" {
+  bucket = aws_s3_bucket.storage.id
+
+  rule {
+    id     = "expire-old-versions"
+    status = "Enabled"
+
+    # Empty filter = the whole bucket (required: a filterless rule is a
+    # provider warning today and an error in future versions).
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
 resource "aws_s3_bucket_cors_configuration" "storage" {
   bucket = aws_s3_bucket.storage.id
 
@@ -58,10 +86,15 @@ resource "aws_cloudfront_origin_access_control" "storage_oac" {
 }
 
 # trivy:ignore:AVD-AWS-0011 - WAF is omitted by default to prevent unexpected monthly costs for users
+# Access logging is intentionally disabled (no logging_config): it doubles
+# request costs into a second bucket. Restrict price_class to
+# PriceClass_100/200 as well if most traffic is US/EU — edge coverage
+# shrinks but so does the transfer bill.
 resource "aws_cloudfront_distribution" "storage_cdn" {
   enabled             = true
   is_ipv6_enabled     = true
   wait_for_deployment = false
+  price_class         = "PriceClass_All"
 
   origin {
     domain_name              = aws_s3_bucket.storage.bucket_regional_domain_name

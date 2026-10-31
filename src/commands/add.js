@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import color from 'picocolors';
 import { intro, outro, select, text, spinner, log, cancel, isCancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, isActiveEnvValue, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe, detectComputeTargetFromMainTf, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveAppName, resolveCwd, readFileSafe, readResourceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, guardComputeTarget } from '../utils/resolvers.js';
 import { resolveDbEngineRefs, buildDbEntries, convertDatabaseTfForLambda, addRandomProvider } from '../utils/generator.js';
 import { ADDON_REGISTRY, ADDON_UPSERT_KEYS, resolveAddonEnvVars, addonTargetDisposition, addonSupportedTargets } from '../utils/addons.js';
 import { stripTerraformMetadata, readEjectedMarker } from '../utils/terraform-metadata.js';
@@ -42,7 +42,9 @@ export const CUSTOM_MODEL_VALUE = '__custom__';
 // EventBridge Scheduler expressions (`cron(...)`, `rate(...)`, `at(...)`)
 // plus safe IANA timezone characters. Single schedule per project: `--name`
 // customizes it, `--force` replaces it in place.
-export const CRON_SCHEDULE_RE = /^(cron|rate|at)\(.+\)$/;
+// The expression renders raw inside quoted HCL, so `"` and control
+// characters are rejected here — never escaped downstream.
+export const CRON_SCHEDULE_RE = /^(cron|rate|at)\([^"\x00-\x1f\x7f]+\)$/;
 export const CRON_TIMEZONE_RE = /^[A-Za-z0-9/_+-]{1,64}$/;
 export const CRON_CUSTOM_VALUE = '__custom__';
 export const DEFAULT_CRON_SCHEDULE = 'cron(0 0 * * ? *)';
@@ -493,6 +495,63 @@ export function upsertManagedEnvNames(tfContent, names = []) {
     return content.replace(match[0], `managed_env_names = [${merged.map((name) => JSON.stringify(name)).join(', ')}]`);
 }
 
+// Removes names from the `managed_env_names` collision-guard list,
+// preserving the surviving order. Returns content unchanged when the
+// block is absent or no name matched.
+export function removeManagedEnvNames(tfContent, names = []) {
+    const content = String(tfContent ?? '');
+    const match = /managed_env_names\s*=\s*\[([^\]]*)\]/.exec(content);
+    if (!match) return content;
+    const remove = new Set(names);
+    const existing = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    const kept = existing.filter((name) => !remove.has(name));
+    if (kept.length === existing.length) return content;
+    return content.replace(match[0], `managed_env_names = [${kept.map((name) => JSON.stringify(name)).join(', ')}]`);
+}
+
+// Removes one `{ name = "<name>", value = ... }` entry from the first
+// `environment = [...]` array of `aws_ecs_task_definition."<taskName>"`,
+// repairing the surrounding separators (`, ,`, dangling edge commas,
+// orphaned blank lines) so the array stays valid. Returns the content
+// unchanged when the resource, array, or entry cannot be found.
+export function removeContainerEnvVar(tfContent, name, taskDefinitionName = 'app') {
+    if (typeof taskDefinitionName === 'object' && taskDefinitionName !== null) {
+        taskDefinitionName = taskDefinitionName.taskDefinitionName || 'app';
+    }
+    const content = String(tfContent ?? '');
+    const bounds = findEnvBlockBounds(content, taskDefinitionName || 'app');
+    if (!bounds) return content;
+    const block = content.slice(bounds.openIdx, bounds.closeIdx + 1);
+    const namePattern = new RegExp(`(?:"name"|name)\\s*[:=]\\s*"${escapeRegExp(name)}"`);
+    const nameMatch = namePattern.exec(block);
+    if (!nameMatch) return content;
+    const objBounds = enclosingBraceBounds(block, nameMatch.index);
+    if (!objBounds) return content;
+    const updated = (block.slice(0, objBounds.openIdx) + block.slice(objBounds.closeIdx + 1))
+        .replace(/,\s*,/g, ',')
+        .replace(/\[\s*,/g, '[')
+        .replace(/,\s*\]/g, ']')
+        .replace(/\n[ \t]*\n/g, '\n');
+    return content.slice(0, bounds.openIdx) + updated + content.slice(bounds.closeIdx + 1);
+}
+
+// Removes one `NAME = ...` line from the `variables = {...}` map of
+// `aws_lambda_function."app"`, realigning the surviving run so
+// `terraform fmt` stays clean. Returns the content unchanged when the
+// resource, map, or entry cannot be found.
+export function removeLambdaEnvVar(tfContent, name) {
+    const content = String(tfContent ?? '');
+    if (!/^[A-Za-z0-9_]+$/.test(String(name))) return content;
+    const bounds = findLambdaVariablesBounds(content);
+    if (!bounds) return content;
+    const linePattern = new RegExp(`^[^\\n]*?\\b${escapeRegExp(name)}\\s*=[^\\n]*\\n?`, 'm');
+    const mapBlock = content.slice(bounds.openIdx, bounds.closeIdx + 1);
+    if (!linePattern.test(mapBlock)) return content;
+    return content.slice(0, bounds.openIdx + 1)
+        + realignAssignmentRuns(content.slice(bounds.openIdx + 1, bounds.closeIdx).replace(linePattern, ''))
+        + content.slice(bounds.closeIdx);
+}
+
 // Idempotently appends the isolated-subnet block to network.tf content.
 // Returns the content unchanged when the block already exists. Uses the
 // line-anchored lookup so a `#` comment quoting the header never
@@ -646,11 +705,15 @@ export function renderWorkerAutoscalingBlock(hasWorker) {
 // no-ops, so callers pass the full maps unconditionally.
 function renderAddonTemplate(templateContent, templateVars = {}, conditionalBlocks = {}) {
     let rendered = String(templateContent ?? '');
+    // Replacement FUNCTIONS (not strings): `$` patterns in values (cron
+    // commands, ARNs) land byte-identical (BUG-156).
     for (const [key, value] of Object.entries(templateVars)) {
-        rendered = rendered.replaceAll(`{{${key}}}`, value ?? '');
+        const literal = String(value ?? '');
+        rendered = rendered.replaceAll(`{{${key}}}`, () => literal);
     }
     for (const [key, value] of Object.entries(conditionalBlocks)) {
-        rendered = rendered.replaceAll(`{{${key}}}`, value ?? '');
+        const literal = String(value ?? '');
+        rendered = rendered.replaceAll(`{{${key}}}`, () => literal);
     }
     return rendered;
 }
@@ -1179,14 +1242,19 @@ export async function resolveAddonOptions(capability, options = {}, ctx = {}) {
                 hint: '  Use a lowercase slug with letters, numbers, and hyphens (e.g. --name nightly-cleanup).\n',
             };
         }
-        const scheduleName = `${resolveProjectName(opts, cwd)}-cron-${name}`;
+        // The rendered schedule name is `${local.app_name}-cron-<name>`
+        // where app_name carries the workspace env_suffix AND the
+        // always-present resource suffix — validate the rendered length,
+        // not the bare base, or apply-time EventBridge rejects it.
+        const appName = resolveAppName(resolveProjectName(opts, cwd), opts.workspace, cwd);
+        const scheduleName = `${appName}${readResourceSuffix(cwd)}-cron-${name}`;
         if (scheduleName.length > MAX_SCHEDULE_NAME_LENGTH) {
             return {
                 ok: false,
                 errorCode: 'INVALID_CRON_NAME',
                 reason: 'invalid-cron-name',
-                message: `\n✖ Schedule name "${scheduleName}" exceeds the ${MAX_SCHEDULE_NAME_LENGTH}-character EventBridge Scheduler limit.`,
-                hint: '  Use a shorter --name (PR-preview workspaces add a suffix on top).\n',
+                message: `\n✖ Schedule name "${scheduleName}" (${scheduleName.length} chars) exceeds the ${MAX_SCHEDULE_NAME_LENGTH}-character EventBridge Scheduler limit.`,
+                hint: '  Use a shorter --name (PR-preview workspaces and the stack resource suffix count toward the limit).\n',
             };
         }
 
@@ -1570,17 +1638,28 @@ async function scaffoldDatabaseInner(engine, projectDir, refs) {
     } else {
         updated = upsertManagedEnvNames(updated, [...env.map((entry) => entry.name), ...secrets.map((entry) => entry.name)]);
     }
+    // Switches TO postgres must also remove DB_ENGINE: the new entry set
+    // has no such key, so add-only injection would leave the stale
+    // aurora/mysql value (plus its guard-list entry) behind.
+    if (refs.engine === 'postgres') {
+        updated = isLambda
+            ? removeLambdaEnvVar(updated, 'DB_ENGINE')
+            : removeManagedEnvNames(removeContainerEnvVar(updated, 'DB_ENGINE', 'app'), ['DB_ENGINE']);
+    }
     const envInjected = updated !== mainTfContent;
     if (envInjected) await atomicWriteFile(mainTfPath, normalizeBlankLines(updated));
 
     let workerEnvInjected = false;
     if (!isLambda && fsSync.existsSync(workerTfPath)) {
         const workerTfContent = await fs.readFile(workerTfPath, 'utf-8');
-        const updatedWorker = injectContainerSecrets(
+        let updatedWorker = injectContainerSecrets(
             injectContainerEnvVars(workerTfContent, env, 'worker', injectOptions),
             secrets,
             'worker'
         );
+        if (refs.engine === 'postgres') {
+            updatedWorker = removeContainerEnvVar(updatedWorker, 'DB_ENGINE', 'worker');
+        }
         workerEnvInjected = updatedWorker !== workerTfContent;
         if (workerEnvInjected) await atomicWriteFile(workerTfPath, normalizeBlankLines(updatedWorker));
     }
@@ -1670,7 +1749,7 @@ export async function runAddDatabase({ cwd, projectName, region, force = false, 
     if (guarded.guardFailed === 'referenced') {
         return failCommand({
             noExit,
-            message: '\n⚠ main.tf already references a Postgres database. Pass --force to overwrite.\n',
+            message: '\n⚠ main.tf already references a relational database. Pass --force to overwrite.\n',
             tone: 'yellow',
             event: 'add_run',
             telemetry: { projectName, capability, error_code: 'DB_ALREADY_REFERENCED' },
@@ -1753,9 +1832,12 @@ async function scaffoldAddonInner(capability, resolvedOpts, { cwd, region } = {}
     // provisioning when the project was generated without a database.
     const withVpc = capability === 'db:redis' ? ensureLambdaVpcConfig(updated) : updated;
     const withManaged = isLambda ? withVpc : upsertManagedEnvNames(withVpc, envVars.map((entry) => entry.name));
-    const envInjected = withManaged !== mainTfContent;
+    // The write gate covers the guard list too, but envInjected (the
+    // banner flag) tracks injection only — a guard-list-only or VPC-only
+    // update must not claim container env injection.
+    const envInjected = updated !== mainTfContent;
     const vpcInjected = withVpc !== updated;
-    if (envInjected) {
+    if (withManaged !== mainTfContent) {
         await atomicWriteFile(mainTfPath, normalizeBlankLines(withManaged));
     }
 

@@ -320,6 +320,124 @@ describe('Command: rollback (mocked ECS)', () => {
         }
     });
 
+    // BUG-127: an explicit NEWER revision silently roll-forwards —
+    // rollback must only move to older revisions.
+    it('refuses an explicit revision newer than deployed', async () => {
+        let describeCount = 0;
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) {
+                describeCount += 1;
+                return { services: [activeService(14)] };
+            }
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                return { taskDefinition: { taskDefinitionArn: arn(16), family: 'myapp-task', revision: 16, status: 'ACTIVE' } };
+            }
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        const result = await runRollback(baseOptions({ revision: '16', ecsClient }));
+
+        expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'rollback-newer-revision' }));
+        expect(ecsClient.send.mock.calls.some(([c]) => c instanceof UpdateServiceCommand)).toBe(false);
+        expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    // BUG-153: Case A must pair web+worker on the same image, not
+    // newest-previous regardless of what web requested.
+    it('pairs the worker target image with the requested web revision', async () => {
+        const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-pair-'));
+        fs.mkdirSync(path.join(workerDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(workerDir, 'terraform', 'worker.tf'), '# worker service\n');
+        try {
+            const workerArn = (rev) => `arn:aws:ecs:us-east-2:123456789012:task-definition/myapp-worker-task:${rev}`;
+            const img = (sha) => `123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp-repo:${sha}`;
+            const defs = {
+                [arn(12)]: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE', containerDefinitions: [{ image: img('aaa') }] },
+                [workerArn(7)]: { taskDefinitionArn: workerArn(7), family: 'myapp-worker-task', revision: 7, status: 'ACTIVE', containerDefinitions: [{ image: img('bbb') }] },
+                [workerArn(6)]: { taskDefinitionArn: workerArn(6), family: 'myapp-worker-task', revision: 6, status: 'ACTIVE', containerDefinitions: [{ image: img('aaa') }] },
+            };
+            const ecsClient = mockClient((command) => {
+                if (command instanceof DescribeServicesCommand) {
+                    const name = command.input?.services?.[0];
+                    if (name === 'myapp-worker-service') {
+                        return { services: [{ serviceName: name, status: 'ACTIVE', taskDefinition: workerArn(8), desiredCount: 1, runningCount: 1, deployments: [{ status: 'PRIMARY', taskDefinition: workerArn(6), rolloutState: 'COMPLETED', runningCount: 1, desiredCount: 1 }] }] };
+                    }
+                    return { services: [activeService(14, completedPrimary(12))] };
+                }
+                if (command instanceof DescribeTaskDefinitionCommand) {
+                    const key = String(command.input?.taskDefinition);
+                    if (key === 'myapp-task:12') return { taskDefinition: defs[arn(12)] };
+                    return { taskDefinition: defs[key] };
+                }
+                if (command instanceof ListTaskDefinitionsCommand) {
+                    return { taskDefinitionArns: [workerArn(7), workerArn(6)] };
+                }
+                if (command instanceof UpdateServiceCommand) return {};
+                throw new Error(`unexpected command ${command.constructor.name}`);
+            });
+
+            const result = await runRollback({
+                projectName: 'myapp', cluster: 'myapp-cluster', region: 'us-east-2',
+                cwd: workerDir, pollIntervalMs: 1, timeoutMs: 5000, isHeadless: true,
+                revision: '12', ecsClient,
+            });
+
+            expect(result.ok).toBe(true);
+            const updates = ecsClient.send.mock.calls.map(([c]) => c).filter((c) => c instanceof UpdateServiceCommand);
+            expect(updates[1].input).toMatchObject({ service: 'myapp-worker-service', taskDefinition: workerArn(6) });
+            expect(result.worker).toMatchObject({ targetRevision: '6' });
+        } finally {
+            fs.rmSync(workerDir, { recursive: true, force: true });
+        }
+    });
+
+    it('falls back loudly when no worker revision matches the web image', async () => {
+        const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-skew-'));
+        fs.mkdirSync(path.join(workerDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(workerDir, 'terraform', 'worker.tf'), '# worker service\n');
+        try {
+            const workerArn = (rev) => `arn:aws:ecs:us-east-2:123456789012:task-definition/myapp-worker-task:${rev}`;
+            const img = (sha) => `123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp-repo:${sha}`;
+            const defs = {
+                [arn(12)]: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE', containerDefinitions: [{ image: img('aaa') }] },
+                [workerArn(7)]: { taskDefinitionArn: workerArn(7), family: 'myapp-worker-task', revision: 7, status: 'ACTIVE', containerDefinitions: [{ image: img('bbb') }] },
+            };
+            const ecsClient = mockClient((command) => {
+                if (command instanceof DescribeServicesCommand) {
+                    const name = command.input?.services?.[0];
+                    if (name === 'myapp-worker-service') {
+                        return { services: [{ serviceName: name, status: 'ACTIVE', taskDefinition: workerArn(8), desiredCount: 1, runningCount: 1, deployments: [{ status: 'PRIMARY', taskDefinition: workerArn(7), rolloutState: 'COMPLETED', runningCount: 1, desiredCount: 1 }] }] };
+                    }
+                    return { services: [activeService(14, completedPrimary(12))] };
+                }
+                if (command instanceof DescribeTaskDefinitionCommand) {
+                    const key = String(command.input?.taskDefinition);
+                    if (key === 'myapp-task:12') return { taskDefinition: defs[arn(12)] };
+                    return { taskDefinition: defs[key] };
+                }
+                if (command instanceof ListTaskDefinitionsCommand) {
+                    return { taskDefinitionArns: [workerArn(7)] };
+                }
+                if (command instanceof UpdateServiceCommand) return {};
+                throw new Error(`unexpected command ${command.constructor.name}`);
+            });
+
+            const result = await runRollback({
+                projectName: 'myapp', cluster: 'myapp-cluster', region: 'us-east-2',
+                cwd: workerDir, pollIntervalMs: 1, timeoutMs: 5000, isHeadless: true,
+                revision: '12', ecsClient,
+            });
+
+            expect(result.ok).toBe(true);
+            expect(result.worker).toMatchObject({ targetRevision: '7' });
+            const output = consoleSpy.mock.calls.map(([line]) => String(line)).join('\n');
+            expect(output).toContain(img('aaa'));
+            expect(output).toContain(img('bbb'));
+        } finally {
+            fs.rmSync(workerDir, { recursive: true, force: true });
+        }
+    });
+
     it('explicit numeric revision describes family:12, updates service, waits for COMPLETED', async () => {
         let describeCount = 0;
         const ecsClient = mockClient((command) => {
@@ -387,6 +505,27 @@ describe('Command: rollback (mocked ECS)', () => {
             skipWait: true,
         });
         expect(result).toMatchObject({ ok: true, targetTaskDefArn: arn(12), targetRevision: '12' });
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("honors skipWait: 'true' like boolean true (programmatic string flags)", async () => {
+        let describeServicesCalls = 0;
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) {
+                describeServicesCalls += 1;
+                return { services: [activeService(14)] };
+            }
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                return { taskDefinition: { taskDefinitionArn: arn(12), family: 'myapp-task', revision: 12, status: 'ACTIVE' } };
+            }
+            if (command instanceof UpdateServiceCommand) return {};
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        const result = await runRollback({ ...baseOptions(), revision: '12', skipWait: 'true', ecsClient });
+
+        expect(describeServicesCalls).toBe(1);
+        expect(result).toMatchObject({ ok: true, targetRevision: '12' });
         expect(exitSpy).not.toHaveBeenCalled();
     });
 

@@ -10,6 +10,13 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    # Declared unconditionally (BUG-137): the conditional injection left
+    # pre-existing trees without the pin when the DB arrived via
+    # `add database`. Unused on DB-less trees; init installs it anyway.
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   backend "s3" {

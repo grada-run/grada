@@ -26,7 +26,11 @@ resource "aws_db_instance" "postgres" {
   engine_version    = "8.0"
   instance_class    = "db.t4g.micro"
   allocated_storage = 20
-  storage_encrypted = true
+  # Cap storage autoscaling: without a ceiling a runaway workload can
+  # grow the volume (and the bill) without bound.
+  max_allocated_storage   = 200
+  backup_retention_period = 7
+  storage_encrypted       = true
 
   # Strip dashes for the database name: RDS MySQL db_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)

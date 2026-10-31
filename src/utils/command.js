@@ -192,3 +192,23 @@ export async function failProjectNotInitialized({ event, noExit = false }) {
         noExit,
     });
 }
+
+// Shared loud failure for the ecs-runner NAMED_CONTAINER_MISSING
+// outcome: the stopped task has no such container, so no exit code can
+// be attributed. `noun` names the task kind for the spinner line.
+export async function failNamedContainerMissing({ spinner, outcome, cluster, service, region, event, telemetry, noun = 'Task' }) {
+    try {
+        spinner.stop(color.red(`${noun} container missing from stopped task.`));
+    } catch {
+        // The spinner may already be stopped; the message below carries it.
+    }
+    return failCommand({
+        message: `\n✖ The stopped task has no "${outcome.containerName}" container (found: ${outcome.available.join(', ') || 'none'}). Task stopped: ${outcome.stoppedReason}.\n`,
+        hint: 'The task definition may have changed mid-run; retry, or pin --task-def to the service revision.\n',
+        event,
+        telemetry,
+        errorCode: 'NAMED_CONTAINER_MISSING',
+        reason: 'named-container-missing',
+        resultExtra: { cluster, service, region, taskArn: outcome.taskArn },
+    });
+}

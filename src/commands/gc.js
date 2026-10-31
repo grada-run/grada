@@ -6,6 +6,7 @@ import { CloudWatchLogsClient, DescribeLogGroupsCommand, DeleteLogGroupCommand }
 import { ECSClient, ListClustersCommand, ListServicesCommand, DescribeServicesCommand } from '@aws-sdk/client-ecs';
 import { EC2Client, DescribeAddressesCommand, ReleaseAddressCommand, DescribeVpcsCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import { SecretsManagerClient, ListSecretsCommand } from '@aws-sdk/client-secrets-manager';
+import { RDSClient, DescribeDBSnapshotsCommand, DescribeDBClusterSnapshotsCommand, DeleteDBSnapshotCommand, DeleteDBClusterSnapshotCommand } from '@aws-sdk/client-rds';
 import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
@@ -14,16 +15,23 @@ import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readRes
 import { resolveClient } from '../utils/aws.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
+import { resolveDbIdentifier, resolveDbClusterIdentifier } from '../utils/rds.js';
 
 export const CONFIRM_MESSAGE = 'Are you sure you want to permanently delete these orphaned resources? (y/N)';
+
+// Pre-destroy manual snapshots younger than this are never proposed:
+// recent destroys stay restorable until the threshold passes.
+export const DEFAULT_SNAPSHOT_MAX_AGE_DAYS = 30;
 
 export function parseGcArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'gc') args.shift();
     // --yes auto-confirms the delete prompt (explicit opt-in; the default
     // path still prompts). --deep adds the report-only deep scan.
+    // --snapshot-max-age-days retires pre-destroy manual snapshots older
+    // than N days (default 30).
     const { options, unknown } = parseFlags(args, {
-        string: ['region', 'project-name'],
+        string: ['region', 'project-name', { name: 'snapshot-max-age-days', key: 'snapshotMaxAgeDays' }],
         boolean: ['deep', 'yes', 'headless'],
     });
     if (unknown.length > 0) options.unknownFlags = unknown;
@@ -263,6 +271,50 @@ async function discoverUnattachedEips({ ec2Client, projectName }) {
     return unattachedEips;
 }
 
+// Standard target discovery: pre-destroy manual snapshots older than
+// the age threshold. Scoped by the exact `<db>-manual-<stamp>` naming
+// pattern destroy writes (instance AND cluster snapshots) — foreign,
+// automated, non-available, and young snapshots are never proposed.
+// Tolerant of missing clients/identifiers (programmatic callers without
+// RDS context discover nothing instead of throwing).
+async function discoverOldManualSnapshots({ rdsClient, dbIdentifier, dbClusterIdentifier, snapshotMaxAgeDays } = {}) {
+    if (!rdsClient || (!dbIdentifier && !dbClusterIdentifier)) return [];
+    const maxAgeDays = Number(snapshotMaxAgeDays ?? DEFAULT_SNAPSHOT_MAX_AGE_DAYS);
+    const cutoffMs = Date.now() - (Number.isFinite(maxAgeDays) ? maxAgeDays : DEFAULT_SNAPSHOT_MAX_AGE_DAYS) * 86400000;
+    const patterns = [dbIdentifier, dbClusterIdentifier]
+        .filter((id) => typeof id === 'string' && id.trim())
+        .map((id) => new RegExp(`^${escapeRegExp(id.trim().toLowerCase())}-manual-\\d{8}-\\d{6}$`));
+    if (patterns.length === 0) return [];
+    const isRetirable = (snapshotId, status, type, createTime) => {
+        if (status !== 'available' || type !== 'manual') return false;
+        const createdMs = createTime ? new Date(createTime).getTime() : NaN;
+        if (!Number.isFinite(createdMs) || createdMs > cutoffMs) return false;
+        return patterns.some((pattern) => pattern.test(String(snapshotId).toLowerCase()));
+    };
+    const snapshots = [];
+    let marker;
+    do {
+        const resp = await rdsClient.send(new DescribeDBSnapshotsCommand({ Marker: marker, MaxRecords: 100 }));
+        for (const snap of resp.DBSnapshots || []) {
+            if (isRetirable(snap.DBSnapshotIdentifier, snap.Status, snap.SnapshotType, snap.SnapshotCreateTime)) {
+                snapshots.push({ id: snap.DBSnapshotIdentifier, kind: 'instance', createTime: snap.SnapshotCreateTime });
+            }
+        }
+        marker = resp.Marker;
+    } while (marker);
+    marker = undefined;
+    do {
+        const resp = await rdsClient.send(new DescribeDBClusterSnapshotsCommand({ Marker: marker, MaxRecords: 100 }));
+        for (const snap of resp.DBClusterSnapshots || []) {
+            if (isRetirable(snap.DBClusterSnapshotIdentifier, snap.Status, snap.SnapshotType, snap.SnapshotCreateTime)) {
+                snapshots.push({ id: snap.DBClusterSnapshotIdentifier, kind: 'cluster', createTime: snap.SnapshotCreateTime });
+            }
+        }
+        marker = resp.Marker;
+    } while (marker);
+    return snapshots;
+}
+
 // Deep target discovery: VPCs partitioned by the STRICT deletion
 // predicate — exact project tag only, minus live networks. Foreign and
 // untagged VPCs land in reportOnly, never in deletable, so prefix
@@ -407,6 +459,13 @@ export const GC_TARGETS = [
         listCap: Infinity,
     },
     {
+        id: 'db-snapshots', label: 'Old manual DB snapshots', scope: 'standard',
+        field: 'oldManualSnapshots', summary: 'deletedSnapshots',
+        discover: discoverOldManualSnapshots, remove: removeOldManualSnapshots,
+        format: (snap) => snap.id,
+        listCap: 10,
+    },
+    {
         id: 'vpcs', label: 'VPCs', kind: 'vpc', scope: 'deep',
         discover: discoverDeepVpcs, remove: null,
     },
@@ -492,6 +551,19 @@ async function releaseUnattachedEips({ ec2Client }, eips) {
         releasedEips += 1;
     }
     return releasedEips;
+}
+
+async function removeOldManualSnapshots({ rdsClient }, snapshots) {
+    let deletedSnapshots = 0;
+    for (const snap of snapshots || []) {
+        if (snap.kind === 'cluster') {
+            await rdsClient.send(new DeleteDBClusterSnapshotCommand({ DBClusterSnapshotIdentifier: snap.id }));
+        } else {
+            await rdsClient.send(new DeleteDBSnapshotCommand({ DBSnapshotIdentifier: snap.id }));
+        }
+        deletedSnapshots += 1;
+    }
+    return deletedSnapshots;
 }
 
 export async function deleteDiscoveredResources(clients, discovered) {
@@ -588,7 +660,25 @@ async function runGcMain(input = {}) {
     const ec2Client = resolveClient(options.ec2Client, EC2Client, { region });
     const ecsClient = resolveClient(options.ecsClient, ECSClient, { region });
     const secretsClient = resolveClient(options.secretsClient, SecretsManagerClient, { region });
+    const rdsClient = resolveClient(options.rdsClient, RDSClient, { region });
     const deep = options.deep === true || options.deep === 'true';
+
+    let snapshotMaxAgeDays = DEFAULT_SNAPSHOT_MAX_AGE_DAYS;
+    if (options.snapshotMaxAgeDays !== undefined && options.snapshotMaxAgeDays !== null && String(options.snapshotMaxAgeDays).trim() !== '') {
+        const parsed = Number(options.snapshotMaxAgeDays);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+            return failCommand({
+                noExit: isProgrammaticCall(options),
+                message: `\n✖ Invalid --snapshot-max-age-days "${options.snapshotMaxAgeDays}". Use a non-negative number of days (default ${DEFAULT_SNAPSHOT_MAX_AGE_DAYS}).\n`,
+                event: 'gc_run',
+                telemetry: { projectName },
+                errorCode: 'INVALID_SNAPSHOT_MAX_AGE_DAYS',
+                reason: 'invalid-snapshot-max-age-days',
+                resultExtra: { projectName, region },
+            });
+        }
+        snapshotMaxAgeDays = parsed;
+    }
 
     intro(color.bgCyan(color.black(' grada gc 🧹 ')));
 
@@ -600,6 +690,9 @@ async function runGcMain(input = {}) {
     let previewClusterServices = null;
     try {
         const isLambda = isComputeTarget(cwd, 'lambda');
+        // Static projects cannot have a database: snapshot discovery is
+        // skipped entirely (no identifiers, no RDS calls).
+        const isStatic = isComputeTarget(cwd, 'static');
         const suffix = readResourceSuffix(cwd);
         // One cluster-service enumeration shared by the log-group and
         // (deep) VPC liveness consumers — fetched once, not per scan.
@@ -620,7 +713,11 @@ async function runGcMain(input = {}) {
             ecrClient,
             logsClient,
             ec2Client,
+            rdsClient,
             projectName,
+            dbIdentifier: isStatic ? undefined : resolveDbIdentifier(options, cwd),
+            dbClusterIdentifier: isStatic ? undefined : resolveDbClusterIdentifier(options, cwd),
+            snapshotMaxAgeDays,
             resourceSuffix: suffix,
             isLambda,
             logGroupPrefix: isLambda ? `/aws/lambda/${projectName}-` : undefined,
@@ -738,7 +835,7 @@ async function runGcMain(input = {}) {
     del.start('Deleting orphaned resources...');
     let summary;
     try {
-        summary = await deleteDiscoveredResources({ ecrClient, logsClient, ec2Client }, discovered);
+        summary = await deleteDiscoveredResources({ ecrClient, logsClient, ec2Client, rdsClient }, discovered);
     } catch (error) {
         del.stop(color.red('❌ Deletion partially failed.'));
         const partial = (error && typeof error === 'object' && error.partialSummary) || {};
@@ -753,7 +850,7 @@ async function runGcMain(input = {}) {
     }
     del.stop('Deletion complete.');
 
-    outro(color.green(`Deleted ${summary.deletedImages} image(s), ${summary.deletedLogGroups} log group(s), released ${summary.releasedEips} Elastic IP(s). ✅`));
+    outro(color.green(`Deleted ${summary.deletedImages} image(s), ${summary.deletedLogGroups} log group(s), released ${summary.releasedEips} Elastic IP(s), deleted ${summary.deletedSnapshots} snapshot(s). ✅`));
     await trackSuccess('gc_run', { projectName, deleted: true, ...summary, total: discovered.totalCount });
     return { ...discovered, ...summary, deleted: true, confirmed: true };
 }

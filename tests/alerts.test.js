@@ -5,6 +5,15 @@ import { mockSelect, mockText } from './helpers/clack.js';
 import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import path from 'path';
+
+vi.mock('../src/utils/file-lock.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        withProjectLock: vi.fn((...args) => actual.withProjectLock(...args)),
+    };
+});
+
 import {
     runAlerts,
     parseAlertsArgs,
@@ -17,6 +26,7 @@ import {
     ensureArchiveProvider,
     ALERTS_TF_FILE,
 } from '../src/commands/alerts.js';
+import { withProjectLock } from '../src/utils/file-lock.js';
 import { trackEvent } from '../src/core/telemetry.js';
 
 
@@ -108,9 +118,9 @@ describe('buildAlertsTf', () => {
     it('wires a distinct notify alarm to the SNS topic', () => {
         const tf = buildAlertsTf({ projectName: 'myapp' });
         expect(tf).toContain('resource "aws_sns_topic" "alerts"');
-        expect(tf).toContain('name = "myapp-alerts"');
+        expect(tf).toContain('name = "${local.app_name}-alerts"');
         expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_5xx"');
-        expect(tf).toContain('alarm_name          = "myapp-5xx-notify"');
+        expect(tf).toContain('alarm_name          = "${local.app_name}-5xx-notify"');
         expect(tf).toContain('metric_name         = "HTTPCode_Target_5XX_Count"');
         expect(tf).toContain('alarm_actions = [aws_sns_topic.alerts.arn]');
         expect(tf).toContain('LoadBalancer = aws_lb.main.arn_suffix');
@@ -126,6 +136,16 @@ describe('buildAlertsTf', () => {
         const tf = buildAlertsTf({ projectName: 'myapp', target: 'ecs', threshold: 25 });
         expect(tf).toContain('threshold           = "25"');
         expect(tf).toContain('more than 25 5XX errors in 2 minutes');
+    });
+
+    // BUG-132: flat ECS names let a preview apply clobber the prod
+    // alarm — ECS uses the workspace-aware local like lambda/static.
+    it('uses workspace-aware names on ECS targets', () => {
+        const tf = buildAlertsTf({ projectName: 'myapp', target: 'ecs' });
+        expect(tf).toContain('name = "${local.app_name}-alerts"');
+        expect(tf).toContain('alarm_name          = "${local.app_name}-5xx-notify"');
+        expect(tf).not.toContain('"myapp-alerts"');
+        expect(tf).not.toContain('"myapp-5xx-notify"');
     });
 
     it('builds a Lambda Errors alarm for lambda targets', () => {
@@ -261,7 +281,7 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         expect(result).toMatchObject({ ok: true, action: 'scaffold', file: ALERTS_TF_FILE });
         const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
         expect(written).toContain('aws_sns_topic');
-        expect(written).toContain('myapp-5xx-notify');
+        expect(written).toContain('${local.app_name}-5xx-notify');
         const text = logSpy.mock.calls.map((call) => call.join(' ')).join('\n');
         expect(text).toContain('aws sns subscribe');
         expect(text).toContain('--protocol email');
@@ -312,6 +332,41 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         const payload = JSON.stringify(trackEvent.mock.calls.map((call) => call[1]));
         expect(payload).not.toContain('you@example.com');
         expect(payload).not.toContain(SLACK_URL);
+    });
+
+    it('gitignores the forwarder zip when scaffolding a webhook (idempotent)', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\n');
+        const result = await runAlerts(alertOptions(dir, { webhook: SLACK_URL }));
+
+        expect(result).toMatchObject({ ok: true, destinations: 'webhook' });
+        const gitignore = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
+        expect(gitignore).toContain('terraform/.grada-alerts-forwarder.zip');
+
+        // Rerun with --force: the entry is not duplicated.
+        await runAlerts(alertOptions(dir, { webhook: SLACK_URL, force: true }));
+        const again = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
+        expect(again.match(/terraform\/\.grada-alerts-forwarder\.zip/g)).toHaveLength(1);
+    });
+
+    it('serializes scaffolding under the terraform project lock', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        vi.mocked(withProjectLock).mockClear();
+        const result = await runAlerts(alertOptions(dir, { webhook: SLACK_URL }));
+
+        expect(result).toMatchObject({ ok: true });
+        expect(vi.mocked(withProjectLock)).toHaveBeenCalledWith(dir, expect.any(Function), { scope: 'terraform' });
+    });
+
+    it('leaves .gitignore alone when no webhook forwarder is scaffolded', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
+
+        expect(result).toMatchObject({ ok: true });
+        expect(fs.existsSync(path.join(dir, '.gitignore'))).toBe(false);
     });
 
     it('redacts the webhook URL from stdout when scaffolding', async () => {

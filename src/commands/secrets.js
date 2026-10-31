@@ -9,10 +9,11 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, refuseIfNonInteractive } from '../utils/command.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { readTerraformComputeTarget, guardComputeTarget, readResourceSuffix, readRenderedContainerEnvNames } from '../utils/resolvers.js';
+import { readTerraformComputeTarget, guardComputeTarget, readResourceSuffix, readRenderedContainerEnvNames, readTerraformProjectName } from '../utils/resolvers.js';
 import { ADDON_ENV_VARS, ADDON_REGISTRY } from '../utils/addons.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
+import { withProjectLock } from '../utils/file-lock.js';
 
 // Static sites provision no secrets vault, so push/pull/audit would fail
 // obscurely against a Secrets Manager secret that can never exist. One
@@ -63,9 +64,11 @@ function resolveSecretsFile(envFilePath) {
 }
 
 function resolveSecretsProject(projectName) {
-    return (typeof projectName === 'string' && projectName.trim())
-        ? projectName.trim()
-        : path.basename(process.cwd());
+    // BUG-162: the terraform project name (what provisioned the vault)
+    // outranks the directory basename — a renamed directory otherwise
+    // silently aims at a missing vault.
+    if (typeof projectName === 'string' && projectName.trim()) return projectName.trim();
+    return readTerraformProjectName(process.cwd()) || path.basename(process.cwd());
 }
 
 // Vault identifiers carry the tree's resource suffix (matching the
@@ -84,9 +87,15 @@ export async function resolveSecretsRegion(options = {}) {
     try {
         const backendTfPath = path.join(process.cwd(), 'terraform', 'backend.tf');
         const backendTfContent = await fs.readFile(backendTfPath, 'utf-8');
-        const regionMatch = backendTfContent.match(/region\s*=\s*"([^"]+)"/);
-        if (regionMatch && !regionMatch[1].includes('{{')) {
-            return regionMatch[1];
+        // BUG-164: scan line-wise skipping comments — the old whole-file
+        // regex resolved commented-out regions (or legacy lines) as live.
+        for (const rawLine of backendTfContent.split('\n')) {
+            const line = rawLine.trim();
+            if (line === '' || line.startsWith('#')) continue;
+            const regionMatch = line.match(/region\s*=\s*"([^"]+)"/);
+            if (regionMatch && !regionMatch[1].includes('{{')) {
+                return regionMatch[1];
+            }
         }
     } catch {
         // Fall through to the product default region if the file is missing or unreadable
@@ -176,17 +185,21 @@ export async function getManagedEnvNames(cwd = process.cwd(), target = 'ecs') {
     // the base set above (fail-closed; the TF precondition backstops
     // real collisions there).
     if (!tfFiles.includes('worker.tf')) names.delete('NODE_ENV');
-    const dbFile = tfFiles.find((file) => file.startsWith('database') && file.endsWith('.tf'));
-    if (dbFile) {
+    const dbFiles = tfFiles.filter((file) => file.startsWith('database') && file.endsWith('.tf'));
+    if (dbFiles.length > 0) {
         for (const name of DB_MANAGED_ENV) names.add(name);
         // DB_ENGINE is rendered only for non-postgres engines: including
         // it blindly would auto-skip a legitimate custom key on postgres
-        // trees with a false "injected by Grada" notice. Unparseable
+        // trees with a false "injected by Grada" notice. Every database
+        // file is sniffed — a stale database.tf sorting before the live
+        // database-mysql.tf must not hide the engine. Unparseable
         // files exclude it — the preflights still catch real collisions.
         try {
-            const dbContent = await fs.readFile(path.join(cwd, 'terraform', dbFile), 'utf-8');
-            const engine = /engine\s*=\s*"([^"]+)"/.exec(dbContent)?.[1];
-            if (engine && engine !== 'postgres') names.add('DB_ENGINE');
+            const contents = await Promise.all(
+                dbFiles.map((dbFile) => fs.readFile(path.join(cwd, 'terraform', dbFile), 'utf-8'))
+            );
+            const engines = contents.map((dbContent) => /engine\s*=\s*"([^"]+)"/.exec(dbContent)?.[1]);
+            if (engines.some((engine) => engine && engine !== 'postgres')) names.add('DB_ENGINE');
         } catch {
             // Fall through with the base DB set.
         }
@@ -229,6 +242,96 @@ export function diffSecretsEnvs(localSecrets = {}, remoteSecrets = {}) {
         (k) => Object.hasOwn(localSecrets, k) && String(localSecrets[k]) !== String(remoteSecrets[k])
     );
     return { missingLocally, mismatched, untrackedLocally };
+}
+
+// Names the shape of a non-object vault payload for refusal messages.
+function vaultPayloadShape(parsed) {
+    if (parsed === null) return 'null';
+    if (Array.isArray(parsed)) return 'array';
+    return typeof parsed;
+}
+
+// Validates a GetSecretValue response into the managed JSON object.
+// Refuses binary payloads (BUG-145: they read as "empty" and a push
+// would full-replace them away without the removal confirm) and
+// non-object/non-string payloads (BUG-159: phantom `0,1` removals,
+// garbage pull keys, TypeError crashes). A response carrying neither
+// field means an empty/new vault — live AWS never returns that shape
+// for a valued secret.
+function vaultPayloadObject(resp, secretId) {
+    if (resp.SecretBinary != null) {
+        const binaryError = new Error(`Refusing to operate on "${secretId}": the vault payload is binary, not the JSON object secrets commands manage. Migrate it to a JSON string payload first.`);
+        binaryError.code = 'REMOTE_SECRET_BINARY';
+        throw binaryError;
+    }
+    if (resp.SecretString == null) return {};
+    let parsed;
+    try {
+        parsed = JSON.parse(resp.SecretString);
+    } catch {
+        const jsonError = new Error('Remote secret payload is not valid JSON.');
+        jsonError.code = 'REMOTE_SECRET_MALFORMED';
+        throw jsonError;
+    }
+    const valuesOk = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        && Object.values(parsed).every((value) => typeof value === 'string');
+    if (!valuesOk) {
+        const shapeError = new Error(`Remote secret payload must be a JSON object of string values, found ${vaultPayloadShape(parsed)}.`);
+        shapeError.code = 'REMOTE_SECRET_MALFORMED';
+        throw shapeError;
+    }
+    return parsed;
+}
+
+// Lenient key-attempt extractor for drop accounting: what key did this
+// line TRY to define? Calibrated against the real dotenv parse — a line
+// is dropped only when its attempted key is absent from it.
+const ATTEMPTED_KEY_RE = /^\s*([^=:#\s][^=:]*?)\s*[=:]/;
+
+// Finds .env input lines dotenv silently dropped plus duplicate keys
+// (BUG-143). Multiline double-quoted values span lines — continuation
+// lines are value text, not dropped lines. Pure and unit-tested via
+// push output.
+function analyzeEnvLines(envContent, parsedSecrets) {
+    const dropped = [];
+    const seen = new Map();
+    const lines = String(envContent ?? '').split('\n');
+    let continuation = false;
+    lines.forEach((rawLine, index) => {
+        const line = rawLine.replace(/\r$/, '');
+        const wasContinuation = continuation;
+        // Track unescaped double quotes across lines (backslash escapes).
+        let open = continuation;
+        for (let i = 0; i < line.length; i += 1) {
+            if (line[i] === '\\') {
+                i += 1;
+            } else if (line[i] === '"') {
+                open = !open;
+            }
+        }
+        continuation = open;
+        if (wasContinuation) return;
+        const trimmed = line.trim();
+        if (trimmed === '' || trimmed.startsWith('#')) return;
+        const effective = line.replace(/^\s*export\s+/, '');
+        const match = ATTEMPTED_KEY_RE.exec(effective);
+        if (!match) {
+            dropped.push({ line: index + 1, content: trimmed });
+            return;
+        }
+        const attempted = match[1].trim();
+        if (!Object.hasOwn(parsedSecrets, attempted)) {
+            dropped.push({ line: index + 1, content: trimmed });
+            return;
+        }
+        if (!seen.has(attempted)) seen.set(attempted, []);
+        seen.get(attempted).push(index + 1);
+    });
+    const duplicates = [];
+    for (const [key, dupLines] of seen) {
+        if (dupLines.length > 1) duplicates.push({ key, lines: dupLines });
+    }
+    return { dropped, duplicates };
 }
 
 // Shared failure tail for push/pull/audit: identical telemetry stamps,
@@ -299,6 +402,27 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
 }
 
 async function pushSecretsMain(envFilePath, projectName, options = {}) {
+    // BUG-144: push is read-modify-full-replace — serialize local
+    // concurrent pushes like every other mutating family (the re-read
+    // before UpdateSecret below covers cross-machine second writers).
+    return withProjectLock(process.cwd(), () => pushSecretsInner(envFilePath, projectName, options));
+}
+
+// Builds the secrets_pushed success payload shared by the full-push and
+// all-skipped early-return paths, so the two can never skew key names.
+function pushSuccessTelemetry({ projectName, pushableSecrets, keysChanged, removed, collisions, skipped, staleSkipped }) {
+    return {
+        projectName,
+        secret_count: Object.keys(pushableSecrets).length,
+        keys_changed: keysChanged,
+        removed_count: removed.length,
+        managed_collisions: collisions.length,
+        skipped_count: skipped.length,
+        stale_skipped_count: staleSkipped.length,
+    };
+}
+
+async function pushSecretsInner(envFilePath, projectName, options = {}) {
     const refused = await secretsManagedTreeGuard('push', 'secrets_pushed', projectName, options);
     if (refused) return refused;
     const pushGuard = secretsTargetGuard('push');
@@ -319,9 +443,9 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         resolvedFilePath = '.env';
     }
 
-    const resolvedProjectName = (typeof explicitProjectName === 'string' && explicitProjectName.trim())
-        ? explicitProjectName.trim()
-        : path.basename(process.cwd());
+    // BUG-162: shared helper — the terraform project name outranks the
+    // directory basename (a renamed directory must not aim at a phantom).
+    const resolvedProjectName = resolveSecretsProject(explicitProjectName);
 
     const s = spinner();
     s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
@@ -377,6 +501,23 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
 
         const parsedSecrets = dotenv.parse(envContent);
 
+        // BUG-143: dotenv silently drops lines it cannot parse (and
+        // last-wins duplicates) — name them so the success count below
+        // reconciles with the file. Runs before the empty early-return
+        // so an all-dropped file explains itself.
+        const { dropped: droppedLines, duplicates: duplicateKeys } = analyzeEnvLines(envContent, parsedSecrets);
+        if (droppedLines.length > 0 || duplicateKeys.length > 0) {
+            s.stop('Pre-flight checks done.');
+            if (droppedLines.length > 0) {
+                console.log(color.yellow(`⚠️  Warning: ${droppedLines.length} ${droppedLines.length === 1 ? 'line' : 'lines'} in ${resolvedFilePath} could not be parsed and ${droppedLines.length === 1 ? 'was' : 'were'} ignored:`));
+                for (const { line, content } of droppedLines) console.log(color.yellow(`- line ${line}: ${content}`));
+            }
+            for (const { key, lines } of duplicateKeys) {
+                console.log(color.yellow(`⚠️  Warning: duplicate key "${key}" (lines ${lines.join(', ')}) — last value wins.`));
+            }
+            s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
+        }
+
         if (Object.keys(parsedSecrets).length === 0) {
             s.stop('No secrets found in file.');
             return;
@@ -416,6 +557,15 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         }
         if (Object.keys(pushableSecrets).length === 0) {
             console.log(color.dim('Nothing left to push — the vault and secret_keys.json are unchanged.'));
+            await trackSuccess('secrets_pushed', pushSuccessTelemetry({
+                projectName: resolvedProjectName,
+                pushableSecrets,
+                keysChanged: [],
+                removed: [],
+                collisions,
+                skipped,
+                staleSkipped: [],
+            }));
             return;
         }
         if (needsPreWriteOutput) s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
@@ -429,19 +579,14 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
 
         // 4. Fetch the existing secret payload to detect key changes (safe on new vaults)
         let existingKeys = null;
+        let firstSecretString = null;
+        const vaultId = `${secretVaultId(resolvedProjectName)}`;
         try {
             const existingResp = await client.send(new GetSecretValueCommand({
-                SecretId: `${secretVaultId(resolvedProjectName)}`,
+                SecretId: vaultId,
             }));
-            if (existingResp.SecretString) {
-                try {
-                    existingKeys = Object.keys(JSON.parse(existingResp.SecretString));
-                } catch {
-                    existingKeys = [];
-                }
-            } else {
-                existingKeys = [];
-            }
+            firstSecretString = existingResp.SecretString ?? null;
+            existingKeys = Object.keys(vaultPayloadObject(existingResp, vaultId));
         } catch (fetchError) {
             if (fetchError && fetchError.name === 'ResourceNotFoundException') {
                 existingKeys = [];
@@ -494,9 +639,32 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
             s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
         }
 
+        // BUG-144: the confirm above can wait unboundedly — re-read the
+        // vault immediately before the full-replace write and abort when
+        // a second writer moved the payload since the first read.
+        let rereadSecretString = null;
+        let rereadBinary = false;
+        try {
+            const rereadResp = await client.send(new GetSecretValueCommand({ SecretId: vaultId }));
+            rereadSecretString = rereadResp.SecretString ?? null;
+            rereadBinary = rereadResp.SecretBinary != null;
+        } catch (rereadError) {
+            if (!rereadError || rereadError.name !== 'ResourceNotFoundException') throw rereadError;
+        }
+        if (rereadBinary || rereadSecretString !== firstSecretString) {
+            s.stop('Pre-flight checks done.');
+            return failCommand({
+                message: `\n✖ The vault changed while this push was waiting (a second writer updated it) — refusing to overwrite. Re-run the push to merge with the latest vault content.\n`,
+                event: 'secrets_pushed',
+                telemetry: { projectName: resolvedProjectName, error_code: 'SECRETS_VAULT_CHANGED' },
+                errorCode: 'SECRETS_VAULT_CHANGED',
+                reason: 'secrets-vault-changed',
+            });
+        }
+
         // 5. Update the secret string in AWS
         const command = new UpdateSecretCommand({
-            SecretId: `${secretVaultId(resolvedProjectName)}`,
+            SecretId: vaultId,
             SecretString: JSON.stringify(pushableSecrets),
         });
 
@@ -505,7 +673,18 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         const keys = Object.keys(pushableSecrets);
         const keysFilePath = path.join(process.cwd(), 'terraform', 'secret_keys.json');
 
-        await atomicWriteFile(keysFilePath, JSON.stringify(keys, null, 2));
+        // BUG-160: skip the write when the file is already byte-identical
+        // so unchanged pushes don't dirty `git status`.
+        const nextKeysContent = JSON.stringify(keys, null, 2);
+        let keysUnchanged = false;
+        try {
+            keysUnchanged = (await fs.readFile(keysFilePath, 'utf-8')) === nextKeysContent;
+        } catch {
+            keysUnchanged = false;
+        }
+        if (!keysUnchanged) {
+            await atomicWriteFile(keysFilePath, nextKeysContent);
+        }
 
         s.stop(`✅ Successfully pushed ${Object.keys(pushableSecrets).length} secrets to AWS (${targetRegion || 'default region'})!`);
 
@@ -599,15 +778,15 @@ async function pushSecretsMain(envFilePath, projectName, options = {}) {
         }
         console.log(color.blue(`\n📘 Learn how secrets reach your app: ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/secrets-management.md')}`));
 
-        await trackSuccess('secrets_pushed', {
+        await trackSuccess('secrets_pushed', pushSuccessTelemetry({
             projectName: resolvedProjectName,
-            secret_count: Object.keys(pushableSecrets).length,
-            keys_changed: keysChanged,
-            removed_count: removed.length,
-            managed_collisions: collisions.length,
-            skipped_count: skipped.length,
-            stale_skipped_count: staleSkipped.length
-        });
+            pushableSecrets,
+            keysChanged,
+            removed,
+            collisions,
+            skipped,
+            staleSkipped,
+        }));
         return { keysChanged, skipped };
 
     } catch (error) {
@@ -662,16 +841,7 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             SecretId: `${secretVaultId(resolvedProjectName)}`,
         }));
 
-        let remoteSecrets = {};
-        if (resp.SecretString) {
-            try {
-                remoteSecrets = JSON.parse(resp.SecretString);
-            } catch {
-                const jsonError = new Error('Remote secret payload is not valid JSON.');
-                jsonError.code = 'REMOTE_SECRET_MALFORMED';
-                throw jsonError;
-            }
-        }
+        const remoteSecrets = vaultPayloadObject(resp, `${secretVaultId(resolvedProjectName)}`);
         const remoteKeys = Object.keys(remoteSecrets);
         s.stop('Remote secrets fetched.');
         remoteFetched = true;
@@ -726,6 +896,12 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             ...Object.keys(localSecrets),
             ...remoteKeys.filter((k) => !Object.hasOwn(localSecrets, k)),
         ];
+        // BUG-161: the merge appends remote-only keys (reviving local
+        // deletions) — name what came back instead of syncing silently.
+        const appended = localExists ? remoteKeys.filter((k) => !Object.hasOwn(localSecrets, k)) : [];
+        if (appended.length > 0) {
+            console.log(color.yellow(`⚠️  Pulled ${appended.length} key${appended.length === 1 ? '' : 's'} not present locally (revived deletions?): ${appended.join(', ')}`));
+        }
         const unrepresentable = orderedKeys.filter((key) =>
             key === '__proto__' || quoteEnvValue(merged[key]) === null
         );
@@ -748,7 +924,7 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
         });
         await flushTelemetry();
 
-        return { synced: remoteKeys.length, file: resolvedFilePath, overwritten: overwrite, conflicts: mismatched };
+        return { synced: remoteKeys.length, file: resolvedFilePath, overwritten: overwrite, conflicts: mismatched, appended };
     } catch (error) {
         return handleSecretsCatch({
             error,
@@ -799,16 +975,7 @@ async function auditSecretsMain(envFilePath, projectName, options = {}) {
             SecretId: `${secretVaultId(resolvedProjectName)}`,
         }));
 
-        let remoteSecrets = {};
-        if (resp.SecretString) {
-            try {
-                remoteSecrets = JSON.parse(resp.SecretString);
-            } catch {
-                const jsonError = new Error('Remote secret payload is not valid JSON.');
-                jsonError.code = 'REMOTE_SECRET_MALFORMED';
-                throw jsonError;
-            }
-        }
+        const remoteSecrets = vaultPayloadObject(resp, `${secretVaultId(resolvedProjectName)}`);
 
         const envPath = path.resolve(process.cwd(), resolvedFilePath);
         let localSecrets = {};

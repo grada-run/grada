@@ -16,6 +16,9 @@ import {
     sanitizeCronName,
     injectContainerEnvVars,
     upsertManagedEnvNames,
+    removeManagedEnvNames,
+    removeContainerEnvVar,
+    removeLambdaEnvVar,
     injectLambdaEnvVars,
     ensureLambdaVpcConfig,
     ensureIsolatedSubnets,
@@ -178,6 +181,33 @@ describe('precondition guards', () => {
         });
         expect(flushTelemetry).toHaveBeenCalled();
     });
+
+    // BUG-157: static trees have no task role or VPC, so addons
+    // referencing them render unplannable TF — refuse fast instead.
+    // The refusal happens before scaffolding, so static adds never print
+    // container env lines or the "Available in your container" outro.
+    it.each(['storage:s3', 'db:dynamodb', 'db:redis', 'queue:sqs', 'ai:bedrock', 'email:ses'])(
+        'refuses %s on static trees instead of emitting dangling references', async (capability) => {
+            const dir = makeTmp();
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'resource "aws_cloudfront_distribution" "site" {}\n');
+            const output = [];
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+                output.push(stripVTControlCharacters(args.join(' ')));
+            });
+            try {
+                const { outro } = await import('@clack/prompts');
+                const result = await runAdd({ cwd: dir, capability, region: 'us-east-2' });
+                expect(result.ok).toBe(false);
+                expect(result.reason).toBe('static-target-unsupported');
+                expect(trackEvent).toHaveBeenCalledWith('addon_target_refused', expect.objectContaining({ capability, target: 'static' }));
+                expect(output.join('\n')).not.toContain('env:');
+                expect(vi.mocked(outro)).not.toHaveBeenCalledWith(expect.stringContaining('Available in your container'));
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        }
+    );
 
     it('fails with UNSUPPORTED_CAPABILITY for unknown or missing capabilities', async () => {
         const dir = makeTmp();
@@ -1831,6 +1861,8 @@ describe('cron flag parsing', () => {
 describe('cron pre-guard validation', () => {
     it('rejects bad schedules, timezones, and empty names', () => {
         expect(validateAddonFlags('cron', { schedule: 'every friday' }).errorCode).toBe('INVALID_CRON_SCHEDULE');
+        expect(validateAddonFlags('cron', { schedule: 'cron(0 0 "x" * ? *)' }).errorCode).toBe('INVALID_CRON_SCHEDULE');
+        expect(validateAddonFlags('cron', { schedule: 'rate(1 hour\n)' }).errorCode).toBe('INVALID_CRON_SCHEDULE');
         expect(validateAddonFlags('cron', { schedule: 'cron(0 2 * * ? *)' })).toBeNull();
         expect(validateAddonFlags('cron', { timezone: 'Mars/Olympus?' }).errorCode).toBe('INVALID_TIMEZONE');
         expect(validateAddonFlags('cron', { timezone: 'UTC' })).toBeNull();
@@ -1868,6 +1900,16 @@ describe('cron generated terraform', () => {
         expect(rendered).toContain('aws_ecs_task_definition.app.arn,');
         expect(rendered).toContain('"${aws_ecs_task_definition.app.arn_without_revision}:*"');
         expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({ capability: 'cron', success: true }));
+    });
+
+    // BUG-156 twin: renderAddonTemplate shares the `$`-interpolation
+    // defect via replaceAll.
+    it('renders `$` patterns in cron commands byte-identical', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        await runAdd({ cwd: dir, capability: 'cron', region: 'us-east-2', cronCommand: "echo $& $' $$" });
+        const rendered = fs.readFileSync(path.join(dir, 'terraform', 'cron.tf'), 'utf-8');
+        expect(rendered).toContain("echo $& $' $$");
     });
 
     it('honors explicit flags and JSON-escapes the command', async () => {
@@ -1956,6 +1998,25 @@ describe('cron generated terraform', () => {
         const resolved = await resolveAddonOptions('cron', { projectName: 'a'.repeat(60), name: 'daily-job' }, { cwd: dir, region: 'us-east-2' });
         expect(resolved.ok).toBe(false);
         expect(resolved.errorCode).toBe('INVALID_CRON_NAME');
+    });
+
+    it('counts the rendered resource suffix toward the 64-char Scheduler limit', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir);
+        fs.appendFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            '\nlocals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        // Bare base renders exactly 64 chars (passes the old check) but 71
+        // with the always-present suffix.
+        const refused = await resolveAddonOptions('cron', { projectName: 'a'.repeat(49), name: 'daily-job' }, { cwd: dir, region: 'us-east-2' });
+        expect(refused.ok).toBe(false);
+        expect(refused.errorCode).toBe('INVALID_CRON_NAME');
+
+        const plain = makeTmp();
+        writeMainTf(plain);
+        const allowed = await resolveAddonOptions('cron', { projectName: 'a'.repeat(49), name: 'daily-job' }, { cwd: plain, region: 'us-east-2' });
+        expect(allowed.ok).toBe(true);
     });
 });
 
@@ -2363,5 +2424,129 @@ describe('upsertManagedEnvNames', () => {
         const listLine = after.split('\n').find((line) => line.includes('managed_env_names'));
         expect(listLine).toContain('PORT');
         expect(listLine).toContain('REDIS_URL');
+    });
+
+    it('a guard-list-only update does not claim env injection', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '{ "name": "S3_BUCKET_NAME", "value": "${aws_s3_bucket.storage.id}" }, { "name": "S3_CDN_URL", "value": "https://${aws_cloudfront_distribution.storage_cdn.domain_name}" },');
+        const mainPath = path.join(dir, 'terraform', 'main.tf');
+        const before = fs.readFileSync(mainPath, 'utf-8');
+        fs.writeFileSync(mainPath, before.replace('  app_name = "myapp${local.env_suffix}"', '  app_name = "myapp${local.env_suffix}"\n  managed_env_names = ["PORT"]'));
+
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(stripVTControlCharacters(args.join(' ')));
+        });
+        try {
+            const result = await runAdd({ cwd: dir, capability: 'storage:s3', yes: true });
+            expect(result.ok).not.toBe(false);
+            // The guard list still updates…
+            const after = fs.readFileSync(mainPath, 'utf-8');
+            const listLine = after.split('\n').find((line) => line.includes('managed_env_names'));
+            expect(listLine).toContain('S3_BUCKET_NAME');
+            // …but nothing was injected, so the banner must not say so.
+            expect(result.envInjected).toBe(false);
+            expect(output.join('\n')).not.toContain('injected container environment variables');
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+});
+
+describe('engine switch DB_ENGINE cleanup', () => {
+    const MAIN_TF = [
+        'resource "aws_ecs_task_definition" "app" {',
+        '  container_definitions = jsonencode([',
+        '    {',
+        '      environment = [',
+        '        { name = "DB_HOST", value = "h" },',
+        '        { name = "DB_ENGINE", value = "aurora-postgresql" },',
+        '        { name = "DB_PORT", value = "5432" }',
+        '      ]',
+        '    }',
+        '  ])',
+        '}',
+        '',
+    ].join('\n');
+
+    it('removes a container env entry with clean comma handling', () => {
+        const middle = removeContainerEnvVar(MAIN_TF, 'DB_ENGINE');
+        expect(middle).not.toContain('DB_ENGINE');
+        expect(middle).toContain('DB_HOST');
+        expect(middle).toContain('DB_PORT');
+        expect(middle).not.toMatch(/,\s*,/);
+        // First entry.
+        const first = removeContainerEnvVar(MAIN_TF, 'DB_HOST');
+        expect(first).not.toContain('DB_HOST');
+        expect(first).not.toMatch(/,\s*,/);
+        // Last entry.
+        const last = removeContainerEnvVar(MAIN_TF, 'DB_PORT');
+        expect(last).not.toContain('DB_PORT');
+        expect(last).not.toMatch(/,\s*,/);
+        // Missing entry or task definition: unchanged.
+        expect(removeContainerEnvVar(MAIN_TF, 'NOPE')).toBe(MAIN_TF);
+        expect(removeContainerEnvVar(MAIN_TF, 'DB_ENGINE', 'worker')).toBe(MAIN_TF);
+    });
+
+    it('removes a lambda variable line', () => {
+        const lambdaTf = [
+            'resource "aws_lambda_function" "app" {',
+            '  environment {',
+            '    variables = {',
+            '      DB_HOST   = "h"',
+            '      DB_ENGINE = "mysql"',
+            '      DB_PORT   = "3306"',
+            '    }',
+            '  }',
+            '}',
+            '',
+        ].join('\n');
+        const updated = removeLambdaEnvVar(lambdaTf, 'DB_ENGINE');
+        expect(updated).not.toContain('DB_ENGINE');
+        expect(updated).toContain('DB_HOST');
+        expect(updated).toContain('DB_PORT');
+        expect(removeLambdaEnvVar(lambdaTf, 'NOPE')).toBe(lambdaTf);
+    });
+
+    it('removes names from the managed guard list', () => {
+        const tf = 'locals {\n  managed_env_names = ["DB_ENGINE", "DB_HOST", "DB_PORT"]\n}\n';
+        expect(removeManagedEnvNames(tf, ['DB_ENGINE'])).toContain('["DB_HOST", "DB_PORT"]');
+        expect(removeManagedEnvNames(tf, ['NOPE'])).toBe(tf);
+        expect(removeManagedEnvNames('locals {}\n', ['DB_ENGINE'])).toBe('locals {}\n');
+    });
+
+    it('aurora→postgres --force leaves no DB_ENGINE anywhere', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '{ "name": "DB_HOST", "value": "h" },');
+        const mainPath = path.join(dir, 'terraform', 'main.tf');
+        const before = fs.readFileSync(mainPath, 'utf-8');
+        fs.writeFileSync(mainPath, before.replace('  app_name = "myapp${local.env_suffix}"', '  app_name = "myapp${local.env_suffix}"\n  managed_env_names = ["DB_ENGINE", "DB_HOST"]'));
+
+        const first = await runAdd({ cwd: dir, capability: 'db:aurora-postgresql' });
+        expect(first.ok).toBe(true);
+        expect(fs.readFileSync(mainPath, 'utf-8')).toContain('DB_ENGINE');
+
+        const switched = await runAdd({ cwd: dir, capability: 'db:postgres', force: true });
+        expect(switched.ok).toBe(true);
+        const after = fs.readFileSync(mainPath, 'utf-8');
+        expect(after).not.toContain('DB_ENGINE');
+        expect(after).toContain('DB_HOST');
+    });
+
+    it('postgres→aurora --force still upserts DB_ENGINE', async () => {
+        const dir = makeTmp();
+        writeMainTf(dir, '{ "name": "DB_HOST", "value": "h" },');
+        const mainPath = path.join(dir, 'terraform', 'main.tf');
+        const withList = fs.readFileSync(mainPath, 'utf-8');
+        fs.writeFileSync(mainPath, withList.replace('  app_name = "myapp${local.env_suffix}"', '  app_name = "myapp${local.env_suffix}"\n  managed_env_names = ["DB_HOST"]'));
+
+        const first = await runAdd({ cwd: dir, capability: 'db:postgres' });
+        expect(first.ok).toBe(true);
+
+        const switched = await runAdd({ cwd: dir, capability: 'db:aurora-postgresql', force: true });
+        expect(switched.ok).toBe(true);
+        const after = fs.readFileSync(mainPath, 'utf-8');
+        expect(after.match(/DB_ENGINE/g)).toHaveLength(2); // entry + guard list
+        expect(after).toContain('"aurora-postgresql"');
     });
 });

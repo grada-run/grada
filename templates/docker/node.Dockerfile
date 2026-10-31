@@ -1,5 +1,5 @@
 # --- Stage 1: Install production dependencies ---
-FROM node:22-alpine AS builder
+FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS builder
 WORKDIR /app
 COPY package*.json ./
 # Guarantee node_modules exists for zero-dependency projects (npm ci with
@@ -7,7 +7,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force && mkdir -p node_modules
 
 # --- Stage 2: Production runner (no package managers) ---
-FROM node:22-alpine AS runner
+FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 
 # 1. DevSecOps: Patch underlying Alpine OS vulnerabilities
 RUN apk update && apk upgrade --no-cache

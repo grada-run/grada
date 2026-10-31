@@ -3,7 +3,7 @@ import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../../core/telemetry.js';
-import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
+import { failCommand, failAwsError, failNamedContainerMissing, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
@@ -74,9 +74,9 @@ export function buildVectorExtensionCommand() {
         'if command -v psql >/dev/null 2>&1; then',
         '  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "$VECTOR_SQL" -c "SELECT extversion FROM pg_extension WHERE extname = \'vector\';"',
         'elif command -v node >/dev/null 2>&1 && node -e "require.resolve(\'pg\')" >/dev/null 2>&1; then',
-        '  node -e "const{Client}=require(\'pg\');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});await c.connect();await c.query(\'CREATE EXTENSION IF NOT EXISTS vector\');const r=await c.query(\\"SELECT extversion FROM pg_extension WHERE extname=\'vector\'\\");console.log(\'pgvector extension version: \'+(r.rows[0]&&r.rows[0].extversion));await c.end();})().catch(e=>{console.error(e&&e.message||e);process.exit(1);})"',
+        '  node -e "const{Client}=require(\'pg\');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});await c.connect();await c.query(\'CREATE EXTENSION IF NOT EXISTS vector\');const r=await c.query(\\"SELECT extversion FROM pg_extension WHERE extname=\'vector\'\\");console.log(\'pgvector extension version: \'+(r.rows[0]&&r.rows[0].extversion));await c.end();})().catch(e=>{console.error(e&&e.stack||e);process.exit(1);})"',
         'elif command -v node >/dev/null 2>&1 && node -e "require.resolve(\'@prisma/client\')" >/dev/null 2>&1; then',
-        '  node -e "const{PrismaClient}=require(\'@prisma/client\');(async()=>{let U=process.env.DATABASE_URL;if(!/[?&]sslmode=/i.test(U))U+=U.includes(\'?\')?\'&sslmode=require\':\'?sslmode=require\';process.env.DATABASE_URL=U;const p=new PrismaClient();await p.\\$executeRawUnsafe(\'CREATE EXTENSION IF NOT EXISTS vector\');const r=await p.\\$queryRawUnsafe(\\"SELECT extversion FROM pg_extension WHERE extname=\'vector\'\\");console.log(\'pgvector extension ready: \'+JSON.stringify(r));await p.\\$disconnect();})().catch(e=>{console.error(e&&e.message||e);process.exit(1);})"',
+        '  node -e "const{PrismaClient}=require(\'@prisma/client\');(async()=>{let U=process.env.DATABASE_URL;if(!/[?&]sslmode=/i.test(U))U+=U.includes(\'?\')?\'&sslmode=require\':\'?sslmode=require\';process.env.DATABASE_URL=U;const p=new PrismaClient();await p.\\$executeRawUnsafe(\'CREATE EXTENSION IF NOT EXISTS vector\');const r=await p.\\$queryRawUnsafe(\\"SELECT extversion FROM pg_extension WHERE extname=\'vector\'\\");console.log(\'pgvector extension ready: \'+JSON.stringify(r));await p.\\$disconnect();})().catch(e=>{console.error(e&&e.stack||e);process.exit(1);})"',
         'elif [ -n "$PYBIN" ] && "$PYBIN" -c "import psycopg" >/dev/null 2>&1; then',
         '  "$PYBIN" -c "import os,psycopg;c=psycopg.connect(os.environ[\'DATABASE_URL\'],autocommit=True);c.execute(\'CREATE EXTENSION IF NOT EXISTS vector\');print(\'pgvector extension version:\',c.execute(\\"SELECT extversion FROM pg_extension WHERE extname=\'vector\'\\").fetchone()[0])"',
         'elif [ -n "$PYBIN" ] && "$PYBIN" -c "import psycopg2" >/dev/null 2>&1; then',
@@ -101,7 +101,10 @@ function detectDatabaseEngine(cwd) {
         const databaseTf = path.join(cwd, 'terraform', 'database.tf');
         if (!fsSync.existsSync(databaseTf)) return { present: false, engine: 'unknown' };
         const hcl = fsSync.readFileSync(databaseTf, 'utf8');
-        if (hcl.includes('resource "aws_rds_cluster"')) return { present: true, engine: 'aurora-postgresql' };
+        if (hcl.includes('resource "aws_rds_cluster"')) {
+            if (/engine\s*=\s*"aurora-mysql"/.test(hcl)) return { present: true, engine: 'aurora-mysql' };
+            return { present: true, engine: 'aurora-postgresql' };
+        }
         if (/engine\s*=\s*"mysql"/.test(hcl)) return { present: true, engine: 'mysql' };
         return { present: true, engine: 'postgres' };
     } catch {
@@ -185,9 +188,10 @@ async function runDbEnableVectorMain(input = {}) {
 
     // Engine & prerequisite guards (before any AWS calls).
     const { present: hasDatabaseTf, engine } = detectDatabaseEngine(cwd);
-    if (hasDatabaseTf && engine === 'mysql') {
+    if (hasDatabaseTf && (engine === 'mysql' || engine === 'aurora-mysql')) {
+        const engineLabel = engine === 'aurora-mysql' ? 'Aurora MySQL' : 'MySQL';
         return failCommand({
-            message: '\n✖ pgvector requires PostgreSQL or Aurora PostgreSQL. This project provisions MySQL.\n',
+            message: `\n✖ pgvector requires PostgreSQL or Aurora PostgreSQL. This project provisions ${engineLabel}.\n`,
             event: 'db_enable_vector_run',
             telemetry: { projectName, engine },
             errorCode: 'UNSUPPORTED_VECTOR_ENGINE',
@@ -292,6 +296,15 @@ async function runDbEnableVectorMain(input = {}) {
                 errorCode: 'RUN_TASK_FAILED',
                 reason: 'run-task-failed',
                 resultExtra: { cluster, service, region },
+            });
+        }
+
+        if (!outcome.ok && outcome.code === 'NAMED_CONTAINER_MISSING') {
+            return failNamedContainerMissing({
+                spinner: s, outcome, cluster, service, region,
+                event: 'db_enable_vector_run',
+                telemetry: { projectName },
+                noun: 'Vector',
             });
         }
 

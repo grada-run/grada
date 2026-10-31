@@ -144,6 +144,34 @@ vi.mock('@aws-sdk/client-secrets-manager', () => ({
     ListSecretsCommand: MockListSecretsCommand,
 }));
 
+// --- Mock AWS SDK: RDS (manual snapshot retirement) ---
+const { mockRdsSend, MockRDSClient, MockDescribeDBSnapshotsCommand, MockDescribeDBClusterSnapshotsCommand, MockDeleteDBSnapshotCommand, MockDeleteDBClusterSnapshotCommand } = vi.hoisted(() => {
+    const send = vi.fn();
+    const makeCommand = (name) =>
+        vi.fn(function (input) {
+            this.commandName = name;
+            Object.assign(this, input);
+        });
+    return {
+        mockRdsSend: send,
+        MockRDSClient: vi.fn(function () {
+            this.send = send;
+        }),
+        MockDescribeDBSnapshotsCommand: makeCommand('DescribeDBSnapshotsCommand'),
+        MockDescribeDBClusterSnapshotsCommand: makeCommand('DescribeDBClusterSnapshotsCommand'),
+        MockDeleteDBSnapshotCommand: makeCommand('DeleteDBSnapshotCommand'),
+        MockDeleteDBClusterSnapshotCommand: makeCommand('DeleteDBClusterSnapshotCommand'),
+    };
+});
+
+vi.mock('@aws-sdk/client-rds', () => ({
+    RDSClient: MockRDSClient,
+    DescribeDBSnapshotsCommand: MockDescribeDBSnapshotsCommand,
+    DescribeDBClusterSnapshotsCommand: MockDescribeDBClusterSnapshotsCommand,
+    DeleteDBSnapshotCommand: MockDeleteDBSnapshotCommand,
+    DeleteDBClusterSnapshotCommand: MockDeleteDBClusterSnapshotCommand,
+}));
+
 // --- Mock interactive prompts (controllable confirm) ---
 
 
@@ -208,6 +236,14 @@ function setupMixedDiscoveryFixtures() {
         }
         if (cmd instanceof MockListServicesCommand) return { serviceArns: [] };
         throw new Error(`Unexpected ECS command: ${cmd?.commandName}`);
+    });
+
+    mockRdsSend.mockImplementation(async (cmd) => {
+        if (cmd instanceof MockDescribeDBSnapshotsCommand) return { DBSnapshots: [] };
+        if (cmd instanceof MockDescribeDBClusterSnapshotsCommand) return { DBClusterSnapshots: [] };
+        if (cmd instanceof MockDeleteDBSnapshotCommand) return {};
+        if (cmd instanceof MockDeleteDBClusterSnapshotCommand) return {};
+        throw new Error(`Unexpected RDS command: ${cmd?.commandName}`);
     });
 }
 
@@ -495,6 +531,116 @@ describe('gc: dry-run discovery', () => {
             consoleSpy.mockRestore();
         }
     });
+});
+
+describe('gc: manual snapshot retirement', () => {
+    const OLD = new Date('2020-01-01T00:00:00.000Z');
+    const youngStamp = () => {
+        const d = new Date(Date.now() - 2 * 86400000);
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
+    };
+
+    function snapshotSend() {
+        return vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeDBSnapshotsCommand) {
+                return {
+                    DBSnapshots: [
+                        { DBSnapshotIdentifier: `${PROJECT}-db-manual-20200101-000000`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                        { DBSnapshotIdentifier: `${PROJECT}-db-manual-${youngStamp()}`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: new Date(Date.now() - 2 * 86400000) },
+                        { DBSnapshotIdentifier: `other-db-manual-20200101-000000`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                        { DBSnapshotIdentifier: `${PROJECT}-db-manual-20200101-010101`, Status: 'available', SnapshotType: 'automated', SnapshotCreateTime: OLD },
+                        { DBSnapshotIdentifier: `${PROJECT}-db-manual-20200101-020202`, Status: 'creating', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                    ],
+                };
+            }
+            if (cmd instanceof MockDescribeDBClusterSnapshotsCommand) {
+                return {
+                    DBClusterSnapshots: [
+                        { DBClusterSnapshotIdentifier: `${PROJECT}-db-cluster-manual-20200101-000000`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                        { DBClusterSnapshotIdentifier: `other-db-cluster-manual-20200101-000000`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                    ],
+                };
+            }
+            if (cmd instanceof MockDeleteDBSnapshotCommand) return { DBSnapshotIdentifier: cmd.DBSnapshotIdentifier };
+            if (cmd instanceof MockDeleteDBClusterSnapshotCommand) return { DBClusterSnapshotIdentifier: cmd.DBClusterSnapshotIdentifier };
+            throw new Error('unexpected');
+        });
+    }
+
+    function snapshotCtx(rdsSend, overrides = {}) {
+        return {
+            ecrClient: { send: mockEcrSend },
+            logsClient: { send: mockLogsSend },
+            ec2Client: { send: mockEc2Send },
+            rdsClient: { send: rdsSend },
+            projectName: PROJECT,
+            dbIdentifier: `${PROJECT}-db`,
+            dbClusterIdentifier: `${PROJECT}-db-cluster`,
+            ...overrides,
+        };
+    }
+
+    it('proposes only old manual snapshots matching the project db pattern', async () => {
+        const result = await discoverOrphanedResources(snapshotCtx(snapshotSend()));
+        const ids = result.oldManualSnapshots.map((s) => s.id).sort();
+        expect(ids).toEqual([
+            `${PROJECT}-db-cluster-manual-20200101-000000`,
+            `${PROJECT}-db-manual-20200101-000000`,
+        ]);
+        expect(result.totalCount).toBe(2 + result.untaggedImages.length + result.orphanedLogGroups.length + result.unattachedEips.length);
+    });
+
+    it('honors --snapshot-max-age-days', async () => {
+        expect(parseGcArgs(['gc', '--snapshot-max-age-days', '7'])).toMatchObject({ snapshotMaxAgeDays: '7' });
+        const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+        const rdsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeDBSnapshotsCommand) {
+                return { DBSnapshots: [{ DBSnapshotIdentifier: `${PROJECT}-db-manual-20200101-000000`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: tenDaysAgo }] };
+            }
+            if (cmd instanceof MockDescribeDBClusterSnapshotsCommand) return { DBClusterSnapshots: [] };
+            throw new Error('unexpected');
+        });
+        const week = await discoverOrphanedResources(snapshotCtx(rdsSend, { snapshotMaxAgeDays: 7 }));
+        expect(week.oldManualSnapshots).toHaveLength(1);
+        const month = await discoverOrphanedResources(snapshotCtx(rdsSend, { snapshotMaxAgeDays: 30 }));
+        expect(month.oldManualSnapshots).toHaveLength(0);
+    });
+
+    it('refuses an invalid --snapshot-max-age-days without deleting', async () => {
+        clack.mockConfirm.mockResolvedValue(true);
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        try {
+            await runGc({ projectName: PROJECT, region: 'us-east-2', snapshotMaxAgeDays: 'soon', yes: true });
+            expect(exitSpy).toHaveBeenCalledWith(1);
+            expect(MockDeleteDBSnapshotCommand).not.toHaveBeenCalled();
+            expect(MockDeleteDBClusterSnapshotCommand).not.toHaveBeenCalled();
+        } finally {
+            exitSpy.mockRestore();
+        }
+    });
+
+    it('deletes confirmed snapshots and reports the count', async () => {
+        mockRdsSend.mockImplementation(snapshotSend().getMockImplementation());
+        clack.mockConfirm.mockResolvedValue(true);
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            const result = await runGc({ projectName: PROJECT, region: 'us-east-2', isHeadless: false });
+            expect(result.deleted).toBe(true);
+            expect(result.deletedSnapshots).toBe(2);
+            expect(MockDeleteDBSnapshotCommand).toHaveBeenCalledTimes(1);
+            expect(MockDeleteDBClusterSnapshotCommand).toHaveBeenCalledTimes(1);
+            const text = output.join('\n').replace(/\x1B\[[0-9;]*m/g, '');
+            expect(text).toContain('Old manual DB snapshots: 2');
+            expect(clack.mockOutro).toHaveBeenCalledWith(expect.stringMatching(/2 snapshot/));
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
 });
 
 describe('gc: safety guards', () => {

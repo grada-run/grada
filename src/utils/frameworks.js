@@ -24,20 +24,32 @@ export async function resolveDjangoWsgi(targetDir, procfile, framework, isHeadle
         message: 'What is the Python module path to your Django wsgi.py?',
         placeholder: 'core.wsgi',
         initialValue: 'core.wsgi',
+        validate: (value) => {
+            if (/^[A-Za-z0-9_.]+$/.test(String(value ?? ''))) return undefined;
+            return 'Enter a Python module path with letters, numbers, dots, and underscores only (e.g. core.wsgi).';
+        },
     });
 
     if (typeof djangoWsgi === 'symbol') process.exit(0);
     return djangoWsgi;
 }
 
-export async function handleRailsCI(targetDir, framework, isHeadless) {
+export async function handleRailsCI(targetDir, framework, isHeadless, { force = false } = {}) {
     if (framework !== 'rails') return false;
 
     const ciPath = path.join(targetDir, '.github', 'workflows', 'ci.yml');
     const dependabotPath = path.join(targetDir, '.github', 'dependabot.yml');
 
     if (fsSync.existsSync(ciPath) || fsSync.existsSync(dependabotPath)) {
-        if (isHeadless) return true;
+        // Headless renames user files only with explicit --force;
+        // otherwise warn and keep them like the interactive decline path.
+        if (isHeadless) {
+            if (force !== true) {
+                log.warn(color.yellow('⚠️  Detected default Rails GitHub Actions (ci.yml, dependabot.yml) that usually crash in isolated CI environments without a database — keeping them. Re-run with --force to let grada rename them to .bak.'));
+                return false;
+            }
+            return true;
+        }
 
         console.log('');
         const disable = await confirm({

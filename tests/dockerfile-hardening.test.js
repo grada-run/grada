@@ -114,3 +114,27 @@ describe('stripped-runner list matches templates (drift guard)', () => {
         expect([...SUPPORTED_FRAMEWORKS].sort()).toEqual(templated);
     });
 });
+
+describe('Dockerfile supply-chain pins', () => {
+    function dockerfiles() {
+        return fs.readdirSync(TEMPLATES_DIR).filter((file) => file.endsWith('.Dockerfile'));
+    }
+
+    it('pins every node:22-alpine base by digest', () => {
+        for (const file of dockerfiles()) {
+            const content = fs.readFileSync(path.join(TEMPLATES_DIR, file), 'utf-8');
+            for (const line of content.split('\n')) {
+                if (/^\s*FROM\s+node:22-alpine/i.test(line)) {
+                    expect(line, `${file}: ${line.trim()}`).toMatch(/node:22-alpine@sha256:[0-9a-f]{64}/);
+                }
+            }
+        }
+    });
+
+    it('never floats npm@latest', () => {
+        for (const file of dockerfiles()) {
+            const content = fs.readFileSync(path.join(TEMPLATES_DIR, file), 'utf-8');
+            expect(content, file).not.toContain('npm@latest');
+        }
+    });
+});

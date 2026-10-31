@@ -5,7 +5,7 @@ import { mockOutro } from './helpers/clack.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { runDoctor, installHint, ciHint, singleCheckFailure, DOCTOR_CHECKS, AWS_AUTH_TIMEOUT_MS } from '../src/commands/doctor.js';
+import { runDoctor, installHint, ciHint, singleCheckFailure, DOCTOR_CHECKS, PROJECT_CHECKS, AWS_AUTH_TIMEOUT_MS } from '../src/commands/doctor.js';
 import { checkDependency } from '../src/utils/system.js';
 import { checkAwsCredentials } from '../src/utils/aws.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
@@ -805,6 +805,30 @@ describe('S27: project-aware doctor checks (R2)', () => {
         } finally {
             restore();
         }
+    });
+
+    it('ignores @-digits outside owner/name when judging immutable coverage', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'oidc.tf'),
+            '"token.actions.githubusercontent.com:sub" : "repo:acme/widgets:release@2"\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/immutable/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_oidc_immutable_claims: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('points the immutable-claims hint at init, not a setup command', () => {
+        const check = PROJECT_CHECKS.find((entry) => entry.id === 'oidc_immutable_claims');
+        expect(check.hint()).toContain('grada-run init');
+        expect(check.hint()).not.toContain('setup');
     });
 
     it('warns on list trusts containing an open repo:* entry', async () => {

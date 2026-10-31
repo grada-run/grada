@@ -8,6 +8,7 @@ import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../c
 import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe } from '../utils/resolvers.js';
+import { atomicWriteFileSync } from '../utils/atomic-write.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,7 +53,7 @@ export function scaffoldDriftWorkflow(cwd = process.cwd(), { region, roleArn, fo
         return { ok: false, reason: 'exists', path: targetPath };
     }
     fsSync.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fsSync.writeFileSync(targetPath, rendered, 'utf8');
+    atomicWriteFileSync(targetPath, rendered, 'utf8');
     return { ok: true, path: targetPath };
 }
 

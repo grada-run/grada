@@ -2,7 +2,7 @@ import { ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/client-ecs';
 import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { spawnSync } from 'child_process';
 import net from 'node:net';
-import { pickRuntimeContainer } from './ecs.js';
+import { pickRuntimeContainer, pickNewestRunningTask } from './ecs.js';
 import { pollUntil } from './system.js';
 
 // SSM port-forwarding session arguments for tunneling to a database
@@ -46,14 +46,24 @@ export async function findJumpHostTarget(ecsClient, { cluster, service, expected
     );
     const taskArns = listResp.taskArns || [];
     if (taskArns.length === 0) return { error: 'NO_RUNNING_TASKS' };
+    // ListTasks order is arbitrary and desiredStatus RUNNING still
+    // returns tasks PROVISIONING/PENDING toward that goal — describe the
+    // batch and pick the newest actually-RUNNING task with a runtimeId
+    // instead of trusting arns[0].
     const descResp = await ecsClient.send(
-        new DescribeTasksCommand({ cluster, tasks: taskArns.slice(0, 1) })
+        new DescribeTasksCommand({ cluster, tasks: taskArns.slice(0, 10) })
     );
-    const task = (descResp.tasks || [])[0] || null;
-    if (!task?.taskArn) return { error: 'NO_RUNNING_TASKS' };
+    const described = descResp.tasks || [];
+    const withRuntime = described.filter(
+        (candidate) => pickRuntimeContainer(candidate, expectedContainer)?.runtimeId
+    );
+    const task = pickNewestRunningTask(withRuntime);
+    if (!task?.taskArn) {
+        const anyRunning = described.some((candidate) => candidate?.lastStatus === 'RUNNING');
+        return { error: anyRunning ? 'NO_RUNTIME_ID' : 'NO_RUNNING_TASKS' };
+    }
     const container = pickRuntimeContainer(task, expectedContainer);
     const runtimeId = container?.runtimeId;
-    if (!runtimeId) return { error: 'NO_RUNTIME_ID' };
     return {
         taskArn: task.taskArn,
         taskId: task.taskArn.split('/').pop(),

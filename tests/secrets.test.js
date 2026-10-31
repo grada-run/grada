@@ -127,7 +127,9 @@ describe('Secrets Push Command', () => {
     });
 
     it('handles a missing AWS vault (ResourceNotFoundException) gracefully', async () => {
-        // Setup: GetSecretValue finds no vault (new vault path), then UpdateSecret also fails
+        // Setup: GetSecretValue finds no vault (new vault path), the
+        // pre-write re-read agrees, then UpdateSecret also fails
+        mockSend.mockRejectedValueOnce({ name: 'ResourceNotFoundException', message: 'Vault missing' });
         mockSend.mockRejectedValueOnce({ name: 'ResourceNotFoundException', message: 'Vault missing' });
         mockSend.mockRejectedValueOnce({ name: 'ResourceNotFoundException', message: 'Vault missing' });
         await fs.writeFile('.env', 'API_KEY=123');
@@ -200,6 +202,7 @@ describe('Secrets Push Command', () => {
         await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-1"');
         // Existing vault holds a different key set (addition + deletion)
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ OLD_KEY: '1', OTHER: 'old' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ OLD_KEY: '1', OTHER: 'old' }) });
         mockSend.mockResolvedValueOnce({});
         // The vault-only OLD_KEY must be named and acknowledged before writing
         mockConfirm.mockResolvedValueOnce(true);
@@ -232,6 +235,7 @@ describe('Secrets Push Command', () => {
         await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-1"');
         // Existing vault holds the identical key set with older values
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue', DB_PASS: 'oldsecret' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue', DB_PASS: 'oldsecret' }) });
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(true);
 
@@ -256,6 +260,7 @@ describe('Secrets Push Command', () => {
     it('skips the ECS restart when keys are identical but the user declines', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(false);
 
@@ -270,6 +275,7 @@ describe('Secrets Push Command', () => {
 
     it('skips the ECS restart when the user escapes the confirm prompt (cancel symbol)', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(Symbol('clack:cancel'));
@@ -287,6 +293,7 @@ describe('Secrets Push Command', () => {
     it('skips the ECS restart prompt in headless mode without hanging', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({});
 
         const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
@@ -303,6 +310,7 @@ describe('Secrets Push Command', () => {
 
     it('skips the ECS restart prompt when CI=true even without the headless flag', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({});
         process.env.CI = 'true';
@@ -337,6 +345,129 @@ describe('Secrets Push Command', () => {
         expect(result).toEqual(expect.objectContaining({ keysChanged: true }));
 
         consoleSpy.mockRestore();
+    });
+
+    // BUG-143: dotenv silently drops lines it cannot parse (and
+    // last-wins duplicates) while push reports success — name them.
+    it('warns naming unparseable .env lines and duplicate keys', async () => {
+        await fs.writeFile('.env', 'KEEP=yes\nFOO:BAR=x\nA=1\nA=2\nJUSTKEY\n');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        await pushSecrets('.env', 'my-project', { headless: true });
+
+        const output = consoleSpy.mock.calls.map(([line]) => String(line)).join('\n');
+        expect(output).toContain('line 2');
+        expect(output).toContain('FOO:BAR=x');
+        expect(output).toContain('line 5');
+        expect(output).toContain('JUSTKEY');
+        expect(output).toContain('duplicate');
+        expect(output).toContain('"A"');
+        // Success count reconciles: only survivors are pushed.
+        expect(MockUpdateSecretCommand).toHaveBeenCalledWith({
+            SecretId: 'my-project-secrets',
+            SecretString: JSON.stringify({ KEEP: 'yes', A: '2' }),
+        });
+        consoleSpy.mockRestore();
+    });
+
+    // BUG-144: push reads the vault, possibly waits on a confirm
+    // unboundedly, then full-replaces from the stale read — a second
+    // writer's keys are silently lost. Re-read before writing; abort
+    // when the payload moved.
+    it('aborts when the vault changes between read and write', async () => {
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        const gets = [
+            { SecretString: JSON.stringify({ A: 'old' }) },
+            { SecretString: JSON.stringify({ A: 'old', B: 'intruder' }) },
+        ];
+        mockSend.mockImplementation(async (command) => {
+            if (command instanceof MockGetSecretValueCommand) return gets.shift() ?? {};
+            return {};
+        });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        await pushSecrets('.env', 'my-project', { headless: true });
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
+        const output = consoleSpy.mock.calls.map(([line]) => String(line)).join('\n');
+        expect(output).toContain('changed');
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
+    // BUG-145: a binary vault reads as "empty" (no SecretString), so
+    // push skips the removal confirm and full-replaces it away.
+    it('refuses push against a binary vault payload', async () => {
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        mockSend.mockResolvedValue({ SecretBinary: 'aGVsbG8=' });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        await pushSecrets('.env', 'my-project', { headless: true });
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('binary'));
+        expect(trackEvent).toHaveBeenCalledWith('secrets_pushed', expect.objectContaining({
+            error_code: 'REMOTE_SECRET_BINARY',
+        }));
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
+    // BUG-159: a non-object vault payload yields phantom BUG-80
+    // removals (`0,1`) or a TypeError crash — refuse naming the shape.
+    it.each([
+        ['[1,2]', 'array'],
+        ['"just-a-string"', 'string'],
+        ['42', 'number'],
+    ])('refuses push against a %s vault payload', async (payload, shape) => {
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        mockSend.mockResolvedValue({ SecretString: payload });
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        await pushSecrets('.env', 'my-project', { headless: true });
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining(shape));
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
+    // BUG-160: push rewrote secret_keys.json on every run even when
+    // keys were unchanged — dirtying `git status` for no reason.
+    it('skips rewriting secret_keys.json when keys are byte-identical', async () => {
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        const keysPath = path.join('terraform', 'secret_keys.json');
+        await fs.writeFile(keysPath, JSON.stringify(['A'], null, 2));
+        const past = new Date(Date.now() - 60000);
+        await fs.utimes(keysPath, past, past);
+
+        await pushSecrets('.env', 'my-project', { headless: true });
+
+        expect((await fs.stat(keysPath)).mtimeMs).toBe(past.getTime());
+    });
+
+    // BUG-162: the vault name fell back to the directory basename, so a
+    // renamed directory silently aimed at a missing vault — the
+    // terraform project name (what provisioned the vault) wins.
+    it('resolves the vault from the terraform project name when no name is passed', async () => {
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'main.tf'), 'locals {\n  app_name = "tfproj${local.env_suffix}"\n}\n');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+
+        await pushSecrets('.env', '', { headless: true });
+
+        expect(MockGetSecretValueCommand).toHaveBeenCalledWith({ SecretId: 'tfproj-secrets' });
     });
 
     it('creates an empty .env file when missing and the user confirms', async () => {
@@ -463,6 +594,41 @@ describe('Secrets Pull Command', () => {
         vi.clearAllMocks();
         mockSend.mockReset();
         mockSend.mockResolvedValue({});
+    });
+
+    // BUG-145/159: pull must refuse binary and non-object vault
+    // payloads instead of syncing 0 secrets / materializing garbage.
+    it.each([
+        [{ SecretBinary: 'aGVsbG8=' }, 'binary'],
+        [{ SecretString: '[1,2]' }, 'array'],
+    ])('refuses pull against a %s vault payload', async (vaultResp, marker) => {
+        mockSend.mockResolvedValue(vaultResp);
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining(marker));
+        await expect(fs.readFile('.env', 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
+    // BUG-161: pull's overwrite-append revives locally deleted keys
+    // silently — name what came back.
+    it('names revived keys appended by pull', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: 'remote', REVIVED: 'back' }) });
+        await fs.writeFile('.env', 'KEPT=local\n');
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        const output = consoleSpy.mock.calls.map(([line]) => String(line)).join('\n');
+        expect(output).toContain('REVIVED');
+        expect(result.appended).toEqual(['REVIVED']);
+        consoleSpy.mockRestore();
     });
 
     it('creates .env from remote payload when local file is missing', async () => {
@@ -613,6 +779,26 @@ describe('Secrets Audit Command', () => {
         consoleSpy.mockRestore();
     });
 
+    // BUG-145/159: audit must refuse binary and non-object vault
+    // payloads instead of reporting every local key untracked.
+    it.each([
+        [{ SecretBinary: 'aGVsbG8=' }, 'binary'],
+        [{ SecretString: '[1,2]' }, 'array'],
+    ])('refuses audit against a %s vault payload', async (vaultResp, marker) => {
+        mockSend.mockResolvedValue(vaultResp);
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        await auditSecrets('.env', 'my-project');
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining(marker));
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+    });
+
     it('reports in-sync when local matches remote', async () => {
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ A: '1' }) });
         await fs.writeFile('.env', 'A=1');
@@ -710,6 +896,29 @@ describe('Secrets Region Resolution', () => {
         expect(await resolveSecretsRegion({})).toBe('us-east-2');
     });
 
+    // BUG-164: the backend.tf region regex matched inside comment
+    // lines — comments must never resolve the vault region.
+    it('ignores commented region lines in backend.tf', async () => {
+        await fs.writeFile(path.join('terraform', 'backend.tf'), '# region = "eu-dead-1"\nregion = "eu-west-1"\n');
+        expect(await resolveSecretsRegion({})).toBe('eu-west-1');
+    });
+
+    it('falls back when backend.tf carries only a commented region', async () => {
+        const savedRegion = process.env.AWS_REGION;
+        const savedDefault = process.env.AWS_DEFAULT_REGION;
+        delete process.env.AWS_REGION;
+        delete process.env.AWS_DEFAULT_REGION;
+        try {
+            await fs.writeFile(path.join('terraform', 'backend.tf'), '# region = "eu-dead-1"\n');
+            expect(await resolveSecretsRegion({})).toBe('us-east-2');
+        } finally {
+            if (savedRegion === undefined) delete process.env.AWS_REGION;
+            else process.env.AWS_REGION = savedRegion;
+            if (savedDefault === undefined) delete process.env.AWS_DEFAULT_REGION;
+            else process.env.AWS_DEFAULT_REGION = savedDefault;
+        }
+    });
+
     it('falls back to us-east-2 and trims blank values', async () => {
         expect(await resolveSecretsRegion({})).toBe('us-east-2');
         process.env.AWS_REGION = '   ';
@@ -744,6 +953,7 @@ describe('Secrets Region Resolution', () => {
 
     it('pushSecrets builds the ECS client with the resolved default region on restart', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
         mockSend.mockResolvedValueOnce({});
         mockConfirm.mockResolvedValueOnce(true);
@@ -819,6 +1029,7 @@ describe('Secrets Push on --target lambda projects', () => {
 
     it('skips the ECS restart prompt when keys are unchanged', async () => {
         await fs.writeFile('.env', 'API_KEY=new-value');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'old-value' }) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'old-value' }) });
         mockSend.mockResolvedValueOnce({});
 
@@ -1003,6 +1214,18 @@ describe('Secrets managed-env helpers (BUG-79)', () => {
         expect(await getManagedEnvNames(testDir, 'ecs')).toContain('NODE_ENV');
     });
 
+    it('sniffs every database file for the engine, not just the first listed', async () => {
+        await fs.writeFile(path.join('terraform', 'database.tf'), 'resource "aws_db_instance" "postgres" {\n  engine = "postgres"\n}\n');
+        await fs.writeFile(path.join('terraform', 'database-mysql.tf'), 'resource "aws_db_instance" "postgres" {\n  engine = "mysql"\n}\n');
+        // Force the postgres file first: readdir order is OS-dependent.
+        const readdirSpy = vi.spyOn(fs, 'readdir').mockResolvedValue(['database.tf', 'database-mysql.tf']);
+        try {
+            expect(await getManagedEnvNames(testDir, 'ecs')).toContain('DB_ENGINE');
+        } finally {
+            readdirSpy.mockRestore();
+        }
+    });
+
     it('adds DB names for database files and addon names per enabled capability file', async () => {
         await fs.writeFile(path.join('terraform', 'database.tf'), '# rds');
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
@@ -1074,6 +1297,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379\nAPI_KEY=abc');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
 
@@ -1101,11 +1325,20 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         expect(mockConfirm).not.toHaveBeenCalled();
         expect(MockUpdateSecretCommand).not.toHaveBeenCalled();
         await expect(fs.readFile(path.join('terraform', 'secret_keys.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+        // The all-skipped abort is a successful no-op push: telemetry
+        // records it with zero counts instead of going silent.
+        expect(trackEvent).toHaveBeenCalledWith('secrets_pushed', expect.objectContaining({
+            success: true,
+            secret_count: 0,
+            skipped_count: 1,
+            removed_count: 0,
+        }));
     });
 
     it('names every skipped key when several collide', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'PORT=3000\nREDIS_URL=redis://x\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
@@ -1127,6 +1360,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('pushes addon names freely when the capability is not enabled', async () => {
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
 
         await pushSecrets('.env', 'my-project', { isHeadless: false });
@@ -1141,6 +1375,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
             'resource "aws_lambda_function" "app" {}\n'
         );
         await fs.writeFile('.env', 'PORT=3000\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
@@ -1180,6 +1415,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('names removals loudly but proceeds in headless mode', async () => {
         await fs.writeFile('.env', 'KEPT=1');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', DOOMED: 'x' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', DOOMED: 'x' }) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
 
@@ -1203,6 +1439,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('warns on local-dev wiring values without blocking the push', async () => {
         await fs.writeFile('.env', 'DATABASE_URL=postgres://localhost:5432/db');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
 
@@ -1220,6 +1457,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('auto-skips colliding keys on ECS with a loud notice instead of refusing', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
@@ -1249,6 +1487,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
 
         const result = await pushSecrets('.env', 'my-project', { isHeadless: true, yes: true });
@@ -1263,6 +1502,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('--yes colliding push warns that the preflight backstops the bypass', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'REDIS_URL=redis://custom:6379');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
@@ -1286,6 +1526,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'KEPT=1\nREDIS_URL=redis://custom:6379');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', REDIS_URL: 'old' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', REDIS_URL: 'old' }) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
 
@@ -1305,6 +1546,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
     it('names stale vault values deleted for skipped keys without confirming', async () => {
         await fs.writeFile(path.join('terraform', 'redis.tf'), '# redis');
         await fs.writeFile('.env', 'KEPT=1\nREDIS_URL=redis://custom:6379');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', REDIS_URL: 'old' }) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: '1', REDIS_URL: 'old' }) });
         mockSend.mockResolvedValueOnce({});
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
@@ -1333,6 +1575,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
         // No worker.tf: nothing injects NODE_ENV, so it is deployable.
         await fs.writeFile('.env', 'NODE_ENV=production\nAPI_KEY=abc');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
 
         const result = await pushSecrets('.env', 'my-project', { isHeadless: true });
@@ -1360,6 +1603,7 @@ describe('Secrets Push guards (BUG-79/BUG-80)', () => {
             'environment = [\n  { "name" : "CUSTOM_COMPOSE_VAR", "value" : "x" },\n]\nsecrets = concat([], [])\n'
         );
         await fs.writeFile('.env', 'CUSTOM_COMPOSE_VAR=1\nAPI_KEY=abc');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({}) });
         mockSend.mockResolvedValueOnce({});
 

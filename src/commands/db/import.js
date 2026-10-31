@@ -3,7 +3,10 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { spawn } from 'child_process';
 import fsSync from 'node:fs';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
 import color from 'picocolors';
 import { intro, outro, spinner, select, text, password, confirm, cancel, isCancel } from '@clack/prompts';
@@ -66,13 +69,26 @@ export function parseDbImportArgs(argv = []) {
     return options;
 }
 
+// True for Postgres custom-archive kinds ('dump', 'dump-gzip'): both
+// restore via pg_restore and share the MySQL refusal. Pure and
+// unit-tested via the classifier tests.
+export function isCustomArchiveFormat(kind) {
+    return kind === 'dump' || kind === 'dump-gzip';
+}
+
 // Classifies an import file by extension: 'dump' (Postgres custom
-// archive), 'gzip' (.sql.gz / .gz), or 'sql' (plain text, the default for
-// unknown extensions). Pure and unit-tested.
+// archive, including pgAdmin's `.backup`), 'dump-gzip' (a custom archive
+// behind gzip — gunzipped to temp, never piped to psql), 'gzip'
+// (.sql.gz / .gz), or 'sql' (plain text, the default for unknown
+// extensions). Pure and unit-tested.
 export function classifyImportFile(filePath) {
     const lower = String(filePath || '').toLowerCase();
-    if (lower.endsWith('.dump')) return 'dump';
-    if (lower.endsWith('.gz')) return 'gzip';
+    if (lower.endsWith('.dump') || lower.endsWith('.backup')) return 'dump';
+    if (lower.endsWith('.gz')) {
+        const inner = lower.slice(0, -'.gz'.length);
+        if (inner.endsWith('.dump') || inner.endsWith('.backup')) return 'dump-gzip';
+        return 'gzip';
+    }
     return 'sql';
 }
 
@@ -83,7 +99,7 @@ export function requiredClientBinaries({ targetScheme, source }) {
     if (source.type === 'url') {
         return targetScheme === 'mysql' ? ['mysqldump', 'mysql'] : ['pg_dump', 'psql'];
     }
-    if (source.kind === 'dump') return ['pg_restore'];
+    if (isCustomArchiveFormat(source.kind)) return ['pg_restore'];
     return targetScheme === 'mysql' ? ['mysql'] : ['psql'];
 }
 
@@ -106,7 +122,7 @@ export function buildTargetClientCommand({ targetScheme, localPort, username, db
             args: ['-h', '127.0.0.1', '-P', String(localPort), '-u', username, dbName],
         };
     }
-    if (fileKind === 'dump') {
+    if (isCustomArchiveFormat(fileKind)) {
         return {
             bin: 'pg_restore',
             args: ['--no-owner', '--no-acl', '--no-password', '-h', '127.0.0.1', '-p', String(localPort), '-U', username, '-d', dbName, filePath],
@@ -142,11 +158,28 @@ function targetEnv(targetScheme, password) {
     return { ...process.env, PGPASSWORD: password, PGSSLMODE: process.env.PGSSLMODE || 'require' };
 }
 
+// Source-side dump env: the SOURCE is arbitrary user infra (often no
+// TLS), so prefer TLS instead of requiring it (BUG-148). MySQL sources
+// were never forced; the target side keeps `require`.
+function sourceEnv(scheme, password) {
+    if (scheme === 'mysql') {
+        return { ...process.env, MYSQL_PWD: password };
+    }
+    return { ...process.env, PGPASSWORD: password, PGSSLMODE: process.env.PGSSLMODE || 'prefer' };
+}
+
 function waitForExit(child) {
     return new Promise((resolve) => {
         child.once('error', (error) => resolve({ code: 1, error }));
-        child.once('close', (code) => resolve({ code: code ?? 0 }));
+        // Node reports signal death as code null — resolve it as failure
+        // (with the signal), never `?? 0` success (BUG-149).
+        child.once('close', (code, signal) => resolve(signal ? { code: 1, signal } : { code: code ?? 0 }));
     });
+}
+
+function describeExit(result) {
+    if (result.signal) return `signal ${result.signal}`;
+    return `exit code ${result.code}`;
 }
 
 function printDbNoTasksGuidance(service, cluster) {
@@ -328,9 +361,21 @@ async function runDbImportMain(input = {}) {
             resultExtra: { cluster, service, region },
         });
     }
-    if (source.type === 'file' && source.kind === 'dump' && targetIsMysql) {
+    if (source.type === 'file' && isCustomArchiveFormat(source.kind) && targetIsMysql) {
         return failCommand({
-            message: '\n✖ Cannot restore a Postgres custom-format archive (.dump) into MySQL. Export plain SQL instead.\n',
+            message: `\n✖ Cannot restore a Postgres custom-format archive ("${source.path}") into MySQL. Export plain SQL instead.\n`,
+            event: 'db_import_run',
+            telemetry: { projectName, source: source.type },
+            errorCode: 'UNSUPPORTED_IMPORT_FORMAT',
+            reason: 'unsupported-import-format',
+            resultExtra: { cluster, service, region },
+        });
+    }
+    if (source.type === 'url' && (source.scheme === 'mysql') !== targetIsMysql) {
+        const sourceLabel = source.scheme === 'mysql' ? 'MySQL' : 'Postgres';
+        const targetLabel = targetIsMysql ? 'MySQL' : 'Postgres';
+        return failCommand({
+            message: `\n✖ Cannot import from ${sourceLabel} ("${source.redacted}") into ${targetLabel}: dump dialects are not portable across engines. Migrate the schema first, then import same-engine SQL.\n`,
             event: 'db_import_run',
             telemetry: { projectName, source: source.type },
             errorCode: 'UNSUPPORTED_IMPORT_FORMAT',
@@ -519,9 +564,7 @@ async function runDbImportMain(input = {}) {
             const dump = buildSourceDumpCommand(source);
             const dumpChild = spawnImpl(dump.bin, dump.args, {
                 stdio: ['ignore', 'pipe', 'inherit'],
-                env: source.scheme === 'mysql'
-                    ? { ...process.env, MYSQL_PWD: source.password }
-                    : { ...process.env, PGPASSWORD: source.password, PGSSLMODE: process.env.PGSSLMODE || 'require' },
+                env: sourceEnv(source.scheme, source.password),
             });
             const importChild = spawnImpl(targetCmd.bin, targetCmd.args, {
                 stdio: ['pipe', 'inherit', 'inherit'],
@@ -534,7 +577,7 @@ async function runDbImportMain(input = {}) {
             ]);
             if (dumpResult.code !== 0) {
                 return failCommand({
-                    message: `\n✖ Source dump failed with exit code ${dumpResult.code}${dumpResult.error ? `: ${dumpResult.error.message}` : ''}.\n`,
+                    message: `\n✖ Source dump failed with ${describeExit(dumpResult)}${dumpResult.error ? `: ${dumpResult.error.message}` : ''}.\n`,
                     event: 'db_import_run',
                     telemetry: { projectName, source: source.type, error_code: 'IMPORT_FAILED' },
                     reason: 'import-failed',
@@ -543,22 +586,50 @@ async function runDbImportMain(input = {}) {
             }
             if (importResult.code !== 0) {
                 return failCommand({
-                    message: `\n✖ Import failed with exit code ${importResult.code}${importResult.error ? `: ${importResult.error.message}` : ''}.\n`,
+                    message: `\n✖ Import failed with ${describeExit(importResult)}${importResult.error ? `: ${importResult.error.message}` : ''}.\n`,
                     event: 'db_import_run',
                     telemetry: { projectName, source: source.type, error_code: 'IMPORT_FAILED' },
                     reason: 'import-failed',
                     resultExtra: { cluster, service, region },
                 });
             }
-        } else if (source.kind === 'dump') {
-            const child = spawnImpl(targetCmd.bin, targetCmd.args, {
+        } else if (isCustomArchiveFormat(source.kind)) {
+            // pg_restore cannot read gzip: expand a gzipped custom
+            // archive to a temp file first (never piped to psql as SQL).
+            let restoreFilePath = source.path;
+            let tempDir = null;
+            if (source.kind === 'dump-gzip') {
+                tempDir = fsSync.mkdtempSync(join(tmpdir(), 'grada-import-'));
+                const stem = basename(source.path).replace(/\.gz$/i, '').replace(/\.(dump|backup)$/i, '') || 'restore';
+                restoreFilePath = join(tempDir, `${stem}.dump`);
+                try {
+                    await pipeline(createReadStream(source.path), zlib.createGunzip(), createWriteStream(restoreFilePath));
+                } catch (error) {
+                    try { fsSync.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+                    return failCommand({
+                        message: `\n✖ Could not gunzip import file "${source.path}": ${error.message}.\n`,
+                        event: 'db_import_run',
+                        telemetry: { projectName, source: source.type, error_code: 'IMPORT_READ_FAILED' },
+                        reason: 'import-failed',
+                        resultExtra: { cluster, service, region },
+                    });
+                }
+            }
+            // pg_restore takes the archive path as its final argv element.
+            const restoreCmd = tempDir
+                ? { ...targetCmd, args: [...targetCmd.args.slice(0, -1), restoreFilePath] }
+                : targetCmd;
+            const child = spawnImpl(restoreCmd.bin, restoreCmd.args, {
                 stdio: ['ignore', 'inherit', 'inherit'],
                 env: targetEnv(targetScheme, creds.password),
             });
             const result = await waitForExit(child);
+            if (tempDir) {
+                try { fsSync.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+            }
             if (result.code !== 0) {
                 return failCommand({
-                    message: `\n✖ pg_restore failed with exit code ${result.code}${result.error ? `: ${result.error.message}` : ''}.\n`,
+                    message: `\n✖ pg_restore failed with ${describeExit(result)}${result.error ? `: ${result.error.message}` : ''}.\n`,
                     event: 'db_import_run',
                     telemetry: { projectName, source: source.type, error_code: 'IMPORT_FAILED' },
                     reason: 'import-failed',
@@ -572,14 +643,35 @@ async function runDbImportMain(input = {}) {
             });
             const fileStream = createReadStream(source.path);
             const input = source.kind === 'gzip' ? fileStream.pipe(zlib.createGunzip()) : fileStream;
-            input.on('error', (error) => {
-                try { child.stdin.destroy(error); } catch { /* handled below */ }
-            });
+            // A broken file stream (corrupt gzip, unreadable file) must
+            // fail the import naming its own cause — never a bare psql
+            // exit code, and never silent success when psql exits 0 on
+            // truncated input. pipe() does not forward source errors, so
+            // both legs get the handler. stdin is destroyed WITHOUT the
+            // error: the captured cause below is the message, and
+            // injecting a second error into the child would surface as an
+            // unrelated EPIPE/exit instead.
+            let streamError = null;
+            const onStreamError = (error) => {
+                if (!streamError) streamError = error;
+                try { child.stdin.destroy(); } catch { /* handled below */ }
+            };
+            input.on('error', onStreamError);
+            if (input !== fileStream) fileStream.on('error', onStreamError);
             input.pipe(child.stdin);
             const result = await waitForExit(child);
+            if (streamError) {
+                return failCommand({
+                    message: `\n✖ Could not read import file "${source.path}": ${streamError.message}.\n`,
+                    event: 'db_import_run',
+                    telemetry: { projectName, source: source.type, error_code: 'IMPORT_READ_FAILED' },
+                    reason: 'import-failed',
+                    resultExtra: { cluster, service, region },
+                });
+            }
             if (result.code !== 0) {
                 return failCommand({
-                    message: `\n✖ Import failed with exit code ${result.code}${result.error ? `: ${result.error.message}` : ''}.\n`,
+                    message: `\n✖ Import failed with ${describeExit(result)}${result.error ? `: ${result.error.message}` : ''}.\n`,
                     event: 'db_import_run',
                     telemetry: { projectName, source: source.type, error_code: 'IMPORT_FAILED' },
                     reason: 'import-failed',

@@ -124,6 +124,40 @@ describe('Command: diagnose', () => {
         }
     });
 
+    it('follows stopped-task pages so a crash beyond the first 100 is still found', async () => {
+        const oldCrash = {
+            taskArn: 'arn-old', stoppedReason: 'old crash', stoppedAt: '2026-09-26T11:00:00.000Z',
+            containers: [{ name: 'app', exitCode: 1 }],
+        };
+        const newCrash = {
+            taskArn: 'arn-new', stoppedReason: 'newest crash', stoppedAt: '2026-09-26T12:00:00.000Z',
+            containers: [{ name: 'app', exitCode: 137 }],
+        };
+        mockEcsSend
+            .mockResolvedValueOnce({ taskArns: ['arn-old'], nextToken: 'page2' })
+            .mockResolvedValueOnce({ taskArns: ['arn-new'] })
+            .mockResolvedValueOnce({ tasks: [oldCrash, newCrash] });
+        mockLogsSend.mockResolvedValueOnce({ events: [{ message: 'boom' }] });
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            const result = await runDiagnose({ cluster: 'test-cluster', region: 'us-east-2', logGroup: '/ecs/test' });
+            expect(result.stoppedReason).toBe('newest crash');
+            const stoppedLists = mockEcsSend.mock.calls
+                .map(([cmd]) => cmd)
+                .filter((cmd) => cmd instanceof MockListTasksCommand && cmd.desiredStatus === 'STOPPED');
+            expect(stoppedLists).toHaveLength(2);
+            const describeCall = mockEcsSend.mock.calls
+                .map(([cmd]) => cmd)
+                .find((cmd) => cmd instanceof MockDescribeTasksCommand);
+            expect(describeCall.tasks).toEqual(expect.arrayContaining(['arn-old', 'arn-new']));
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
     it('prints the honest line (not "no events") when the log fetch fails', async () => {
         mockEcsSend
             .mockResolvedValueOnce({

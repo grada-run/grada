@@ -5,7 +5,7 @@ import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../.
 import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveAppName, resolveCwd } from '../../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd } from '../../utils/resolvers.js';
 import { findDbTarget, generateSnapshotId, isValidSnapshotId, resolveDbIdentifier, resolveDbClusterIdentifier } from '../../utils/rds.js';
 import { pollUntil, parseTimeoutSeconds } from '../../utils/system.js';
 import { truncateSpinnerText } from '../../utils/spinner-text.js';
@@ -64,7 +64,6 @@ async function runDbBackupMain(input = {}) {
         cwd = resolveCwd(options);
         region = resolveRegion(options, cwd);
         projectName = resolveProjectName(options, cwd);
-        const appName = resolveAppName(projectName, options.workspace, cwd);
         dbIdentifier = resolveDbIdentifier({ ...options, projectName }, cwd);
         dbClusterIdentifier = resolveDbClusterIdentifier({ ...options, projectName }, cwd);
     } catch {

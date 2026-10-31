@@ -9,6 +9,7 @@ import os from 'os';
 import path from 'path';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'node:stream';
+import { execFileSync } from 'node:child_process';
 import {
     buildSsmArgs as sharedBuildSsmArgs,
     fetchManagedDbCredentials,
@@ -213,6 +214,7 @@ function mockRdsClusterClient(cluster) {
 function healthyTask(overrides = {}) {
     return {
         taskArn: TASK_ARN,
+        lastStatus: 'RUNNING',
         containers: [{ name: 'myapp-container', lastStatus: 'RUNNING', runtimeId: 'runtime-1' }],
         ...overrides,
     };
@@ -471,6 +473,22 @@ describe('Command: db connect (mocked AWS + spawn)', () => {
         expect(result.reason).toBe('tunnel-exit-nonzero');
         expect(exitSpy).toHaveBeenCalledWith(3);
         expect(mockTrackEvent).toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: false, error_code: 'TUNNEL_EXIT_NONZERO', exit_code: 3 }));
+        expect(mockTrackEvent).not.toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: true }));
+    });
+
+    // BUG-149: signal death (code null) slipped through `?? 0` as
+    // success — it must fail naming the signal.
+    it('reports tunnel failure when a signal kills the session', async () => {
+        const spawnImpl = vi.fn(() => {
+            const child = new EventEmitter();
+            queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+            return child;
+        });
+        const result = await runDbConnect({ ...baseOptions(), ...healthyClients(), spawnImpl });
+
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('tunnel-exit-nonzero');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: false, error_code: 'TUNNEL_EXIT_NONZERO' }));
         expect(mockTrackEvent).not.toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: true }));
     });
 
@@ -1427,7 +1445,7 @@ describe('db migrate: --setup-ci and gate injection', () => {
         const updated = fs.readFileSync(workflowFile, 'utf8');
         expect(updated).toContain('# grada:db-migrate-start');
         expect(updated).toContain('# grada:db-migrate-end');
-        expect(updated).toContain('actions/setup-node@v4');
+        expect(updated).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4');
         expect(updated).toContain(`--cmd 'npx prisma migrate deploy'`);
         expect(updated).toContain('${{ steps.register-task-def.outputs.task-arn }}');
         expect(updated.indexOf('# grada:db-migrate-start')).toBeLessThan(updated.indexOf('- name: Force ECS deployment'));
@@ -1456,6 +1474,26 @@ describe('db migrate: --setup-ci and gate injection', () => {
         }));
         const updated = fs.readFileSync(path.join(dir, '.github', 'workflows', 'deploy.yml'), 'utf8');
         expect(updated.match(/actions\/setup-node/g)).toHaveLength(1);
+    });
+
+    // BUG-191: the gate runs migrations as an ephemeral ECS task —
+    // on lambda/static there is no ECS to run it on. Refuse (init only
+    // auto-skips; this command is explicit).
+    it.each(['lambda', 'static'])('refuses --setup-ci on %s targets', async (target) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        const workflowFile = writeWorkflow(dir);
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            target === 'lambda' ? 'resource "aws_lambda_function" "app" {}\n' : 'resource "aws_cloudfront_distribution" "site" {}\n'
+        );
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('migrate-setup-ci-unsupported-target');
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(fs.readFileSync(workflowFile, 'utf8')).not.toContain('# grada:db-migrate-start');
     });
 
     it('fails when the workflow is missing or has no anchor step', async () => {
@@ -1572,7 +1610,7 @@ describe('db migrate: gate helpers', () => {
     it('injectMigrationGate places the block before the Force step', () => {
         const updated = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate' });
         expect(updated).toContain(`--cmd 'npm run migrate'`);
-        expect(updated).toContain('actions/setup-node@v4');
+        expect(updated).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4');
         expect(updated.indexOf('# grada:db-migrate-end')).toBeLessThan(updated.indexOf('- name: Force ECS deployment'));
     });
 
@@ -1641,12 +1679,28 @@ describe('db migrate: gate helpers', () => {
         expect(updated).toContain('# grada:db-migrate-start');
         expect(updated).toContain(`--cmd 'node ./dist/migrate.cjs'`);
         expect(updated).toContain('--workspace "${{ env.WORKSPACE }}"');
-        expect(updated).toContain('actions/setup-node@v4');
+        expect(updated).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4');
         expect(updated.indexOf('# grada:db-migrate-end')).toBeLessThan(updated.indexOf('- name: Comment PR'));
         // Idempotent refresh, not duplication.
         const twice = injectPreviewMigrationGate(updated, { cmd: 'node ./dist/other.cjs' });
         expect(twice.match(/# grada:db-migrate-start/g)).toHaveLength(1);
         expect(twice).toContain(`--cmd 'node ./dist/other.cjs'`);
+    });
+
+    // BUG-138: injected gates run AWS calls — they must honor the
+    // credential-skip outcome like every other post-assume step.
+    it('injected migration gates honor the credential outcome', () => {
+        const preview = [
+            'name: Ephemeral PR Preview',
+            'jobs:',
+            '  deploy-preview:',
+            '    steps:',
+            '      - name: Comment PR',
+            '        uses: actions/github-script@v7',
+        ].join('\n');
+        const updated = injectPreviewMigrationGate(preview, { cmd: 'node ./dist/migrate.cjs' });
+        expect(updated).toContain("if: steps.aws-creds.outcome == 'success'");
+        expect(updated).toContain('- name: Preview Database Migration');
     });
 
     it('injectPreviewMigrationGate returns null without an anchor', () => {
@@ -1695,6 +1749,16 @@ describe('Command: db enable-vector (mocked AWS)', () => {
         expect(mockTrackEvent).toHaveBeenCalledWith('db_enable_vector_run', expect.objectContaining({
             success: false, error_code: 'UNSUPPORTED_VECTOR_ENGINE',
         }));
+    });
+
+    it('rejects Aurora MySQL clusters (engine-checked, not assumed postgres)', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-vector-'));
+        writeDatabaseTf(dir, 'resource "aws_rds_cluster" "postgres" {\n  engine = "aurora-mysql"\n}\n');
+        const ecsClient = mockEcsMigrateClient();
+        const result = await runDbEnableVector(vectorOptions({ cwd: dir, ecsClient }));
+        expect(result.reason).toBe('unsupported-vector-engine');
+        expect(ecsClient.send).not.toHaveBeenCalled();
+        expect(stripVTControlCharacters(output.join('\n'))).toContain('Aurora MySQL');
     });
 
     it('requires database.tf or explicit cluster/service overrides', async () => {
@@ -1782,6 +1846,15 @@ describe('buildVectorExtensionCommand', () => {
         expect(tail).toBeGreaterThan(psycopg);
         expect(script).toContain('CREATE EXTENSION IF NOT EXISTS vector');
         expect(script).toContain('$DATABASE_URL');
+    });
+
+    // BUG-139 sibling: message-only catches swallow the cause chain
+    // that names the real failure (e.g. the Invalid URL inside a
+    // wrapped query error) — log the stack instead.
+    it('logs full stacks (not message-only) on the node branches', () => {
+        const script = buildVectorExtensionCommand();
+        expect(script).not.toContain('e.message||e');
+        expect(script).toContain('e.stack||e');
     });
 
     it('negotiates TLS on every branch (rds.force_ssl)', () => {
@@ -2010,6 +2083,18 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         expect(calls[1].stdinBytes.toString()).toBe('INSERT INTO t VALUES (1);\n');
     });
 
+    it('fails loud naming the gzip error when the stream breaks (even if psql exits 0)', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
+        const filePath = path.join(dir, 'corrupt.sql.gz');
+        fs.writeFileSync(filePath, Buffer.from('not-gzip-data-at-all'));
+        const { spawnImpl } = mockImportSpawn({ exitCode: 0, awaitPipe: true });
+        const result = await runDbImport(importOptions({ file: filePath, spawnImpl }));
+        expect(result.ok).toBe(false);
+        const text = stripVTControlCharacters(output.join('\n'));
+        expect(text).toContain('corrupt.sql.gz');
+        expect(text).toMatch(/gzip|gunzip|incorrect header|invalid/i);
+    });
+
     it('restores .dump archives with pg_restore', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
         const filePath = writeSqlFile(dir, 'seed.dump', 'PGDMP');
@@ -2023,6 +2108,26 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         expect(calls[1].opts.env.PGSSLMODE).toBe(process.env.PGSSLMODE || 'require');
     });
 
+    it('refuses cross-engine --from URLs instead of piping across dialects', async () => {
+        const { spawnImpl } = mockImportSpawn();
+        const pgToMysql = await runDbImport(importOptions({
+            from: 'postgresql://srcuser:src-pass@src-host:5433/sourcedb',
+            rdsClient: mockRdsClient(healthyDbInstance({
+                Engine: 'mysql',
+                Endpoint: { Address: 'myapp-db.abc123.us-east-2.rds.amazonaws.com', Port: 3306 },
+            })),
+            spawnImpl,
+        }));
+        expect(pgToMysql.reason).toBe('unsupported-import-format');
+
+        const { spawnImpl: spawnImpl2 } = mockImportSpawn();
+        const mysqlToPg = await runDbImport(importOptions({
+            from: 'mysql://srcuser:src-pass@src-host:3306/sourcedb',
+            spawnImpl: spawnImpl2,
+        }));
+        expect(mysqlToPg.reason).toBe('unsupported-import-format');
+    });
+
     it('pipes pg_dump into psql with per-process passwords for --from', async () => {
         const { calls, spawnImpl } = mockImportSpawn();
         const result = await runDbImport(importOptions({
@@ -2034,12 +2139,41 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         const dump = calls[1];
         expect(dump.args).toEqual(expect.arrayContaining(['--no-owner', '--no-acl', '-h', 'src-host', '-p', '5433', '-U', 'srcuser', '-d', 'sourcedb']));
         expect(dump.opts.env.PGPASSWORD).toBe('src-pass');
-        expect(dump.opts.env.PGSSLMODE).toBe(process.env.PGSSLMODE || 'require');
+        // BUG-148: the SOURCE is arbitrary user infra (often no TLS) —
+        // prefer, don't require. The Grada RDS target still requires.
+        expect(dump.opts.env.PGSSLMODE).toBe(process.env.PGSSLMODE || 'prefer');
         expect(calls[2].opts.env.PGPASSWORD).toBe(DB_PASSWORD);
         expect(calls[2].opts.env.PGSSLMODE).toBe(process.env.PGSSLMODE || 'require');
         expect(calls.flatMap((c) => c.args).join(' ')).not.toContain('src-pass');
         expect(calls.flatMap((c) => c.args).join(' ')).not.toContain(DB_PASSWORD);
         expect(mockTrackEvent).toHaveBeenCalledWith('db_import_run', expect.objectContaining({ success: true, source: 'url' }));
+    });
+
+    // BUG-149: Node reports signal death as code null, and `?? 0`
+    // turned that into success ("Import complete" on a partial import).
+    it('fails when a signal kills the source dump child', async () => {
+        const spawnImpl = vi.fn((bin, args, opts) => {
+            const child = new EventEmitter();
+            child.stdin = new PassThrough();
+            child.stdout = new PassThrough();
+            child.stderr = new PassThrough();
+            child.kill = vi.fn();
+            child.unref = vi.fn();
+            if (bin === 'pg_dump') {
+                queueMicrotask(() => child.emit('close', null, 'SIGTERM'));
+            } else {
+                queueMicrotask(() => child.emit('close', 0));
+            }
+            return child;
+        });
+        const result = await runDbImport(importOptions({
+            from: 'postgresql://srcuser:src-pass@src-host:5433/sourcedb',
+            spawnImpl,
+        }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('import-failed');
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(stripVTControlCharacters(output.join('\n'))).not.toContain('Import complete');
     });
 
     it('uses mysql/mysqldump with MYSQL_PWD for MySQL targets', async () => {
@@ -2081,6 +2215,52 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         expect(result.reason).toBe('unsupported-import-format');
     });
 
+    it('restores .backup custom-format archives with pg_restore', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
+        const filePath = writeSqlFile(dir, 'seed.backup', 'PGDMP');
+        const { calls, spawnImpl } = mockImportSpawn();
+        const result = await runDbImport(importOptions({ file: filePath, spawnImpl }));
+        expect(result.ok).toBe(true);
+        expect(calls[1].bin).toBe('pg_restore');
+        expect(calls[1].args).toContain(filePath);
+    });
+
+    it('rejects .backup and .dump.gz archives for MySQL targets', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
+        const { gzipSync } = await import('node:zlib');
+        const backupPath = writeSqlFile(dir, 'seed.backup', 'PGDMP');
+        const dumpGzPath = path.join(dir, 'seed.dump.gz');
+        fs.writeFileSync(dumpGzPath, gzipSync('PGDMP'));
+        const mysqlInstance = healthyDbInstance({
+            Engine: 'mysql',
+            Endpoint: { Address: 'myapp-db.abc123.us-east-2.rds.amazonaws.com', Port: 3306 },
+        });
+        for (const file of [backupPath, dumpGzPath]) {
+            const { spawnImpl } = mockImportSpawn();
+            const result = await runDbImport(importOptions({
+                file,
+                rdsClient: mockRdsClient(mysqlInstance),
+                spawnImpl,
+            }));
+            expect(result.reason).toBe('unsupported-import-format');
+        }
+    });
+
+    it('gunzips .dump.gz to a temp file for pg_restore and cleans it up', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
+        const { gzipSync } = await import('node:zlib');
+        const filePath = path.join(dir, 'seed.dump.gz');
+        fs.writeFileSync(filePath, gzipSync('PGDMP'));
+        const { calls, spawnImpl } = mockImportSpawn();
+        const result = await runDbImport(importOptions({ file: filePath, spawnImpl }));
+        expect(result.ok).toBe(true);
+        expect(calls[1].bin).toBe('pg_restore');
+        const restoredPath = calls[1].args[calls[1].args.length - 1];
+        expect(restoredPath).not.toBe(filePath);
+        expect(restoredPath.endsWith('.dump')).toBe(true);
+        expect(fs.existsSync(restoredPath)).toBe(false);
+    });
+
     it('fails cleanly on tunnel timeout and client errors', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-import-'));
         const sqlFile = writeSqlFile(dir);
@@ -2112,7 +2292,7 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         expect(calls[0].child.kill).toHaveBeenCalledWith('SIGKILL');
     });
 
-    it('defaults PGSSLMODE=require for Postgres targets unless the caller pinned it', async () => {
+    it('defaults PGSSLMODE=require for Postgres targets (prefer for --from sources) unless the caller pinned it', async () => {
         const saved = process.env.PGSSLMODE;
         delete process.env.PGSSLMODE;
         try {
@@ -2130,7 +2310,10 @@ describe('Command: db import (mocked AWS + spawn)', () => {
                 spawnImpl: fromFresh.spawnImpl,
             }));
             expect(okFrom.ok).toBe(true);
-            expect(fromFresh.calls[1].opts.env.PGSSLMODE).toBe('require');
+            // BUG-148: the source is arbitrary user infra — prefer, and
+            // the Grada target in the same run still requires.
+            expect(fromFresh.calls[1].opts.env.PGSSLMODE).toBe('prefer');
+            expect(fromFresh.calls[2].opts.env.PGSSLMODE).toBe('require');
 
             process.env.PGSSLMODE = 'disable';
             const pinned = mockImportSpawn();
@@ -2177,12 +2360,15 @@ describe('db import: pure builders', () => {
         expect(classifyImportFile('seed.sql')).toBe('sql');
         expect(classifyImportFile('seed.SQL.GZ')).toBe('gzip');
         expect(classifyImportFile('backup.dump')).toBe('dump');
-        expect(classifyImportFile('weird.backup')).toBe('sql');
+        expect(classifyImportFile('weird.backup')).toBe('dump');
+        expect(classifyImportFile('backup.BACKUP.GZ')).toBe('dump-gzip');
+        expect(classifyImportFile('backup.dump.gz')).toBe('dump-gzip');
     });
 
     it('selects client binaries per scheme and source', () => {
         expect(requiredClientBinaries({ targetScheme: 'postgresql', source: { type: 'file', kind: 'sql' } })).toEqual(['psql']);
         expect(requiredClientBinaries({ targetScheme: 'postgresql', source: { type: 'file', kind: 'dump' } })).toEqual(['pg_restore']);
+        expect(requiredClientBinaries({ targetScheme: 'postgresql', source: { type: 'file', kind: 'dump-gzip' } })).toEqual(['pg_restore']);
         expect(requiredClientBinaries({ targetScheme: 'postgresql', source: { type: 'url' } })).toEqual(['pg_dump', 'psql']);
         expect(requiredClientBinaries({ targetScheme: 'mysql', source: { type: 'file', kind: 'sql' } })).toEqual(['mysql']);
         expect(requiredClientBinaries({ targetScheme: 'mysql', source: { type: 'url' } })).toEqual(['mysqldump', 'mysql']);
@@ -2226,6 +2412,46 @@ describe('db-tunnel: shared helpers', () => {
         expect(found.runtimeId).toBeTruthy();
         const none = await findJumpHostTarget(mockEcsClient(), { cluster: 'c', service: 's' });
         expect(none).toEqual({ error: 'NO_RUNNING_TASKS' });
+    });
+
+    it('skips provisioning tasks listed ahead of running ones', async () => {
+        const provisioningArn = 'arn:aws:ecs:us-east-2:123456789012:task/myapp-cluster/provisioning1';
+        const provisioning = {
+            taskArn: provisioningArn,
+            lastStatus: 'PROVISIONING',
+            containers: [{ name: 'myapp-container', lastStatus: 'PENDING' }],
+        };
+        const running = healthyTask({ lastStatus: 'RUNNING' });
+        const ecsClient = mockEcsClient({ taskArns: [provisioningArn, TASK_ARN], tasks: [provisioning, running] });
+        const found = await findJumpHostTarget(ecsClient, { cluster: 'c', service: 's', expectedContainer: 'myapp-container' });
+        expect(found.error).toBeUndefined();
+        expect(found.taskArn).toBe(TASK_ARN);
+        expect(found.runtimeId).toBe('runtime-1');
+        const describeCall = ecsClient.send.mock.calls
+            .map((call) => call[0])
+            .find((cmd) => cmd instanceof MockDescribeTasksCommand);
+        expect(describeCall.tasks).toEqual([provisioningArn, TASK_ARN]);
+    });
+
+    it('prefers the newest running task with a runtime id regardless of list order', async () => {
+        const oldArn = 'arn:aws:ecs:us-east-2:123456789012:task/myapp-cluster/old1111';
+        const newArn = 'arn:aws:ecs:us-east-2:123456789012:task/myapp-cluster/new2222';
+        const older = {
+            taskArn: oldArn,
+            lastStatus: 'RUNNING',
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+            containers: [{ name: 'myapp-container', lastStatus: 'RUNNING', runtimeId: 'runtime-old' }],
+        };
+        const newer = {
+            taskArn: newArn,
+            lastStatus: 'RUNNING',
+            startedAt: new Date('2026-06-01T00:00:00.000Z'),
+            containers: [{ name: 'myapp-container', lastStatus: 'RUNNING', runtimeId: 'runtime-new' }],
+        };
+        const ecsClient = mockEcsClient({ taskArns: [oldArn, newArn], tasks: [older, newer] });
+        const found = await findJumpHostTarget(ecsClient, { cluster: 'c', service: 's', expectedContainer: 'myapp-container' });
+        expect(found.taskArn).toBe(newArn);
+        expect(found.runtimeId).toBe('runtime-new');
     });
 
     it('redacts passwords in database URIs', () => {
@@ -2800,6 +3026,33 @@ describe('db restore: upsertSnapshotIdentifier', () => {
     it('leaves cluster blocks untouched when scoping to aws_db_instance', () => {
         expect(upsertSnapshotIdentifier(DATABASE_TF_CLUSTER_FIXTURE, 'snap-1')).toBe(DATABASE_TF_CLUSTER_FIXTURE);
     });
+
+    it('replaces an annotated literal instead of duplicating the attribute', () => {
+        const annotated = DATABASE_TF_FIXTURE.replace(
+            'skip_final_snapshot = true',
+            'skip_final_snapshot = true\n  snapshot_identifier = "old-snap" # pinned for the Dec restore'
+        );
+        const updated = upsertSnapshotIdentifier(annotated, 'snap-2');
+        expect(updated).toContain('snapshot_identifier = "snap-2"');
+        expect(updated).not.toContain('old-snap');
+        expect(updated.match(/snapshot_identifier =/g)).toHaveLength(1);
+    });
+
+    it('refuses loud on a var-ref pin instead of duplicating the attribute', () => {
+        const varRef = DATABASE_TF_FIXTURE.replace(
+            'skip_final_snapshot = true',
+            'skip_final_snapshot = true\n  snapshot_identifier = var.restore_snapshot'
+        );
+        let thrown = null;
+        try {
+            upsertSnapshotIdentifier(varRef, 'snap-2');
+        } catch (error) {
+            thrown = error;
+        }
+        expect(thrown).not.toBeNull();
+        expect(thrown.code).toBe('SNAPSHOT_PIN_EXTERNAL');
+        expect(thrown.message).toContain('var.restore_snapshot');
+    });
 });
 
 describe('db: fuzzer hardening', () => {
@@ -2869,11 +3122,57 @@ describe('buildMigrationCommand', () => {
         ];
         const [sh, dashC, script] = buildMigrationCommand('migrate', { name: 'c', environment: mysqlEnv, secrets: DB_SECRETS });
         expect([sh, dashC]).toEqual(['sh', '-c']);
-        expect(script).toContain('export DATABASE_URL="${DATABASE_URL:-mysql://');
+        expect(script).toContain('var s="mysql"');
         // MySQL clients ignore PGSSLMODE: no TLS prefix on mysql:// URLs.
         expect(script).not.toContain('PGSSLMODE');
         const portOnly = { name: 'c', environment: mysqlEnv.filter((e) => e.name !== 'DB_ENGINE'), secrets: DB_SECRETS };
-        expect(buildMigrationCommand('migrate', portOnly)[2]).toContain(':-mysql://');
+        expect(buildMigrationCommand('migrate', portOnly)[2]).toContain('var s="mysql"');
+    });
+
+    // BUG-139: userinfo must be percent-encoded at RUNTIME — node
+    // sees only shell references, never the values, so the encoding
+    // ladder (node → sed → warned raw) ships inside the script.
+    it('encodes userinfo at runtime via a node/sed/raw ladder', () => {
+        const container = { name: 'c', environment: DB_ENV, secrets: DB_SECRETS };
+        const [, , script] = buildMigrationCommand('migrate', container);
+        // Raw interpolation of shell refs into the URL is the bug.
+        expect(script).not.toContain('${DB_USER}:${DB_PASSWORD}@');
+        expect(script).toContain('encodeURIComponent');
+        expect(script).toContain('command -v node');
+        expect(script).toContain('command -v sed');
+        expect(script).toContain('s/?/%3F/g');
+        expect(script).toContain('no node or sed');
+    });
+
+    it('synthesized URL parses against a hostile master password', () => {
+        const container = { name: 'c', environment: DB_ENV, secrets: DB_SECRETS };
+        const [, , script] = buildMigrationCommand('printf %s "$DATABASE_URL"', container);
+        const hostile = 'a$?b?c#d/e:f@g%h`i\\j';
+        const url = execFileSync('sh', ['-c', script], {
+            env: { ...process.env, DB_USER: 'dbadmin', DB_PASSWORD: hostile, DB_HOST: 'db.internal' },
+            encoding: 'utf8',
+        });
+        expect(() => new URL(url)).not.toThrow();
+        const parsed = new URL(url);
+        expect(parsed.hostname).toBe('db.internal');
+        expect(decodeURIComponent(parsed.password)).toBe(hostile);
+    });
+
+    // BUG-171: engine/port hints hide in valueFrom when values are
+    // secrets-sourced; fallbacks must follow the sniffed scheme.
+    it('sniffs valueFrom references for engine and port hints', () => {
+        const mysqlHint = { name: 'c', environment: [{ name: 'DB_HOST', value: 'db.internal' }], secrets: [
+            ...DB_SECRETS,
+            { name: 'DB_ENGINE', valueFrom: 'arn:aws:secretsmanager:us-east-2:123:secret:mysql-app-AbC:DB_ENGINE::' },
+        ] };
+        const [, , script] = buildMigrationCommand('migrate', mysqlHint);
+        expect(script).toContain('var s="mysql"');
+        expect(script).toContain('${DB_PORT:-3306}');
+        expect(script).not.toContain('PGSSLMODE');
+        const indeterminate = { name: 'c', environment: [{ name: 'DB_HOST', value: 'db.internal' }], secrets: DB_SECRETS };
+        const [, , pgScript] = buildMigrationCommand('migrate', indeterminate);
+        expect(pgScript).toContain('var s="postgresql"');
+        expect(pgScript).toContain('${DB_PORT:-5432}');
     });
 
     it('passes through when DATABASE_URL is already defined', () => {
@@ -2892,7 +3191,10 @@ describe('buildMigrationCommand', () => {
         const container = { name: 'c', environment: DB_ENV, secrets: DB_SECRETS };
         const [shell, flag, script] = buildMigrationCommand('npx prisma migrate deploy', container);
         expect([shell, flag]).toEqual(['sh', '-c']);
-        expect(script).toContain('export DATABASE_URL="${DATABASE_URL:-postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT:-5432}/${DB_NAME:-postgres}}"');
+        expect(script).toContain('export DATABASE_URL="$(_grada_db_url)"');
+        expect(script).toContain('var s="postgresql"');
+        expect(script).toContain('${DB_PORT:-5432}');
+        expect(script).toContain('${DB_NAME:-postgres}');
         // RDS/Aurora enforces rds.force_ssl: TLS is required before the URL.
         expect(script).toContain('export PGSSLMODE="${PGSSLMODE:-require}"');
         expect(script.indexOf('export PGSSLMODE=')).toBeLessThan(script.indexOf('export DATABASE_URL='));

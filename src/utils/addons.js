@@ -81,12 +81,15 @@ export const ADDON_REGISTRY = {
 // warning), `refuse` (fail STATIC_TARGET_UNSUPPORTED). Consulted once at
 // the top of runAdd/runAddDatabase, before the TOCTOU guards.
 export const ADDON_TARGET_POLICY = {
-    'storage:s3': { ecs: 'allow', lambda: 'allow', static: 'allow' },
-    'db:dynamodb': { ecs: 'allow', lambda: 'allow', static: 'allow' },
-    'db:redis': { ecs: 'allow', lambda: 'allow', static: 'allow' },
-    'queue:sqs': { ecs: 'allow', lambda: 'warn', static: 'warn' },
-    'ai:bedrock': { ecs: 'allow', lambda: 'allow', static: 'allow' },
-    'email:ses': { ecs: 'allow', lambda: 'allow', static: 'allow' },
+    // Static trees have no task role or VPC: every one of these renders
+    // a dangling aws_iam_role.task_role / aws_vpc reference on static
+    // (BUG-157) — refuse fast instead of emitting unplannable TF.
+    'storage:s3': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'db:dynamodb': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'db:redis': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'queue:sqs': { ecs: 'allow', lambda: 'warn', static: 'refuse' },
+    'ai:bedrock': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
+    'email:ses': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
     'cron': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
     'db:postgres': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
     'db:mysql': { ecs: 'allow', lambda: 'allow', static: 'refuse' },

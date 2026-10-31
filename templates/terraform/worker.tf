@@ -55,6 +55,13 @@ resource "aws_ecs_service" "worker" {
   desired_count          = 1
   enable_execute_command = true
 
+  # Same safety net as the app service: a bad worker revision rolls
+  # back automatically instead of flapping forever.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   network_configuration {
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs_tasks.id]

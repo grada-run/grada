@@ -26,7 +26,11 @@ resource "aws_db_instance" "postgres" {
   engine_version    = "16"
   instance_class    = "db.t4g.micro"
   allocated_storage = 20
-  storage_encrypted = true
+  # Cap storage autoscaling: without a ceiling a runaway workload can
+  # grow the volume (and the bill) without bound.
+  max_allocated_storage   = 200
+  backup_retention_period = 7
+  storage_encrypted       = true
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")

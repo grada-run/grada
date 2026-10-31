@@ -681,12 +681,30 @@ async function runDomainStatus({ options, cwd, projectName, domainTfPath, cloudf
     }
     const target = outputValue(outputs, 'custom_domain_cname_target') || outputValue(outputs, 'cloudfront_url');
     if (typeof target === 'string' && target) {
-        rows.push({ type: 'CNAME', name: domain, value: target.replace(/^https:\/\//, '') });
+        // CNAME is invalid at the zone apex: a two-label domain renders
+        // an ALIAS row instead. (Longer names keep the CNAME row —
+        // multi-part-TLD apexes cannot be told from subdomains without
+        // the zone name, so those get a caveat below.)
+        const isApex = typeof domain === 'string' && domain.split('.').length === 2;
+        rows.push({ type: isApex ? 'ALIAS' : 'CNAME', name: domain, value: target.replace(/^https:\/\//, ''), apex: isApex });
     }
-    if (rows.length > 0) {
+    if (mode === 'route53') {
+        // Validation + alias records all live in terraform/domain.tf —
+        // there is nothing to add by hand.
+        if (rows.length > 0) {
+            console.log(`  ${color.dim('DNS records are managed by Terraform in terraform/domain.tf — no manual action needed.')}`);
+        } else {
+            console.log(`  ${color.dim('No DNS outputs yet — run npx grada-run apply first.')}`);
+        }
+    } else if (rows.length > 0) {
         console.log('');
         console.log(`  ${color.dim('Add these records at your DNS provider:')}`);
         printDnsTable(rows);
+        if (rows.some((row) => row.apex)) {
+            console.log(`  ${color.dim('At the zone apex CNAME is invalid — create an ALIAS/ANAME record (or your provider\u2019s CNAME flattening) pointing at the same target.')}`);
+        } else if (rows.some((row) => row.name === domain)) {
+            console.log(`  ${color.dim('If this domain is your zone apex (e.g. under a multi-part TLD), CNAME is invalid there — use an ALIAS/ANAME record instead.')}`);
+        }
     } else {
         console.log(`  ${color.dim('No DNS outputs yet — run npx grada-run apply first.')}`);
     }

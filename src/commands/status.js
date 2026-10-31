@@ -502,7 +502,10 @@ async function runStatusMain(input = {}) {
             return;
         }
 
-        const alarmsResp = await cloudWatchClient.send(new DescribeAlarmsCommand({ AlarmNamePrefix: projectName, MaxRecords: 100 }));
+        // Namespaced stem (BUG-151): the raw project prefix merged prod
+        // + preview alarms into one verdict and could auto-diagnose the
+        // wrong cluster. Paired with workspace-aware alarm names (BUG-132).
+        const alarmsResp = await cloudWatchClient.send(new DescribeAlarmsCommand({ AlarmNamePrefix: `${namespacedProject}${resourceSuffix}`, MaxRecords: 100 }));
         const rawAlarms = [...(alarmsResp.MetricAlarms || []), ...(alarmsResp.CompositeAlarms || [])];
 
         const health = getServiceHealth(serviceDesc, rawAlarms);

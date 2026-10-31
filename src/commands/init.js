@@ -21,7 +21,7 @@ import {
     SUPPORTED_FRAMEWORKS
 } from '../utils/detector.js';
 import { detectProjectCapabilities } from '../utils/capabilities.js';
-import { ADDON_REGISTRY } from '../utils/addons.js';
+import { ADDON_REGISTRY, addonTargetDisposition, addonSupportedTargets } from '../utils/addons.js';
 import { validateAddonFlags, resolveAddonOptions, scaffoldAddon, DEFAULT_BEDROCK_MODEL } from './add.js';
 import { injectMigrationGate, injectPreviewMigrationGate } from './db/migrate.js';
 import { scaffoldDriftWorkflow } from './drift.js';
@@ -38,7 +38,7 @@ import { getTargetDirectory, getProjectConfig, promptWorkerCommand, promptGitHub
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
 import { parseDockerCompose, selectComposeWebService } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe, COMPUTE_TARGETS, resolveHeadless, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS, resolveHeadless, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust, guardComputeTarget } from '../utils/resolvers.js';
 import { readGitHubRepoFromRemote, isValidGitHubRepoSlug } from '../utils/git.js';
 import { parseDomainTf } from '../utils/domains.js';
 import { PLACEHOLDER_ACCOUNT_ID } from '../utils/reconcile.js';
@@ -53,15 +53,16 @@ export const OFFLINE_ACCOUNT_PLACEHOLDER = PLACEHOLDER_ACCOUNT_ID;
 // so it lands in CI logs as well as terminals. Mirrors every call
 // provisionStateBucket makes (create + tag + versioning), including its
 // us-east-1 LocationConstraint exception.
-export function printOfflineChecklist({ bucket, region }) {
+export function printOfflineChecklist({ bucket, region, workflows = ['deploy', 'preview', 'teardown', 'drift'] }) {
     const locationArg = region === 'us-east-1' ? '' : ` --create-bucket-configuration LocationConstraint=${region}`;
+    const rendered = Array.isArray(workflows) && workflows.length > 0 ? workflows : ['deploy'];
     console.log('');
     console.log(color.yellow('⚠️  Offline scaffold: no AWS resources were created. Reconcile before applying:'));
     console.log(`  1. Create the state bucket (replace ${OFFLINE_ACCOUNT_PLACEHOLDER} with yours):`);
     console.log(color.cyan(`     aws s3api create-bucket --bucket ${bucket} --region ${region}${locationArg}`));
     console.log(color.cyan(`     aws s3api put-bucket-tagging --bucket ${bucket} --tagging 'TagSet=[{Key=ManagedBy,Value=grada}]'`));
     console.log(color.cyan(`     aws s3api put-bucket-versioning --bucket ${bucket} --versioning-configuration Status=Enabled`));
-    console.log(`  2. Replace every ${OFFLINE_ACCOUNT_PLACEHOLDER} with your account ID: the bucket name in terraform/backend.tf plus every role-to-assume ARN in .github/workflows/*.yml (deploy, preview, teardown, drift).`);
+    console.log(`  2. Replace every ${OFFLINE_ACCOUNT_PLACEHOLDER} with your account ID: the bucket name in terraform/backend.tf plus every role-to-assume ARN in .github/workflows/*.yml (${rendered.join(', ')}).`);
     console.log(`  3. Run ${color.cyan('terraform init')} in terraform/, then ${color.cyan('grada apply')}.`);
 }
 
@@ -394,6 +395,30 @@ async function mainStackMain(input = {}) {
         target = targetAnswer;
     }
 
+    // Capability-vs-target policy for --with (BUG-157): refuse fast when
+    // the requested capability cannot render on this target (static has
+    // no task role or VPC), before any prompt/AWS call/write. Interactive
+    // multiselect offers only compatible targets' caps; this covers --with.
+    for (const cap of withList) {
+        if (!ADDON_REGISTRY[cap]) continue;
+        if (addonTargetDisposition(cap, target) === 'refuse') {
+            const targetGuard = guardComputeTarget({
+                actual: target,
+                command: `init --with ${cap}`,
+                supported: addonSupportedTargets(cap),
+                hint: 'Static sites run no containers — this capability needs a compute target (--target ecs or lambda).',
+            });
+            return failCommand({
+                message: targetGuard.message,
+                hint: targetGuard.hint,
+                event: 'cli-error',
+                telemetry: { step: 'init_validation', error_code: targetGuard.errorCode },
+                reason: targetGuard.reason,
+                resultExtra: { capability: cap },
+            });
+        }
+    }
+
     const detectedFramework = detectFramework(dirConfig.targetDir);
     const procfile = parseProcfile(dirConfig.targetDir);
     const vercelRules = parseVercelConfig(dirConfig.targetDir);
@@ -446,7 +471,7 @@ async function mainStackMain(input = {}) {
         config.dbEngine = 'postgres';
     }
     const djangoWsgi = await resolveDjangoWsgi(dirConfig.targetDir, procfile, config.framework, isHeadless);
-    const disableDefaultCI = await handleRailsCI(dirConfig.targetDir, config.framework, isHeadless);
+    const disableDefaultCI = await handleRailsCI(dirConfig.targetDir, config.framework, isHeadless, { force: initOptions.force === true });
 
     // 3b. Dependency-aware composition (worker, migration gate, addons).
     // Everything here resolves before backups, AWS calls, or file writes.
@@ -503,6 +528,14 @@ async function mainStackMain(input = {}) {
             workerCommandHcl = `command = ${toHclStringArray(splitProcfileCommand(workerAnswer.trim()))}`;
         }
     }
+    if (!isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && !procfile?.worker && capabilities.worker.detected) {
+        // The suggested command is an npm shim (broken on stripped
+        // runners), so headless never scaffolds it blindly — but the
+        // detection must not vanish silently either.
+        const evidence = (capabilities.worker.evidence || []).join(', ') || 'worker signals';
+        const suggested = capabilities.worker.suggestedCommand || 'none';
+        log.warn(color.yellow(`⚠️  Skipping the background worker: detection found ${evidence} but no Procfile worker process, and the suggested command ("${suggested}") needs interactive confirmation. Re-run init interactively to configure the worker command.`));
+    }
     if (target === 'lambda' && (procfile?.worker || capabilities.worker.detected)) {
         log.warn(color.yellow('⚠️  Skipping the background worker: Lambda targets run a single scale-to-zero function with no ECS worker service.'));
     }
@@ -547,14 +580,14 @@ async function mainStackMain(input = {}) {
         if (!isInteractive) {
             return failCommand({
                 message: `\n✖ Refusing to wire the pre-deploy migration gate with "${migrationCmd}": the generated ${config.framework} Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" on every deploy.\n`,
-                hint: '  Re-run with an explicit node-based command, e.g. `--setup-ci-migrate="node ./dist/migrate.cjs"`, or wire the gate later with `grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci`.\n',
+                hint: '  Re-run with an explicit node-based command, e.g. `--setup-ci-migrate="node ./dist/migrate.cjs"`, or wire the gate later with `grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci`. Ensure your Dockerfile builds the bundle and copies it into the runner image.\n',
                 event: 'cli-error',
                 telemetry: { step: 'init_setup', cmd_source: migrationCmdSource, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
                 errorCode: 'NPM_CMD_STRIPPED_RUNNER',
                 reason: 'npm-cmd-stripped-runner',
             });
         }
-        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs").`));
+        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.`));
         trackEvent('npm_cmd_stripped_runner', { projectName: dirConfig.actualProjectName, cmd_source: migrationCmdSource, ci_setup: true });
     }
 
@@ -678,6 +711,22 @@ async function mainStackMain(input = {}) {
             ? 'Recreate them as CloudFront Functions after provisioning.'
             : 'Recreate them as API Gateway routes after provisioning.';
         log.warn(color.yellow(`⚠️  vercel.json redirects were detected, but ${target === 'static' ? 'static' : 'Lambda'} targets have no ALB listener rules to translate them into. ${remedy}`));
+    }
+
+    // Headers/rewrites have no translator on any target — name the dropped
+    // counts loudly, or the "Migrating edge network rules" success line
+    // reads as if everything migrated.
+    {
+        const migratedRedirects = (target === 'lambda' || target === 'static') ? 0 : (vercelRules?.redirects?.length || 0);
+        const droppedHeaders = vercelRules?.headers?.length || 0;
+        const droppedRewrites = vercelRules?.rewrites?.length || 0;
+        if (droppedHeaders > 0 || droppedRewrites > 0) {
+            const dropped = [
+                droppedHeaders > 0 ? `${droppedHeaders} header rule${droppedHeaders === 1 ? '' : 's'}` : null,
+                droppedRewrites > 0 ? `${droppedRewrites} rewrite${droppedRewrites === 1 ? '' : 's'}` : null,
+            ].filter(Boolean).join(' and ');
+            log.warn(color.yellow(`⚠️  vercel.json ${dropped} were detected but are not migrated (only redirects translate to ALB listener rules — ${migratedRedirects} migrated). Recreate them as CloudFront Functions or ALB listener rules after provisioning.`));
+        }
     }
 
     if (config.framework === 'nestjs') {
@@ -871,9 +920,14 @@ async function mainStackMain(input = {}) {
     }
 
     if (driftEnabled) {
+        // drift.yml rides the manifest + backup like deploy.yml now
+        // (BUG-158): re-init backs the old file up and regenerates fresh
+        // (current role ARN) instead of silently keeping a stale copy.
+        // Hand edits trip refuse-dirty before this point; --force regenerates.
         const drifted = scaffoldDriftWorkflow(dirConfig.targetDir, {
             region: config.region,
             roleArn: `arn:aws:iam::${awsAccountId}:role/${dirConfig.actualProjectName}${resourceSuffix}-github-actions-role`,
+            force: initOptions.force,
         });
         if (drifted.ok) {
             console.log(color.green('✅ Scaffolded .github/workflows/drift.yml (scheduled IaC drift detection)'));
@@ -1033,7 +1087,9 @@ async function mainStackMain(input = {}) {
         if (upcoming.vector) {
             console.log(color.dim('  💡 Vector-search dependencies detected: managed pgvector support is coming soon.'));
         }
-        if (upcoming.cron) {
+        // Static targets refuse `add cron` (no compute) — don't send
+        // static users down a dead end (BUG-157).
+        if (upcoming.cron && target !== 'static') {
             console.log(color.dim('  💡 Scheduled-task dependencies detected: scaffold a schedule with "grada add cron".'));
         }
         if (upcoming.mysql) {
@@ -1065,7 +1121,17 @@ async function mainStackMain(input = {}) {
     if (offlineScaffold) {
         // Pass the exact backend bucket (suffix included) — recomputing
         // from the bare project name prints a bucket terraform never uses.
-        printOfflineChecklist({ bucket: stateBucketName, region: config.region });
+        // Step 2 names only emitted workflows: preview/teardown render
+        // with PR previews, drift only when enabled.
+        printOfflineChecklist({
+            bucket: stateBucketName,
+            region: config.region,
+            workflows: [
+                'deploy',
+                ...(config.enablePrPreviews ? ['preview', 'teardown'] : []),
+                ...(driftEnabled ? ['drift'] : []),
+            ],
+        });
     }
 
     await flushTelemetry();

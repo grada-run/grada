@@ -206,6 +206,32 @@ describe('reconcileOfflineTree', () => {
         }));
     });
 
+    it('fails guided with nothing written when backend.tf is missing or bucket-less', async () => {
+        const missing = tmp.makeTmp('reconcile-');
+        writeWorkflow(missing, 'deploy.yml', PLACEHOLDER_ACCOUNT_ID);
+        const out = await reconcileOfflineTree({
+            targetDir: missing,
+            options: { accountId: ACCOUNT, autoApprove: true },
+            projectName: 'myapp',
+        });
+        expect(out.proceed).toBe(false);
+        expect(out.result).toMatchObject({ ok: false, reason: 'reconcile-backend-invalid' });
+        expect(fs.readFileSync(path.join(missing, '.github', 'workflows', 'deploy.yml'), 'utf8')).toContain(PLACEHOLDER_ACCOUNT_ID);
+
+        const unparseable = tmp.makeTmp('reconcile-');
+        writeWorkflow(unparseable, 'deploy.yml', PLACEHOLDER_ACCOUNT_ID);
+        fs.mkdirSync(path.join(unparseable, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(unparseable, 'terraform', 'backend.tf'), 'terraform {\n}\n');
+        const out2 = await reconcileOfflineTree({
+            targetDir: unparseable,
+            options: { accountId: ACCOUNT, autoApprove: true },
+            projectName: 'myapp',
+        });
+        expect(out2.proceed).toBe(false);
+        expect(out2.result).toMatchObject({ ok: false, reason: 'reconcile-backend-invalid' });
+        expect(fs.readFileSync(path.join(unparseable, '.github', 'workflows', 'deploy.yml'), 'utf8')).toContain(PLACEHOLDER_ACCOUNT_ID);
+    });
+
     it('rejects an invalid --account-id with INVALID_ACCOUNT_ID and writes nothing', async () => {
         const dir = tmp.makeTmp('reconcile-');
         writeOfflineTree(dir);

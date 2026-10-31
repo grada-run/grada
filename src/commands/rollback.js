@@ -177,6 +177,9 @@ async function runRollbackMain(input = {}) {
 
         let targetTaskDefArn;
         let targetRevisionNum;
+        // Case A only: the requested web revision's image, for worker
+        // pairing (BUG-153). Null in Case B and when undescribable.
+        let requestedWebImage = null;
 
         if (options.revision !== undefined && options.revision !== null && String(options.revision).trim() !== '') {
             // Case A: explicit revision.
@@ -233,6 +236,22 @@ async function runRollbackMain(input = {}) {
                     exitCode: 1,
                 });
             }
+            // BUG-127: a NEWER explicit revision would silently
+            // roll FORWARD — rollback only moves to older revisions.
+            if (Number.isInteger(Number(targetRevisionNum)) && Number.isInteger(currentRevNum)
+                && Number(targetRevisionNum) > currentRevNum) {
+                s.stop(color.red('Revision is newer than deployed.'));
+                return failCommand({
+                    message: `\n✖ Revision ${targetRevisionNum} is newer than the deployed revision ${currentRevNum} — rollback only moves to older revisions.`,
+                    hint: '  Deploy again to move forward, or request a revision older than the deployed one.\n',
+                    event: 'rollback_run',
+                    telemetry: { projectName, error_code: 'NEWER_REVISION_REQUESTED' },
+                    reason: 'rollback-newer-revision',
+                    resultExtra: { cluster, service, region },
+                    exitCode: 1,
+                });
+            }
+            requestedWebImage = descResp.taskDefinition.containerDefinitions?.[0]?.image ?? null;
             s.stop(`Resolved revision ${targetRevisionNum}.`);
         } else {
             // Case B: discover eligible older revisions via the shared seam.
@@ -333,8 +352,38 @@ async function runRollbackMain(input = {}) {
                         exitCode: 1,
                     });
                 }
-                const workerTargetArn = pickNewestEligible(workerEligible);
-                workerTarget = { service: workerService, taskDefArn: workerTargetArn, revision: workerTargetArn.split(':').pop() };
+                // BUG-153: in Case A the worker target pairs with the
+                // REQUESTED web image (deploys pin both to the same SHA) —
+                // newest-previous regardless would skew the pairing. When
+                // no eligible worker revision carries the web image, fall
+                // back to newest-previous, loudly when both images are
+                // known and differ. Case B (newest-previous web) keeps
+                // newest-previous worker: paired by construction.
+                let workerTargetArn = pickNewestEligible(workerEligible);
+                let workerImageMatched = null;
+                if (requestedWebImage) {
+                    const settled = await Promise.allSettled(
+                        workerEligible.map((workerArn) => ecsClient.send(new DescribeTaskDefinitionCommand({ taskDefinition: workerArn })))
+                    );
+                    const withImages = workerEligible.map((workerArn, index) => ({
+                        workerArn,
+                        image: settled[index].status === 'fulfilled'
+                            ? settled[index].value?.taskDefinition?.containerDefinitions?.[0]?.image ?? null
+                            : null,
+                    }));
+                    const match = withImages.find((entry) => entry.image === requestedWebImage);
+                    if (match) {
+                        workerTargetArn = match.workerArn;
+                        workerImageMatched = true;
+                    } else {
+                        workerImageMatched = false;
+                        const newestImage = withImages[0]?.image ?? null;
+                        if (newestImage && newestImage !== requestedWebImage) {
+                            console.log(color.yellow(`⚠ No worker revision carries the requested web image ${requestedWebImage} — rolling the worker back to newest-previous (${newestImage}) instead. Web and worker will run different images.`));
+                        }
+                    }
+                }
+                workerTarget = { service: workerService, taskDefArn: workerTargetArn, revision: workerTargetArn.split(':').pop(), imageMatched: workerImageMatched };
             }
         }
 
@@ -358,7 +407,7 @@ async function runRollbackMain(input = {}) {
             }));
         }
 
-        if (options.skipWait === true) {
+        if (options.skipWait === true || options.skipWait === 'true') {
             const skipLabel = workerTarget
                 ? `revision ${targetRevisionNum} (web) and ${workerTarget.revision} (worker)`
                 : `revision ${targetRevisionNum}`;
@@ -367,7 +416,7 @@ async function runRollbackMain(input = {}) {
                 projectName,
                 targetRevision: String(targetRevisionNum),
                 skipWait: true,
-                ...(workerTarget ? { workerTargetRevision: String(workerTarget.revision) } : {}),
+                ...(workerTarget ? { workerTargetRevision: String(workerTarget.revision), workerImageMatched: workerTarget.imageMatched ?? undefined } : {}),
             });
             outro(color.green(`Rollback to ${skipLabel} initiated! 🚀`));
             return {
@@ -402,7 +451,7 @@ async function runRollbackMain(input = {}) {
         await trackSuccess('rollback_run', {
             projectName,
             targetRevision: String(targetRevisionNum),
-            ...(workerTarget ? { workerTargetRevision: String(workerTarget.revision) } : {}),
+            ...(workerTarget ? { workerTargetRevision: String(workerTarget.revision), workerImageMatched: workerTarget.imageMatched ?? undefined } : {}),
         });
         outro(color.green(workerTarget
             ? `Services successfully rolled back to ${doneLabel}! 🚀`

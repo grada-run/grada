@@ -33,7 +33,7 @@ export const PROJECT_CHECKS = [
     { id: 'state_lock', label: 'Terraform state lock', scope: 'project', severity: 'fail', run: checkStateLock, hint: () => 'If no apply is running, release it with: terraform force-unlock <lock-id> (find the holder via grada doctor --deep).' },
     { id: 'interrupted_run', label: 'Interrupted Terraform run', scope: 'project', severity: 'warn', run: checkInterruptedRun, hint: () => 'Review the last apply/destroy output before trusting applied state; the next run overwrites the marker.' },
     { id: 'oidc_trust_scope', label: 'OIDC trust scope', scope: 'project', severity: 'warn', run: checkOidcTrustScope, hint: () => 'Re-scope with: npx grada-run init --github-repo owner/name (or edit the sub claim in terraform/oidc.tf).' },
-    { id: 'oidc_immutable_claims', label: 'OIDC trust formats', scope: 'project', severity: 'warn', run: checkOidcImmutableClaims, hint: () => 'Re-run setup to upgrade the trust, or add a repo:<owner>@*/<name>@*:* entry to terraform/oidc.tf.' },
+    { id: 'oidc_immutable_claims', label: 'OIDC trust formats', scope: 'project', severity: 'warn', run: checkOidcImmutableClaims, hint: () => 'Re-run npx grada-run init to upgrade the trust, or add a repo:<owner>@*/<name>@*:* entry to terraform/oidc.tf.' },
 ];
 
 const INSTALL_HINTS = {
@@ -233,7 +233,9 @@ function checkOidcImmutableClaims({ cwd }) {
         return { ok: true, skipped: 'trust value not parseable (non-literal claim — review by hand)' };
     }
     const entries = trust.kind === 'list' ? trust.entries : [trust.value];
-    const covered = entries.some((entry) => entry === 'repo:*' || /@(\*|\d)/.test(entry));
+    // Anchored to owner/name: a bare `@digit` test would count suffix
+    // text (`:release@2`) as immutable coverage.
+    const covered = entries.some((entry) => entry === 'repo:*' || /^repo:[^/@]+@(?:\*|\d+)\/[^/@:]+@(?:\*|\d+)/.test(entry));
     if (covered) return { ok: true };
     return {
         ok: false,

@@ -406,6 +406,7 @@ async function destroyStackMain(input = {}) {
     // 1c. Pre-destroy snapshot checkpoint (M1). Skipped only with
     // --allow-data-loss (explicit acceptance) or a `deleting` database
     // (nothing left to protect).
+    let snapshotReadyId = null;
     if (dbNeedsProtection) {
         const snapshotId = generateSnapshotId(dbTarget.id);
         s.start(truncateSpinnerText(`Snapshotting database ${dbTarget.id} before destruction...`));
@@ -430,20 +431,26 @@ async function destroyStackMain(input = {}) {
         // database: deleting while it is still `creating` races snapshot
         // completion on large DBs (BUG-98). A failed snapshot or a timeout
         // refuses the destroy — re-run with --allow-data-loss to skip.
-        s.start(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete...`));
+        // Re-message (never re-start): the phase spinner is already
+        // running, and a second start leaks clack's first interval so the
+        // session never exits (BUG-198).
+        s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete...`));
         const snapshotReady = await pollUntil({
             intervalMs: pollIntervalMs,
             timeoutMs: snapshotTimeoutMs,
             ...pollOverrides,
             onTick: async () => {
                 let status = null;
+                let percent = null;
                 try {
                     if (dbTarget.kind === 'cluster') {
                         const resp = await rdsClient.send(new DescribeDBClusterSnapshotsCommand({ DBClusterSnapshotIdentifier: snapshotId }));
                         status = resp.DBClusterSnapshots?.[0]?.Status ?? null;
+                        percent = resp.DBClusterSnapshots?.[0]?.PercentProgress ?? null;
                     } else {
                         const resp = await rdsClient.send(new DescribeDBSnapshotsCommand({ DBSnapshotIdentifier: snapshotId }));
                         status = resp.DBSnapshots?.[0]?.Status ?? null;
+                        percent = resp.DBSnapshots?.[0]?.PercentProgress ?? null;
                     }
                 } catch (error) {
                     return { done: true, value: { failed: true, reason: `snapshot describe failed (${error.message})` } };
@@ -452,7 +459,10 @@ async function destroyStackMain(input = {}) {
                 if (status === 'failed' || status === 'deleted') {
                     return { done: true, value: { failed: true, reason: `snapshot ${status}` } };
                 }
-                s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete... (${status || 'pending'})`));
+                // BUG-196: surface PercentProgress while creating so long
+                // snapshots don't look wedged.
+                const detail = typeof percent === 'number' ? `${status || 'pending'} (${percent}% complete)` : (status || 'pending');
+                s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete... (${detail})`));
                 return { done: false };
             },
         });
@@ -469,6 +479,7 @@ async function destroyStackMain(input = {}) {
             });
         }
         s.stop(`Database snapshot ${snapshotId} ready.`);
+        snapshotReadyId = snapshotId;
         console.log(color.green(`📸 Pre-destroy snapshot: ${snapshotId}`));
         trackEvent('db_destroy_checkpoint', { projectName: projectNameForTelemetry, db_kind: dbTarget.kind });
         await flushTelemetry();
@@ -625,8 +636,14 @@ async function destroyStackMain(input = {}) {
             });
             if (refused) return refused;
         }
+        // BUG-198: "spin this back up" overstated recovery — apply
+        // recreates compute, never the destroyed database. Name the
+        // snapshot (or its absence) so the choice is informed.
+        const dbRecoveryNote = snapshotReadyId
+            ? `\n  (The database itself was destroyed — only pre-destroy snapshot ${snapshotReadyId} remains, for manual restore; apply will not bring the data back.)`
+            : (dbTarget ? `\n  (The database itself was destroyed WITHOUT a snapshot (--allow-data-loss); apply will recreate it empty.)` : '');
         deleteS3Bucket = shouldAutoApprove(options) ? true : await confirm({
-            message: color.yellow(`AWS compute resources destroyed. Do you also want to permanently delete the S3 state bucket?\n  (Select 'No' if you plan to run 'grada apply' later to spin this back up.)`),
+            message: color.yellow(`AWS compute resources destroyed. Do you also want to permanently delete the S3 state bucket?\n  (Select 'No' if you plan to run 'grada apply' later to spin this back up.)${dbRecoveryNote}`),
             initialValue: false,
         });
 

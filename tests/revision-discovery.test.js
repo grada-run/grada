@@ -33,6 +33,19 @@ describe('revision-discovery seam', () => {
         expect(command.input).toMatchObject({ familyPrefix: 'myapp-task', status: 'ACTIVE', sort: 'DESC' });
     });
 
+    // BUG-175: a single 10-ARN page reports "no previous revisions"
+    // when the service is >10 behind head — follow nextToken (capped).
+    it('ecs adapter paginates past the first page', async () => {
+        const send = vi.fn(async (command) => {
+            if (!command.input?.nextToken) return { taskDefinitionArns: [arn(14)], nextToken: 't1' };
+            return { taskDefinitionArns: [arn(3)] };
+        });
+        const adapter = createEcsRevisionAdapter({ send });
+        await expect(discoverEligibleRevisions(adapter, 'myapp-task', 14)).resolves.toEqual([arn(3)]);
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0].input).toMatchObject({ nextToken: 't1' });
+    });
+
     it('headless picks the newest eligible revision', () => {
         expect(pickNewestEligible([arn(4), arn(3)])).toBe(arn(4));
         expect(pickNewestEligible([])).toBeNull();

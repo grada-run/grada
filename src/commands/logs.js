@@ -238,7 +238,9 @@ async function runLogsMain(input = {}) {
         });
     }
 
-    const sinceRaw = options.since ?? options.sinceDuration ?? (follow ? undefined : DEFAULT_SINCE);
+    // Follow defaults to the same bounded window: an unbounded initial
+    // scan walks every page of history before printing the live edge.
+    const sinceRaw = options.since ?? options.sinceDuration ?? DEFAULT_SINCE;
     const startTime = sinceRaw === undefined ? undefined : Date.now() - parseSinceDuration(sinceRaw);
 
     const pollIntervalMs = options.pollIntervalMs ?? FOLLOW_POLL_INTERVAL_MS;

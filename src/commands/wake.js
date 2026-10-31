@@ -217,7 +217,12 @@ async function runWakeMain(input = {}) {
         const foundDb = probedDbSettled && probedDb;
         if (probedServicesSettled && probedDbSettled && (foundServices.length > 0 || foundDb)) {
             const servicesAwake = foundServices.every((service) => (service.desiredCount ?? 0) > 0);
-            const dbAwake = !foundDb || foundDb.status !== 'stopped';
+            // `stopped` needs Start and `stopping` needs settle→Start:
+            // both must reach the main flow, never the already-awake
+            // skip. Every other status (available, starting, …) is
+            // started or self-resolving, so there is nothing for wake
+            // to do (BUG-152).
+            const dbAwake = !foundDb || (foundDb.status !== 'stopped' && foundDb.status !== 'stopping');
             if (servicesAwake && dbAwake) {
                 return reportSleepWakeSkip({
                     command: 'wake',
@@ -250,6 +255,45 @@ async function runWakeMain(input = {}) {
                         dbIdentifier: target.dbIdentifier,
                         dbClusterIdentifier: target.dbClusterIdentifier,
                     });
+            // A transitional database (stopping/starting/…) can neither
+            // start nor serve: settle first (mirroring destroy), then
+            // start when it lands on `stopped`. Never restore ECS +
+            // report success over an unsettled database (BUG-152).
+            if (dbTarget && dbTarget.status !== 'stopped' && dbTarget.status !== 'available') {
+                const transitional = dbTarget.status;
+                const isCluster = dbTarget.kind === 'cluster';
+                s.message(truncateSpinnerText(`Database ${dbTarget.id} is ${transitional} — waiting for it to settle...`));
+                const settled = await pollUntil({
+                    intervalMs: pollIntervalMs,
+                    timeoutMs,
+                    ...(options.sleepFn ? { sleepFn: options.sleepFn } : {}),
+                    ...(options.nowFn ? { nowFn: options.nowFn } : {}),
+                    onTick: async ({ elapsedMs }) => {
+                        const resp = isCluster
+                            ? await rdsClient.send(new DescribeDBClustersCommand({ DBClusterIdentifier: dbTarget.id }))
+                            : await rdsClient.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: dbTarget.id }));
+                        const current = isCluster
+                            ? (resp.DBClusters || [])[0] || null
+                            : (resp.DBInstances || [])[0] || null;
+                        const status = dbStatusOf(current, isCluster ? 'cluster' : 'instance');
+                        if (status === 'stopped' || status === 'available') return { done: true, value: status };
+                        s.message(truncateSpinnerText(`Database ${dbTarget.id} is ${status || transitional}... [${Math.floor(elapsedMs / 1000)}s]`));
+                        return { done: false };
+                    },
+                });
+                if (settled.timedOut) {
+                    s.stop(color.yellow('Database still transitioning.'));
+                    return failCommand({
+                        message: `\n✖ Database ${dbTarget.id} is still ${transitional} — re-run wake once it settles (ECS left untouched).\n`,
+                        event: 'wake_run',
+                        telemetry: { projectName, env_kind: target.envKind, error_code: 'DB_TRANSITION_TIMEOUT' },
+                        errorCode: 'DB_TRANSITION_TIMEOUT',
+                        reason: 'db-transition-timeout',
+                        resultExtra: { cluster: target.cluster, region },
+                    });
+                }
+                dbTarget = { ...dbTarget, status: settled.value };
+            }
             if (dbTarget && dbTarget.status === 'stopped') {
                 if (dbTarget.kind === 'cluster') {
                     await rdsClient.send(new StartDBClusterCommand({ DBClusterIdentifier: dbTarget.id }));

@@ -401,6 +401,22 @@ describe('Command: logs (mocked CloudWatch Logs)', () => {
         }
     });
 
+    it('bounds bare follow with the default --since window instead of scanning full history', async () => {
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+        try {
+            const before = Date.now();
+            await runLogs({ follow: true, maxPolls: 1, pollIntervalMs: 0, region: 'us-east-2' });
+            expect(MockFilterLogEventsCommand).toHaveBeenCalledWith(
+                expect.objectContaining({ startTime: expect.any(Number) })
+            );
+            const sent = MockFilterLogEventsCommand.mock.calls[0][0];
+            expect(sent.startTime).toBeLessThanOrEqual(before);
+            expect(sent.startTime).toBeGreaterThan(before - 65 * 60 * 1000);
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
     it('is wired into bin/cli.js', () => {
         const cliPath = path.resolve(__dirname, '../bin/cli.js');
         const content = fs.readFileSync(cliPath, 'utf8');

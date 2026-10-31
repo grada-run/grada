@@ -42,6 +42,10 @@ The container's start command is resolved in this order:
 
 Setup writes a `.dockerignore` excluding `.git/`, `terraform/`, state files, and `.env`, and appends Terraform entries to an existing `.gitignore`. Never commit `.env` — runtime secrets come from AWS Secrets Manager (see [Secrets Management](/grada/guides/secrets-management/)).
 
+## Reproducible builds
+
+Generated Node-family `Dockerfile`s pin their base image to an immutable digest (`node:<version>@sha256:…`) and install a pinned npm version, so rebuilds produce the same image regardless of when upstream tags move.
+
 ## See also
 
 - [CI/CD Pipeline & First Deploy](/grada/guides/cicd-pipeline/) for how the image is built and rolled out.

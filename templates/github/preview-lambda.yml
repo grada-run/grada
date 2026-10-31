@@ -1,12 +1,17 @@
 name: Ephemeral PR Preview
 
 on:
-  pull_request:
+  # pull_request_target (not pull_request): this file comes from the base
+  # branch, so a fork PR cannot delete the same-repo guard below to reach
+  # the admin CI role (BUG-140). The PR head is checked out explicitly by
+  # SHA in the guarded step instead.
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 # One runner per PR: rapid pushes cancel superseded previews instead of
-# overlapping applies on the same workspace. Shares its group with
-# teardown.yml, which queues (never cancels) behind an in-flight deploy.
+# overlapping applies on the same workspace. Teardown runs in its own
+# group (a reopen must never cancel an in-flight destroy); the state
+# lock serializes the destroy/apply race instead (see -lock-timeout).
 concurrency:
   group: preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -15,6 +20,7 @@ env:
   AWS_REGION: {{REGION}}
   ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
   WORKSPACE: pr-${{ github.event.pull_request.number }}
+  CF_COMMENT: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-cdn
 
 permissions:
   id-token: write
@@ -24,23 +30,54 @@ permissions:
 jobs:
   deploy-preview:
     name: Provision Preview Environment
+    # Same-repo PRs only: fork code must never execute with the admin CI
+    # role or production secrets. Trustworthy because this file comes from
+    # base (see trigger above). Public repos needing fork previews should
+    # gate this job behind an environment with required reviewers instead
+    # of deleting the guard.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Pinned SHA (not a ref name): the exact head this event fired
+          # for, immune to ref moves between event and checkout.
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
         with:
           role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
+      # A missing role means the stack is absent (never provisioned or
+      # destroyed): skip loud instead of bursting red assume noise. Any
+      # other assume failure fails loud with both cases named (BUG-138).
+      - name: Interpret credential failure
+        if: steps.aws-creds.outcome == 'failure'
+        run: |
+          ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role"
+          TOKEN="$(curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
+          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
+          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
+            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
+          else
+            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
+            exit 1
+          fi
+
       - name: Login to Amazon ECR
+        if: steps.aws-creds.outcome == 'success'
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
 
       - name: Build and Push Docker image
+        if: steps.aws-creds.outcome == 'success'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
@@ -49,18 +86,22 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.WORKSPACE }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
 
       - name: Terraform Init & Apply
         id: tf-apply
+        if: steps.aws-creds.outcome == 'success'
         working-directory: ./terraform
         run: |
           terraform init -input=false
           # Create or select the workspace specific to this PR
           terraform workspace select -or-create ${{ env.WORKSPACE }}
-          terraform apply -auto-approve
+          # Teardown runs in its own group (see teardown.yml): a reopen
+          # during teardown waits on the state lock instead of racing it.
+          terraform apply -auto-approve -input=false -lock-timeout=10m
 
       - name: Deploy PR image to the preview function
+        if: steps.aws-creds.outcome == 'success'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
@@ -76,18 +117,107 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Read preview URL
+        if: steps.aws-creds.outcome == 'success'
         working-directory: ./terraform
         run: |
           API_URL=$(terraform output -raw api_gateway_url)
           echo "PREVIEW_URL=$API_URL" >> $GITHUB_ENV
 
+      # Every push redeploys the preview: clear its CDN so new HTML shows
+      # immediately instead of serving stale pages until TTL expiry.
+      - name: Invalidate CloudFront
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='${{ env.CF_COMMENT }}'].Id | [0]" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "CloudFront distribution '${{ env.CF_COMMENT }}' not found." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*" \
+            --region ${{ env.AWS_REGION }}
+
+      # One sticky comment per PR (updated in place), never a new
+      # comment per push — and a failed run overwrites the green URL
+      # instead of leaving it standing as truth (BUG-190).
       - name: Comment PR
-        uses: actions/github-script@v7
+        if: steps.aws-creds.outcome == 'success'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            github.rest.issues.createComment({
+            const marker = '<!-- grada-preview -->';
+            const body = `${marker}\n🚀 **Preview Environment Deployed!**\n\nYour ephemeral AWS Lambda environment is live at:\n[${process.env.PREVIEW_URL}](${process.env.PREVIEW_URL})\n\n_This environment will be automatically destroyed when the PR is merged or closed._\n\n---\n<div align="right"><sup>☁️ Generated by <a href="https://github.com/grada-run/grada">Grada</a></sup></div>`;
+            const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `🚀 **Preview Environment Deployed!**\n\nYour ephemeral AWS Lambda environment is live at:\n[${process.env.PREVIEW_URL}](${process.env.PREVIEW_URL})\n\n_This environment will be automatically destroyed when the PR is merged or closed._\n\n---\n<div align="right"><sup>☁️ Generated by <a href="https://github.com/grada-run/grada">Grada</a></sup></div>`
-            })
+            });
+            const existing = comments.find((comment) => comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
+
+      - name: Report preview failure on PR
+        if: failure()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const marker = '<!-- grada-preview -->';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n❌ **Preview Environment Failed**\n\nThe preview deployment for this PR failed — the URL below (if any) is stale. See the [workflow run](${runUrl}) for details.`;
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find((comment) => comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
+
+      # A cancelled apply can strand the S3 state lockfile: point at
+      # recovery instead of leaving the next run to fail obscurely
+      # (BUG-194). Generic by necessity — the lock ID only exists in the
+      # follow-up run's own error.
+      - name: Cancellation recovery note
+        if: cancelled()
+        run: |
+          echo "::warning::This run was cancelled while Terraform may have held the state lock. If the next run fails with 'Error acquiring the state lock', run terraform force-unlock <LOCK_ID> (the ID is printed in that error) inside ./terraform — or delete the .tflock object beside the state file in S3 — then re-run."
+
+  # Fork PRs skip the privileged job above loudly instead of silently:
+  # no credentials are issued and no preview is provisioned.
+  fork-notice:
+    name: Fork PR notice
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "PR previews run for same-repo pull requests only — fork PR #${{ github.event.pull_request.number }} skipped (no AWS credentials issued)."

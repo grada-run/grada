@@ -15,7 +15,7 @@ function parseTemplate(filename) {
 }
 
 const TOP_LEVEL_TRIGGERS = new Set([
-    'push', 'pull_request', 'schedule', 'workflow_dispatch', 'workflow_call',
+    'push', 'pull_request', 'pull_request_target', 'schedule', 'workflow_dispatch', 'workflow_call',
 ]);
 // `schedule` is a top-level trigger only — nested under push/pull_request
 // GitHub rejects the whole workflow file.
@@ -34,7 +34,7 @@ describe('github workflow templates', () => {
         for (const key of Object.keys(doc.on)) {
             expect(TOP_LEVEL_TRIGGERS.has(key), `unknown top-level trigger '${key}' in ${filename}`).toBe(true);
         }
-        for (const nested of ['push', 'pull_request']) {
+        for (const nested of ['push', 'pull_request', 'pull_request_target']) {
             if (doc.on[nested] == null) continue;
             expect(doc.on[nested]).toBeTypeOf('object');
             for (const key of Object.keys(doc.on[nested])) {
@@ -61,6 +61,41 @@ describe('github workflow templates', () => {
         }
     });
 
+    // BUG-195: tasks must never start on an unpushed tag — the image
+    // is built and pushed before `terraform apply` moves anything, with
+    // a targeted repo bootstrap (the repo itself is TF-managed) and
+    // job-level AWS credentials (previously only grada-action had them).
+    it.each(['deploy.yml', 'deploy-lambda.yml'])('%s pushes the image before applying infrastructure', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        expect(raw).toContain('Bootstrap ECR repository');
+        expect(raw).toContain('-target=aws_ecr_repository.app');
+        expect(raw).toContain('aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4');
+        const bootstrap = raw.indexOf('- name: Bootstrap ECR repository');
+        const push = raw.indexOf('- name: Push image to Amazon ECR');
+        const apply = raw.indexOf('- name: Apply Infrastructure Changes');
+        expect(bootstrap).toBeGreaterThanOrEqual(0);
+        expect(push).toBeGreaterThan(bootstrap);
+        expect(apply).toBeGreaterThan(push);
+    });
+
+    // BUG-150: `update-service` returns before the rollout finishes —
+    // wait for stability and verify the PRIMARY deployment actually
+    // runs the registered revision (a breaker rollback re-stabilizes on
+    // the OLD revision, which the wait alone would report green).
+    it('deploy.yml waits for rollout stability before invalidating', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
+        expect(raw).toContain('aws ecs wait services-stable');
+        expect(raw).toContain('deployments[?status==`PRIMARY`].taskDefinition');
+        expect(raw).toContain('steps.register-task-def.outputs.task-arn');
+        const force = raw.indexOf('- name: Force ECS deployment');
+        const wait = raw.indexOf('aws ecs wait services-stable');
+        const invalidate = raw.indexOf('- name: Invalidate CloudFront');
+        expect(wait).toBeGreaterThan(force);
+        expect(invalidate).toBeGreaterThan(wait);
+        // Worker rollouts gate the same way (worker trees only).
+        expect(raw).toContain('steps.register-worker-task-def.outputs.task-arn');
+    });
+
     it('deploy.yml redeploys the worker service alongside web', () => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
         // Worker identity (mirrors the ECS_SERVICE/ECS_TASK_FAMILY pair).
@@ -83,6 +118,168 @@ describe('github workflow templates', () => {
         const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
         const steps = doc.jobs['deploy-preview'].steps;
         expect(steps.some((s) => s?.name === 'Preview Database Migration')).toBe(true);
+    });
+
+    // BUG-140: fork PRs must never obtain the admin CI role. Preview
+    // and teardown run on pull_request_target (file from base, so the
+    // guard below is attacker-immutable), check out the PR head SHA
+    // explicitly, and run privileged steps same-repo-only.
+    it.each(['preview.yml', 'preview-lambda.yml'])('%s runs privileged preview steps same-repo-only', (filename) => {
+        const doc = parseTemplate(filename);
+        expect(doc.on.pull_request, `${filename} must not trigger on pull_request`).toBeUndefined();
+        expect(doc.on.pull_request_target.types).toEqual(['opened', 'synchronize', 'reopened']);
+        const job = doc.jobs['deploy-preview'];
+        expect(job.if).toContain('github.event.pull_request.head.repo.full_name == github.repository');
+        const checkout = job.steps.find((s) => s?.uses?.startsWith('actions/checkout@'));
+        expect(checkout?.with?.ref).toBe('${{ github.event.pull_request.head.sha }}');
+        const notice = Object.values(doc.jobs).find((j) => j?.if?.includes('head.repo.full_name != github.repository'));
+        expect(notice, `${filename} must loudly skip fork PRs`).toBeDefined();
+    });
+
+    // BUG-138: when the CI role is missing (stack absent), the assume
+    // bursts red noise. Reproduce the assume to capture the error text:
+    // a missing role skips loud, anything else fails loud with both
+    // cases named. Deploy never skips (fails with the bootstrap pointer).
+    it.each(['drift.yml', 'teardown.yml', 'preview.yml', 'preview-lambda.yml'])('%s skips loud when the stack is absent', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        expect(raw).toContain('id: aws-creds');
+        expect(raw).toContain('continue-on-error: true');
+        expect(raw).toContain('- name: Interpret credential failure');
+        expect(raw).toContain('assume-role-with-web-identity');
+        expect(raw).toContain('NoSuchEntity');
+        expect(raw).toContain('npx grada-run apply');
+        // Post-credential AWS steps gate on the assume outcome.
+        expect(raw).toContain("steps.aws-creds.outcome == 'success'");
+    });
+
+    // BUG-189: hand-rolled terraform without -input=false hangs on
+    // prompts, and no job has a timeout — a stuck apply bills the
+    // runner forever.
+    it('pins -input=false on every raw terraform apply/destroy/plan/init', () => {
+        for (const filename of ['deploy.yml', 'deploy-lambda.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml', 'drift.yml']) {
+            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            for (const line of raw.split('\n')) {
+                if (line.trim().startsWith('#')) continue;
+                if (/\bterraform\s+(init|apply|destroy|plan)\b/.test(line)) {
+                    expect(line, `${filename}: ${line.trim()}`).toContain('-input=false');
+                }
+            }
+        }
+    });
+
+    it('sets timeout-minutes on every job', () => {
+        for (const filename of ['deploy.yml', 'deploy-lambda.yml', 'deploy-static.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml', 'drift.yml']) {
+            const doc = parseTemplate(filename);
+            for (const [jobName, job] of Object.entries(doc.jobs)) {
+                expect(job?.['timeout-minutes'], `${filename} :: ${jobName}`).toBeGreaterThan(0);
+            }
+        }
+    });
+
+    // BUG-190: every preview push appends a new PR comment (noise), and
+    // a failed preview leaves the last green URL standing as truth.
+    it.each(['preview.yml', 'preview-lambda.yml'])('%s keeps one sticky comment and reports failures', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        expect(raw).toContain('grada-preview');
+        expect(raw).toContain('updateComment');
+        expect(raw).toContain('if: failure()');
+    });
+
+    // BUG-192: the Push step echoes an output no step id exposes.
+    it.each(['deploy.yml', 'deploy-lambda.yml'])('%s exposes the pushed image via a step id', (filename) => {
+        const doc = parseTemplate(filename);
+        const push = doc.jobs.deploy.steps.find((s) => s?.name === 'Push image to Amazon ECR');
+        expect(push?.id, `${filename} push step id`).toBeTruthy();
+    });
+
+    // BUG-193: the scan step claims SARIF output but emits a table.
+    it.each(['deploy.yml', 'deploy-lambda.yml'])('%s labels the container scan honestly', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        expect(raw).not.toContain('SARIF');
+        expect(raw).toContain('Scan Container for Vulnerabilities (table summary)');
+    });
+
+    // BUG-194: cancelling mid-apply strands the S3 lockfile with no
+    // recovery pointer — annotate every apply/destroy workflow.
+    it.each(['deploy.yml', 'deploy-lambda.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml'])('%s annotates cancellation recovery', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        expect(raw).toContain('if: cancelled()');
+        expect(raw).toContain('force-unlock');
+        expect(raw).toContain('.tflock');
+    });
+
+    it('deploy.yml fails loud (never skips) on credential failure', () => {
+        for (const filename of ['deploy.yml', 'deploy-lambda.yml']) {
+            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            expect(raw, filename).toContain('id: aws-creds');
+            expect(raw, filename).toContain('- name: Interpret credential failure');
+            expect(raw, filename).toContain('npx grada-run apply');
+            expect(raw, filename).not.toContain("steps.aws-creds.outcome == 'success'");
+        }
+    });
+
+    // BUG-141: preview DBs carry deletion protection and `terraform
+    // destroy` never applies var updates, so teardown lifts protection
+    // out-of-band (instance + cluster) before destroying.
+    it('teardown.yml lifts preview deletion protection before destroy', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        expect(raw).toContain('modify-db-instance');
+        expect(raw).toContain('--no-deletion-protection');
+        expect(raw).toContain('modify-db-cluster');
+        expect(raw).toContain('wait db-instance-available');
+        expect(raw).toContain('wait db-cluster-available');
+        // Workspace-derived identifier (matches ${local.app_name}-db).
+        expect(raw).toContain('{{PROJECT_NAME}}-${{ env.WORKSPACE }}{{RESOURCE_SUFFIX}}');
+        // Lift precedes the destroy.
+        expect(raw.indexOf('modify-db-instance')).toBeLessThan(raw.indexOf('terraform destroy -auto-approve'));
+    });
+
+    // BUG-173: previews rebuild and redeploy but never invalidate —
+    // every push re-caches stale HTML until TTL expiry.
+    it.each(['preview.yml', 'preview-lambda.yml'])('%s invalidates its preview distribution after deploy', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        // Workspace-suffixed comment (matches ${local.app_name}-cdn).
+        expect(raw).toContain('CF_COMMENT: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-cdn');
+        expect(raw).toContain('- name: Invalidate CloudFront');
+        expect(raw).toContain('aws cloudfront create-invalidation');
+        const invalidate = raw.indexOf('- name: Invalidate CloudFront');
+        const comment = raw.indexOf('- name: Comment PR');
+        expect(invalidate).toBeGreaterThanOrEqual(0);
+        expect(comment).toBeGreaterThan(invalidate);
+    });
+
+    // BUG-154: teardown shares preview's cancellable group, so reopening
+    // a PR cancels the in-flight destroy. Separate group + lock timeouts
+    // (the state lock now serializes the destroy/apply race instead).
+    it('teardown runs in its own non-cancellable group', () => {
+        const preview = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview.yml'), 'utf8');
+        const teardown = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        const previewGroup = preview.match(/group:\s*(.+)/)[1].trim();
+        const teardownGroup = teardown.match(/group:\s*(.+)/)[1].trim();
+        expect(teardownGroup).not.toBe(previewGroup);
+        expect(parseTemplate('teardown.yml').concurrency).not.toHaveProperty('cancel-in-progress');
+        expect(preview).toContain('-lock-timeout=');
+        expect(teardown).toContain('-lock-timeout=');
+    });
+
+    // BUG-155: the drift plan step exits 0 on every path (exit 1 errors
+    // go green and silent) — errors must fail the run and file an issue.
+    it('drift.yml fails loud on plan errors', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'drift.yml'), 'utf8');
+        const planStep = raw.slice(raw.indexOf('- name: Terraform Plan'), raw.indexOf('- name: Check provisioned state'));
+        expect(planStep).toContain('EXITCODE');
+        expect(planStep).toMatch(/if \[ "\$EXITCODE" = "1" \]; then exit 1; fi/);
+        expect(raw).toContain('iac-drift-check-failed');
+    });
+
+    it('teardown.yml destroys same-repo previews only', () => {
+        const doc = parseTemplate('teardown.yml');
+        expect(doc.on.pull_request, 'teardown.yml must not trigger on pull_request').toBeUndefined();
+        expect(doc.on.pull_request_target.types).toEqual(['closed']);
+        const job = doc.jobs['destroy-preview'];
+        expect(job.if).toContain('github.event.pull_request.head.repo.full_name == github.repository');
+        const checkout = job.steps.find((s) => s?.uses?.startsWith('actions/checkout@'));
+        expect(checkout?.with?.ref).toBe('${{ github.event.pull_request.head.sha }}');
     });
 
     it('publish.yml verifies both npm packages land at the same version', () => {
@@ -160,7 +357,7 @@ describe('github workflow templates', () => {
         }
     });
 
-    it('preview and teardown share one group per PR; only teardown never cancels', () => {
+    it('preview cancels superseded runs; teardown has its own group and never cancels', () => {
         for (const filename of ['preview.yml', 'preview-lambda.yml']) {
             const doc = parseTemplate(filename);
             expect(doc.concurrency, filename).toMatchObject({
@@ -169,8 +366,10 @@ describe('github workflow templates', () => {
             });
         }
         const teardown = parseTemplate('teardown.yml');
-        expect(teardown.concurrency.group).toBe('preview-${{ github.event.pull_request.number }}');
-        expect(teardown.concurrency, 'teardown must queue, never cancel').not.toHaveProperty('cancel-in-progress');
+        // Own group (BUG-154): sharing preview's group let a reopen
+        // cancel the in-flight destroy.
+        expect(teardown.concurrency.group).toBe('teardown-${{ github.event.pull_request.number }}');
+        expect(teardown.concurrency, 'teardown must run to completion, never cancel').not.toHaveProperty('cancel-in-progress');
     });
 
     it('teardown exits green when the preview workspace is absent', () => {
@@ -209,5 +408,29 @@ describe('github workflow templates', () => {
         const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
         const steps = doc.jobs.deploy.steps;
         expect(steps.some((s) => typeof s?.run === 'string' && s.run.includes('migrate'))).toBe(true);
+    });
+});
+
+describe('workflow supply-chain pins', () => {
+    const templates = fs.readdirSync(TEMPLATES_DIR).filter((f) => f.endsWith('.yml'));
+
+    it.each(templates)('%s pins every action to a full commit SHA', (filename) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const refs = [...raw.matchAll(/uses:\s*(\S+)/g)].map((match) => match[1]);
+        expect(refs.length).toBeGreaterThan(0);
+        for (const ref of refs) {
+            expect(ref, `${filename}: ${ref}`).toMatch(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/);
+        }
+    });
+
+    it('matches the ACTION_PINS single source (no drifted template)', async () => {
+        const { ACTION_PINS } = await import('../src/data/action-pins.js');
+        for (const filename of templates) {
+            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            for (const [, action, sha] of raw.matchAll(/uses:\s*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@([0-9a-f]{40})/g)) {
+                expect(ACTION_PINS[action], `${filename}: unknown action ${action}`).toBeDefined();
+                expect(sha, `${filename}: ${action} drifted from ACTION_PINS`).toBe(ACTION_PINS[action].sha);
+            }
+        }
     });
 });

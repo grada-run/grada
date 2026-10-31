@@ -48,7 +48,7 @@ const HELP_TEXT = [
     '  db migrate           Run database migrations in a one-off ECS task (--cmd, --task-def, --timeout, --setup-ci)',
     '  db backup            Create an RDS snapshot checkpoint (--id, --timeout, --no-wait)',
     '  db restore           Restore the database from a snapshot ([snapshot-id], --yes)',
-    '  gc                   Discover and delete orphaned ECR images, log groups, and Elastic IPs (--region, --deep, --yes)',
+    '  gc                   Discover and delete orphaned ECR images, log groups, Elastic IPs, and old manual DB snapshots (--region, --deep, --yes, --snapshot-max-age-days)',
     '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes, --strict)',
     '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait, --strict)',
     '  drift                Detect Terraform drift locally or scaffold scheduled checks (--setup)',

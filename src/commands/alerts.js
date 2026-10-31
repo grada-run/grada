@@ -7,9 +7,31 @@ import { failCommand, failProjectNotInitialized, refuseIfNonInteractive, refuseU
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, resolveHeadless, readFileSafe, readTerraformComputeTarget } from '../utils/resolvers.js';
 import { findNestedBlock } from '../utils/hcl.js';
+import { atomicWriteFile, atomicWriteFileSync } from '../utils/atomic-write.js';
+import { withProjectLock } from '../utils/file-lock.js';
 import { ensureUsEast1Provider } from './domain.js';
 
 export const ALERTS_TF_FILE = path.join('terraform', 'alerts.tf');
+// data.archive_file materializes the forwarder zip at apply time; it is
+// build output and must never be committed.
+export const FORWARDER_ZIP_GITIGNORE_ENTRY = 'terraform/.grada-alerts-forwarder.zip';
+
+// Appends the forwarder-zip ignore entry idempotently (atomically).
+// Returns true when the file changed. Covered by the alerts command
+// tests.
+export async function ensureForwarderZipIgnored(cwd) {
+    const gitignorePath = path.join(cwd, '.gitignore');
+    let content = '';
+    try {
+        content = fsSync.readFileSync(gitignorePath, 'utf8');
+    } catch {
+        content = '';
+    }
+    if (content.split('\n').some((line) => line.trim() === FORWARDER_ZIP_GITIGNORE_ENTRY)) return false;
+    const suffix = content === '' || content.endsWith('\n') ? '' : '\n';
+    await atomicWriteFile(gitignorePath, `${content}${suffix}${FORWARDER_ZIP_GITIGNORE_ENTRY}\n`);
+    return true;
+}
 
 // Per-target alarm defaults: { threshold, evaluationPeriods, period }.
 // ECS mirrors the dashboard alarm in templates/terraform/main.tf
@@ -164,10 +186,10 @@ exports.handler = async (event) => {
 export function buildAlertsTf({ projectName, target = 'ecs', email, webhook, threshold }) {
     const defaults = ALERT_TARGET_DEFAULTS[target] || ALERT_TARGET_DEFAULTS.ecs;
     const limit = threshold ?? defaults.threshold;
-    // ECS keeps the historical flat naming (existing topic/alarm names
-    // are unchanged); lambda/static use the workspace-aware local for
-    // preview isolation.
-    const namePrefix = target === 'ecs' ? projectName : '${local.app_name}';
+    // All targets use the workspace-aware local: flat ECS names let a
+    // preview apply clobber the prod alarm (BUG-132). Existing trees
+    // migrate on the next `grada alerts` + apply (topic/alarm recreate).
+    const namePrefix = '${local.app_name}';
     const aliasLine = target === 'static' ? '  provider = aws.us_east_1\n' : '';
 
     const destinations = [];
@@ -350,7 +372,7 @@ export function ensureArchiveProvider(backendTfPath) {
     const closingIndent = /(\n[ \t]*)$/.exec(head)?.[1] ?? '\n';
     const entry = '    archive = {\n      source  = "hashicorp/archive"\n      version = "~> 2.0"\n    }\n';
     const updated = `${head.replace(/\s+$/, '\n')}${entry}${closingIndent.slice(1)}${content.slice(bounds.closeIdx)}`;
-    fsSync.writeFileSync(backendTfPath, updated);
+    atomicWriteFileSync(backendTfPath, updated);
     return true;
 }
 
@@ -517,34 +539,48 @@ async function runAlertsMain(input = {}) {
         }
     }
 
+    // Mutations (main.tf, backend.tf, alerts.tf, .gitignore) run under
+    // the terraform project lock like every other scaffolding family —
+    // the exists-check rides along so concurrent scaffolds cannot both
+    // pass it and interleave the read-modify-write helpers.
     const alertsPath = path.join(cwd, ALERTS_TF_FILE);
-    if (fsSync.existsSync(alertsPath) && !force) {
-        return failCommand({
-            message: `\n⚠ ${ALERTS_TF_FILE} already exists. Pass --force to overwrite.\n`,
-            tone: 'yellow',
-            event: 'alerts_run',
-            telemetry: { projectName, error_code: 'ALERTS_FILE_EXISTS' },
-            reason: 'alerts-file-exists',
-            resultExtra: { projectName, region },
-            exitCode: null,
-        });
-    }
+    const scaffolded = await withProjectLock(cwd, async () => {
+        if (fsSync.existsSync(alertsPath) && !force) {
+            return {
+                refused: failCommand({
+                    message: `\n⚠ ${ALERTS_TF_FILE} already exists. Pass --force to overwrite.\n`,
+                    tone: 'yellow',
+                    event: 'alerts_run',
+                    telemetry: { projectName, error_code: 'ALERTS_FILE_EXISTS' },
+                    reason: 'alerts-file-exists',
+                    resultExtra: { projectName, region },
+                    exitCode: null,
+                }),
+            };
+        }
 
-    // Static alarms + topics must live in us-east-1 (CloudFront metrics
-    // are only visible there); ensure main.tf declares the alias the
-    // generated file references. No-op when already present.
-    let aliasAdded = false;
-    if (target === 'static') {
-        aliasAdded = ensureUsEast1Provider(path.join(cwd, 'terraform', 'main.tf'));
-    }
-    // The forwarder's data.archive_file needs its provider pinned next
-    // to the aws one (required_providers may only appear once).
-    let archiveAdded = false;
-    if (webhook) {
-        archiveAdded = ensureArchiveProvider(path.join(cwd, 'terraform', 'backend.tf'));
-    }
+        // Static alarms + topics must live in us-east-1 (CloudFront metrics
+        // are only visible there); ensure main.tf declares the alias the
+        // generated file references. No-op when already present.
+        let aliasAdded = false;
+        if (target === 'static') {
+            aliasAdded = ensureUsEast1Provider(path.join(cwd, 'terraform', 'main.tf'));
+        }
+        // The forwarder's data.archive_file needs its provider pinned next
+        // to the aws one (required_providers may only appear once).
+        let archiveAdded = false;
+        if (webhook) {
+            archiveAdded = ensureArchiveProvider(path.join(cwd, 'terraform', 'backend.tf'));
+        }
 
-    fsSync.writeFileSync(alertsPath, buildAlertsTf({ projectName, target, email, webhook, threshold }));
+        await atomicWriteFile(alertsPath, buildAlertsTf({ projectName, target, email, webhook, threshold }));
+        if (webhook) {
+            await ensureForwarderZipIgnored(cwd);
+        }
+        return { aliasAdded, archiveAdded };
+    }, { scope: 'terraform' });
+    if (scaffolded.refused) return scaffolded.refused;
+    const { aliasAdded, archiveAdded } = scaffolded;
     const destinations = email && webhook ? 'both' : webhook ? 'webhook' : email ? 'email' : 'manual';
     const kind = webhook ? detectWebhookKind(webhook) : undefined;
     console.log(color.green(`\n✅ Created ${ALERTS_TF_FILE} (SNS topic + ${target} notify alarm${webhook ? ' + chat forwarder' : ''}).`));

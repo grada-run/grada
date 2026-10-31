@@ -17,19 +17,38 @@ jobs:
   drift:
     name: Detect Terraform drift
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
         with:
           role-to-assume: {{ROLE_ARN}}
           aws-region: ${{ env.AWS_REGION }}
 
+      # A missing role means the stack is absent (never provisioned or
+      # destroyed): skip loud instead of bursting red assume noise. Any
+      # other assume failure fails loud with both cases named (BUG-138).
+      - name: Interpret credential failure
+        if: steps.aws-creds.outcome == 'failure'
+        run: |
+          ROLE_ARN="{{ROLE_ARN}}"
+          TOKEN="$(curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
+          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
+          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
+            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
+          else
+            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
+            exit 1
+          fi
+
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           # The wrapper mangles -detailed-exitcode; raw codes (0/1/2) are the signal.
           terraform_wrapper: false
@@ -41,10 +60,11 @@ jobs:
       # -detailed-exitcode: 0 = no changes, 1 = error, 2 = drift detected.
       - name: Terraform Plan
         id: plan
+        if: steps.aws-creds.outcome == 'success'
         working-directory: ./terraform
         run: |
           set +e
-          terraform plan -detailed-exitcode -no-color -out=tfplan > plan-full.txt 2>&1
+          terraform plan -input=false -detailed-exitcode -no-color -out=tfplan > plan-full.txt 2>&1
           EXITCODE=$?
           echo "exitcode=$EXITCODE" >> "$GITHUB_OUTPUT"
           if [ "$EXITCODE" != "1" ]; then
@@ -54,6 +74,9 @@ jobs:
           fi
           echo "### Drift plan (exit $EXITCODE)" >> "$GITHUB_STEP_SUMMARY"
           head -50 plan.txt >> "$GITHUB_STEP_SUMMARY"
+          # Exit 2 (drift) stays green — the issue below tracks it. Exit 1
+          # (plan ERROR) must fail the run instead of going green-silent.
+          if [ "$EXITCODE" = "1" ]; then exit 1; fi
 
       # A plan on never-applied infrastructure also exits 2 (everything
       # "to add") — that is not drift. Skip the issue/Slack alarm when
@@ -73,7 +96,7 @@ jobs:
 
       - name: Report drift as GitHub Issue
         if: (steps.plan.outputs.exitcode == '2' || steps.plan.outputs.exitcode == '0') && steps.state.outputs.empty != 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const fs = require('fs');
@@ -112,6 +135,52 @@ jobs:
             } else if (existing) {
               await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `✅ Drift resolved on \`${new Date().toISOString()}\` ([run](${runUrl})).` });
               await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+            }
+            // A 0/2 verdict means the check itself works: close any stale
+            // check-failure issue left by an earlier red run.
+            const { data: failed } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: 'iac-drift-check-failed' });
+            if (failed[0]) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: failed[0].number, body: `✅ Drift check healthy again on \`${new Date().toISOString()}\` ([run](${runUrl})); closing.` });
+              await github.rest.issues.update({ owner, repo, issue_number: failed[0].number, state: 'closed' });
+            }
+
+      # Plan errors (exit 1) fail the run (see the plan step) AND leave a
+      # trackable issue under their own label — never green-silent.
+      - name: Report drift check failure as GitHub Issue
+        if: failure() && steps.plan.outputs.exitcode == '1'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const label = 'iac-drift-check-failed';
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            let diff = '';
+            try {
+              diff = fs.readFileSync('terraform/plan.txt', 'utf8');
+            } catch (error) {
+              diff = '(plan output unavailable)';
+            }
+            if (diff.length > 30000) {
+              diff = `${diff.slice(0, 30000)}\n... (truncated, see ${runUrl})`;
+            }
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({ owner, repo, name: label, color: 'd93f0b', description: 'Terraform drift check itself errored (plan exit 1)' });
+              } else {
+                throw error;
+              }
+            }
+            const { data: open } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: label });
+            const existing = open[0];
+            const body = `## ❌ Drift Check Failed\n\nThe scheduled drift check errored on \`${new Date().toISOString()}\` ([workflow run](${runUrl})) — this is a check failure, not drift.\n\n\`\`\`terraform\n${diff}\n\`\`\`\n\nFix the check (credentials, backend, syntax) and the issue closes on the next green run.`;
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `Check still failing on \`${new Date().toISOString()}\` ([run](${runUrl})).\n\n\`\`\`terraform\n${diff}\n\`\`\`` });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title: '❌ IaC Drift Check Failed', labels: [label], body });
             }
 
       - name: Notify Slack

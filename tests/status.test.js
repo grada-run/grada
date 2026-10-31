@@ -149,6 +149,23 @@ describe('Command: status (mocked ECS + CloudWatch)', () => {
         }
     });
 
+    // BUG-151: the alarm query used the raw project prefix, merging
+    // prod + preview alarms into one verdict — it must use the same
+    // namespaced stem as cluster/service/logGroup.
+    it('queries alarms with the namespaced stem prefix', async () => {
+        const ecsClient = mockEcsClient(healthyService);
+        const cloudWatchClient = mockCloudWatchClient([]);
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+
+        try {
+            await runStatus({ projectName: 'myapp', workspace: 'pr-7', region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients() });
+            const alarmsCall = cloudWatchClient.send.mock.calls.map(([c]) => c).find((c) => c.constructor.name === 'DescribeAlarmsCommand');
+            expect(alarmsCall.input).toMatchObject({ AlarmNamePrefix: 'myapp-pr-7' });
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
     it('runs automated diagnostics and exits 1 on a crash loop', async () => {
         const ecsClient = mockEcsClient({ ...healthyService, runningCount: 1, pendingCount: 1 });
         const cloudWatchClient = mockCloudWatchClient([]);

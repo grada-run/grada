@@ -659,6 +659,73 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(mockSpawn).toHaveBeenCalledTimes(3);
     });
 
+    // BUG-198: the snapshot wait re-started the already-running
+    // shared spinner — clack overwrites the interval handle, leaking
+    // the first interval so the session never exits. One start per
+    // phase; the wait re-messages instead.
+    it('starts the spinner once across the snapshot phase', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({
+        kind: 'instance',
+        statuses: ['available'],
+        snapshotStatuses: ['creating', 'available'],
+      });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
+
+      const snapshotStarts = clack.mockSpinnerStart.mock.calls.filter(([msg]) => String(msg).includes('napshot'));
+      expect(snapshotStarts).toHaveLength(1);
+      // The wait re-messages (initial + per-tick) instead of re-starting.
+      const snapshotMessages = clack.mockSpinnerMessage.mock.calls.filter(([msg]) => String(msg).includes('Waiting for snapshot'));
+      expect(snapshotMessages.length).toBeGreaterThanOrEqual(2);
+    });
+
+    // BUG-196: surface PercentProgress during the snapshot wait.
+    it('shows snapshot percent progress while waiting', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
+      const baseSend = rdsClient.send;
+      let snapshotCalls = 0;
+      rdsClient.send = vi.fn(async (command) => {
+        if (command.constructor.name === 'DescribeDBSnapshotsCommand') {
+          snapshotCalls += 1;
+          return snapshotCalls === 1
+            ? { DBSnapshots: [{ Status: 'creating', PercentProgress: 42 }] }
+            : { DBSnapshots: [{ Status: 'available', PercentProgress: 100 }] };
+        }
+        return baseSend(command);
+      });
+
+      // Wide terminal: the percent suffix must survive truncation to be
+      // asserted (narrow-terminal floors are a standing residual).
+      const descriptor = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+      Object.defineProperty(process.stdout, 'columns', { value: 200, configurable: true });
+      try {
+        await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
+      } finally {
+        if (descriptor) Object.defineProperty(process.stdout, 'columns', descriptor);
+        else delete process.stdout.columns;
+      }
+
+      expect(clack.mockSpinnerMessage).toHaveBeenCalledWith(expect.stringContaining('42% complete'));
+    });
+
+    // BUG-198: "spin this back up" overstated recovery — the bucket
+    // confirm must name the snapshot (apply never restores the data).
+    it('names the pre-destroy snapshot in the state-bucket confirm', async () => {
+      writeBackend();
+      confirmDestroy();
+      const rdsClient = scriptedRdsClient({ kind: 'instance', statuses: ['available'] });
+
+      await destroyStack({ rdsClient, sleepFn: noopSleep, pollIntervalMs: 1, timeoutMs: 500, dbSettleTimeoutMs: 500, isHeadless: false });
+
+      const bucketConfirm = clack.mockConfirm.mock.calls[1][0];
+      expect(String(bucketConfirm.message)).toContain('pre-destroy snapshot');
+      expect(String(bucketConfirm.message)).toContain('manual restore');
+    });
+
     it('refuses the destroy when the snapshot fails', async () => {
       writeBackend();
       clack.mockConfirm.mockResolvedValueOnce(true); // proceed with destroy

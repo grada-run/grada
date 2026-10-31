@@ -1,10 +1,10 @@
 # Stage 1: Install dependencies and build the app
-FROM node:22-alpine AS builder
+FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS builder
 WORKDIR /app
 
 # FIX 1: Upgrade Alpine system packages & upgrade global NPM to patch 'tar' and 'pacote' CVEs
 RUN apk upgrade --no-cache && \
-    npm install -g npm@latest
+    npm install -g npm@12.2.1
 
 # Copy package files and install dependencies
 COPY package.json package-lock.json* ./
@@ -18,7 +18,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Production environment
-FROM node:22-alpine AS runner
+FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 WORKDIR /app
 
 # FIX 2: Upgrade Alpine packages and absolutely destroy npm, yarn, and corepack
