@@ -532,12 +532,16 @@ async function runDbMigrateMain(input = {}) {
             return { ok: true, success: true, exitCode: 0, taskArn: outcome.taskArn };
         }
         const propagated = (typeof exitCode === 'number' && exitCode > 0) ? exitCode : 1;
+        // The ECS stopped reason is the only diagnosis PostHog gets for a
+        // failed task (exit codes alone can't distinguish image-pull from
+        // command-not-found from migration errors) — stamp it.
+        const failureDetail = `Migration failed with exit code ${exitCode ?? 'unknown'}: ${stoppedReason}`;
         return failCommand({
-            message: `\n✖ Migration failed with exit code ${exitCode ?? 'unknown'}: ${stoppedReason}.\n`,
+            message: `\n✖ ${failureDetail}.\n`,
             event: 'db_migrate_run',
             telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
             errorCode: 'MIGRATION_TASK_FAILED',
-            extra: { exit_code: exitCode ?? -1 },
+            extra: { exit_code: exitCode ?? -1, error_message: failureDetail },
             reason: 'migration-task-failed',
             resultExtra: { cluster, service, region, taskArn: outcome.taskArn },
             exitCode: propagated,

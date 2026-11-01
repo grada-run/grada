@@ -971,21 +971,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-aurora_serverless-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-aurora_serverless-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -1173,21 +1167,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-aurora_serverless-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-aurora_serverless-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -1251,7 +1239,7 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Django_Postgres > Django_Postgres - Dockerfile 1`] = `
 "# --- Stage 1: Build dependencies into an isolated venv ---
-FROM python:3.12-alpine AS builder
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS builder
 
 # Prevent Python from writing .pyc files and buffer stdout for cleaner logs
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -1274,7 +1262,7 @@ RUN python -m venv /opt/venv && \\
     rm -rf /root/.cache/pip
 
 # --- Stage 2: Production runner (no build tools, no pip) ---
-FROM python:3.12-alpine AS runner
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS runner
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -1342,7 +1330,11 @@ resource "aws_db_instance" "postgres" {
   # grow the volume (and the bill) without bound.
   max_allocated_storage   = 200
   backup_retention_period = 7
-  storage_encrypted       = true
+  # Explicit off-peak UTC windows: without them AWS assigns windows
+  # that can land in peak hours (and drift between stacks).
+  backup_window      = "03:00-04:00"
+  maintenance_window = "sun:04:00-sun:05:00"
+  storage_encrypted  = true
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")
@@ -2223,21 +2215,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-django_postgres-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-django_postgres-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -2425,21 +2411,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-django_postgres-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-django_postgres-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -3386,21 +3366,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-docker_compose_sidecars-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-docker_compose_sidecars-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -3588,21 +3562,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-docker_compose_sidecars-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-docker_compose_sidecars-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -3666,7 +3634,7 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for FastAPI_Python > FastAPI_Python - Dockerfile 1`] = `
 "# --- Stage 1: Build dependencies into an isolated venv ---
-FROM python:3.12-alpine AS builder
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS builder
 
 # Prevent Python from writing .pyc files and buffer stdout for cleaner logs
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -3689,7 +3657,7 @@ RUN python -m venv /opt/venv && \\
     rm -rf /root/.cache/pip
 
 # --- Stage 2: Production runner (no build tools, no pip) ---
-FROM python:3.12-alpine AS runner
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS runner
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -4555,21 +4523,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-fastapi_python-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-fastapi_python-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -4757,21 +4719,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-fastapi_python-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-fastapi_python-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -4835,7 +4791,7 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Go_Distroless > Go_Distroless - Dockerfile 1`] = `
 "# Stage 1: Compile
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS builder
 WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
@@ -4843,7 +4799,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /main .
 
 # Stage 2: Production runner
-FROM alpine:3.20
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 WORKDIR /app
 
 # Create unprivileged user
@@ -5689,21 +5645,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-go_distroless-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-go_distroless-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -5891,21 +5841,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-go_distroless-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-go_distroless-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -5969,7 +5913,7 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Heroku_Procfile_Migration > Heroku_Procfile_Migration - Dockerfile 1`] = `
 "# --- Stage 1: Build dependencies into an isolated venv ---
-FROM python:3.12-alpine AS builder
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS builder
 
 # Prevent Python from writing .pyc files and buffer stdout for cleaner logs
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -5992,7 +5936,7 @@ RUN python -m venv /opt/venv && \\
     rm -rf /root/.cache/pip
 
 # --- Stage 2: Production runner (no build tools, no pip) ---
-FROM python:3.12-alpine AS runner
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS runner
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -6060,7 +6004,11 @@ resource "aws_db_instance" "postgres" {
   # grow the volume (and the bill) without bound.
   max_allocated_storage   = 200
   backup_retention_period = 7
-  storage_encrypted       = true
+  # Explicit off-peak UTC windows: without them AWS assigns windows
+  # that can land in peak hours (and drift between stacks).
+  backup_window      = "03:00-04:00"
+  maintenance_window = "sun:04:00-sun:05:00"
+  storage_encrypted  = true
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")
@@ -6941,21 +6889,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-heroku_procfile_migration-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-heroku_procfile_migration-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -7143,21 +7085,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-heroku_procfile_migration-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-heroku_procfile_migration-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -7375,7 +7311,11 @@ resource "aws_db_instance" "postgres" {
   # grow the volume (and the bill) without bound.
   max_allocated_storage   = 200
   backup_retention_period = 7
-  storage_encrypted       = true
+  # Explicit off-peak UTC windows: without them AWS assigns windows
+  # that can land in peak hours (and drift between stacks).
+  backup_window      = "03:00-04:00"
+  maintenance_window = "sun:04:00-sun:05:00"
+  storage_encrypted  = true
 
   # Strip dashes for the database name: RDS MySQL db_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)
@@ -8258,21 +8198,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-mysql_rds-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-mysql_rds-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -8460,21 +8394,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-mysql_rds-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-mysql_rds-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -9424,21 +9352,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-nextjs_standalone-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-nextjs_standalone-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -9626,21 +9548,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-nextjs_standalone-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-nextjs_standalone-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -10582,21 +10498,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-nuxt_ssr-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-nuxt_ssr-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -10784,21 +10694,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-nuxt_ssr-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-nuxt_ssr-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -10862,7 +10766,7 @@ exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Rails_Postgres > Rails_Postgres - Dockerfile 1`] = `
 "# Stage 1: Build the Rails application
-FROM ruby:3.3.5-alpine AS builder
+FROM ruby:3.3.5-alpine@sha256:b4c321a99b9f21b7bb24f22e558bf1477630fb55d692aba4e25b2fe5deb7eaf1 AS builder
 WORKDIR /app
 
 # Install native build tools required to compile C extensions (like pg or nokogiri)
@@ -10884,7 +10788,7 @@ COPY . .
 RUN SECRET_KEY_BASE=dummy bundle exec rails assets:precompile || true
 
 # Stage 2: Production runner
-FROM ruby:3.3.5-alpine AS runner
+FROM ruby:3.3.5-alpine@sha256:b4c321a99b9f21b7bb24f22e558bf1477630fb55d692aba4e25b2fe5deb7eaf1 AS runner
 WORKDIR /app
 
 ENV RAILS_ENV=production \\
@@ -10955,7 +10859,11 @@ resource "aws_db_instance" "postgres" {
   # grow the volume (and the bill) without bound.
   max_allocated_storage   = 200
   backup_retention_period = 7
-  storage_encrypted       = true
+  # Explicit off-peak UTC windows: without them AWS assigns windows
+  # that can land in peak hours (and drift between stacks).
+  backup_window      = "03:00-04:00"
+  maintenance_window = "sun:04:00-sun:05:00"
+  storage_encrypted  = true
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")
@@ -11837,21 +11745,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-rails_postgres-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-rails_postgres-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -12039,21 +11941,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-rails_postgres-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-rails_postgres-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -13000,21 +12896,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-sveltekit_node-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-sveltekit_node-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -13202,21 +13092,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-sveltekit_node-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-sveltekit_node-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -14166,21 +14050,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-vercel_edge_migration-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-vercel_edge_migration-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -14368,21 +14246,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-vercel_edge_migration-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-vercel_edge_migration-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -14458,7 +14330,7 @@ COPY . .
 RUN npm run build
 
 # STAGE 2: Serve with Hardened Nginx
-FROM nginxinc/nginx-unprivileged:alpine
+FROM nginxinc/nginx-unprivileged:alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e
 USER root
 RUN apk upgrade --no-cache
 USER nginx
@@ -15312,21 +15184,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-vite_static_spa-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-vite_static_spa-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR
         if: steps.aws-creds.outcome == 'success'
@@ -15514,21 +15380,15 @@ jobs:
           role-to-assume: arn:aws:iam::123456789012:role/test-vite_static_spa-github-actions-role
           aws-region: \${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::123456789012:role/test-vite_static_spa-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3

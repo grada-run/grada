@@ -257,6 +257,26 @@ describe('Secrets Push Command', () => {
         expect(result).toEqual(expect.objectContaining({ keysChanged: false, restarted: true }));
     });
 
+    // BUG-161: the ECS restart runs after the vault update — its
+    // failure must not masquerade as a failed push.
+    it('reports the vault as updated when the ECS restart fails', async () => {
+        await fs.writeFile('.env', 'API_KEY=newvalue\nDB_PASS=newsecret');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-1"');
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue', DB_PASS: 'oldsecret' }) });
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue', DB_PASS: 'oldsecret' }) });
+        mockSend.mockResolvedValueOnce({});
+        mockConfirm.mockResolvedValueOnce(true);
+        mockEcsSend.mockRejectedValueOnce(new Error('boom'));
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+
+        await pushSecrets('.env', 'my-project', { isHeadless: false });
+
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('Vault updated'));
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('restart'));
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        exitSpy.mockRestore();
+    });
+
     it('skips the ECS restart when keys are identical but the user declines', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue');
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ API_KEY: 'oldvalue' }) });
@@ -457,6 +477,23 @@ describe('Secrets Push Command', () => {
         expect((await fs.stat(keysPath)).mtimeMs).toBe(past.getTime());
     });
 
+    // BUG-161: the keys-file write lands after the vault update, so its
+    // failure must report the vault as updated (with the recovery step),
+    // not as a failed push.
+    it('reports the vault as updated when the keys-file write fails', async () => {
+        await fs.writeFile('.env', 'A=1');
+        await fs.writeFile(path.join('terraform', 'backend.tf'), 'region = "us-east-2"');
+        await fs.mkdir(path.join('terraform', 'secret_keys.json'));
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+
+        await pushSecrets('.env', 'my-project', { headless: true });
+
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('Vault updated'));
+        expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('secret_keys.json'));
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        exitSpy.mockRestore();
+    });
+
     // BUG-162: the vault name fell back to the directory basename, so a
     // renamed directory silently aimed at a missing vault — the
     // terraform project name (what provisioned the vault) wins.
@@ -629,6 +666,35 @@ describe('Secrets Pull Command', () => {
         expect(output).toContain('REVIVED');
         expect(result.appended).toEqual(['REVIVED']);
         consoleSpy.mockRestore();
+    });
+
+    // BUG-160: pull rewrote .env on every run (dotenv.parse stripping
+    // comments/formatting) even when nothing changed.
+    it('leaves .env untouched when pull is already in sync', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ A: '1' }) });
+        await fs.writeFile('.env', 'A="1"\n');
+        const past = new Date(Date.now() - 60000);
+        await fs.utimes('.env', past, past);
+
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(result.synced).toBe(1);
+        expect((await fs.stat('.env')).mtimeMs).toBe(past.getTime());
+        expect(await fs.readFile('.env', 'utf-8')).toBe('A="1"\n');
+    });
+
+    // BUG-160: the unrepresentable check ranged over every key incl.
+    // local-only ones, so a local-only exotic value blocked unrelated
+    // syncs. Only added/overwritten keys can block the write.
+    it('does not let local-only exotic values block pull', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ OTHER: 'x' }) });
+        await fs.writeFile('.env', 'WEIRD="a\'b`c\\"d"\n');
+
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(result.synced).toBe(1);
+        const content = await fs.readFile('.env', 'utf-8');
+        expect(content).toContain('OTHER="x"');
     });
 
     it('creates .env from remote payload when local file is missing', async () => {

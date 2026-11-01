@@ -44,7 +44,7 @@ Setup writes a `.dockerignore` excluding `.git/`, `terraform/`, state files, and
 
 ## Reproducible builds
 
-Generated Node-family `Dockerfile`s pin their base image to an immutable digest (`node:<version>@sha256:…`) and install a pinned npm version, so rebuilds produce the same image regardless of when upstream tags move.
+Generated `Dockerfile`s pin every base image to an immutable digest (`<image>:<tag>@sha256:…`), and Node-family images additionally install a pinned npm version, so rebuilds produce the same image regardless of when upstream tags move.
 
 ## See also
 

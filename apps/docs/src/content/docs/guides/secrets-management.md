@@ -73,7 +73,7 @@ npx grada-run secrets pull    # merge remote values into local .env
 npx grada-run secrets audit   # diff local .env vs AWS, change nothing
 ```
 
-`pull` appends missing remote keys after your existing entries, keeps local-only variables, and asks before overwriting conflicting values (automatic in `--headless` mode). `audit` prints a colored drift report: `+` missing locally, `~` mismatched values, `-` never pushed to AWS — plus red `!` collision flags for keys sharing a name with Grada-managed variables, and warnings for `localhost`-style wiring values.
+`pull` appends missing remote keys after your existing entries, keeps local-only variables, and asks before overwriting conflicting values (automatic in `--headless` mode). An in-sync pull leaves `.env` byte-identical — comments and formatting untouched. `audit` prints a colored drift report: `+` missing locally, `~` mismatched values, `-` never pushed to AWS — plus red `!` collision flags for keys sharing a name with Grada-managed variables, and warnings for `localhost`-style wiring values.
 
 **Which flow do I need?**
 

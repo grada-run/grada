@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build
 
 # STAGE 2: Serve with Hardened Nginx
-FROM nginxinc/nginx-unprivileged:alpine
+FROM nginxinc/nginx-unprivileged:alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e
 USER root
 RUN apk upgrade --no-cache
 USER nginx

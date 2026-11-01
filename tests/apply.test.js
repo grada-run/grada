@@ -213,7 +213,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(outroSpy).toHaveBeenCalled();
     const outroText = stripVTControlCharacters(outroSpy.mock.calls.map((call) => call[0]).join('\n'));
     expect(outroText).toContain('App URL: https://d123.cloudfront.net (global CDN — share this link)');
-    expect(outroText).toContain('Direct URL: http://alb-123.us-east-2.elb.amazonaws.com (bypasses the CDN — for debugging)');
+    expect(outroText).toContain('Direct URL: http://alb-123.us-east-2.elb.amazonaws.com (CloudFront-only origin — direct hits 403)');
     expect(trackEvent).toHaveBeenCalledWith(
       'infrastructure_applied',
       expect.objectContaining({ success: true, ...COST_PROPS_SHAPE })

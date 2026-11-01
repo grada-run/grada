@@ -136,18 +136,26 @@ describe('github workflow templates', () => {
         expect(notice, `${filename} must loudly skip fork PRs`).toBeDefined();
     });
 
-    // BUG-138: when the CI role is missing (stack absent), the assume
-    // bursts red noise. Reproduce the assume to capture the error text:
-    // a missing role skips loud, anything else fails loud with both
-    // cases named. Deploy never skips (fails with the bootstrap pointer).
-    it.each(['drift.yml', 'teardown.yml', 'preview.yml', 'preview-lambda.yml'])('%s skips loud when the stack is absent', (filename) => {
+    // BUG-138/199: STS denies a missing role and a trust mismatch with
+    // the same message, so the API won't support distinguishing them:
+    // every assume failure on a skippable workflow skips loud (green)
+    // with both cases + pointers named. No error-text grep (it can never
+    // match), no exit 1 in the interpret block. Deploy never skips
+    // (fails with the bootstrap pointer).
+    it.each(['drift.yml', 'teardown.yml', 'preview.yml', 'preview-lambda.yml'])('%s skips loud with guidance on any assume failure', (filename) => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
         expect(raw).toContain('id: aws-creds');
         expect(raw).toContain('continue-on-error: true');
         expect(raw).toContain('- name: Interpret credential failure');
-        expect(raw).toContain('assume-role-with-web-identity');
-        expect(raw).toContain('NoSuchEntity');
+        expect(raw).not.toContain('assume-role-with-web-identity');
+        expect(raw).not.toContain('NoSuchEntity');
+        expect(raw).toContain('::notice::');
         expect(raw).toContain('npx grada-run apply');
+        expect(raw).toContain('terraform/oidc.tf');
+        // The interpret block must green the run: no exit 1 between it
+        // and the next step.
+        const interpret = raw.split('- name: Interpret credential failure')[1].split('\n      - name: ')[0];
+        expect(interpret, `${filename} interpret must not exit 1`).not.toContain('exit 1');
         // Post-credential AWS steps gate on the assume outcome.
         expect(raw).toContain("steps.aws-creds.outcome == 'success'");
     });
@@ -216,6 +224,20 @@ describe('github workflow templates', () => {
             expect(raw, filename).toContain('npx grada-run apply');
             expect(raw, filename).not.toContain("steps.aws-creds.outcome == 'success'");
         }
+    });
+
+    // BUG-201: the static deploy missed the attempt-and-interpret
+    // rollout — it fails raw on an absent stack. Same deploy-side
+    // shape as deploy.yml: job-level assume + fail loud with the
+    // bootstrap pointer naming the missing role.
+    it('deploy-static.yml fails loud with the bootstrap pointer on credential failure', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy-static.yml'), 'utf8');
+        expect(raw).toContain('id: aws-creds');
+        expect(raw).toContain('continue-on-error: true');
+        expect(raw).toContain('- name: Interpret credential failure');
+        expect(raw).toContain('npx grada-run apply');
+        expect(raw).toContain('aws-actions/configure-aws-credentials@');
+        expect(raw).not.toContain("steps.aws-creds.outcome == 'success'");
     });
 
     // BUG-141: preview DBs carry deletion protection and `terraform

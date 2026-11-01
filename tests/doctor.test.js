@@ -735,6 +735,42 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('warns when the ALB predates the CloudFront origin-secret restriction', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'resource "aws_lb_listener" "http" {\n  port = 80\n}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/direct traffic/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                success: true,
+                check_origin_restriction: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes the origin check on wired trees and skips ALB-less trees', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'resource "aws_lb_listener" "http" {}\nresource "aws_lb_listener_rule" "origin_secret" {\n  http_header_name = "X-Grada-Origin-Secret"\n}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_origin_restriction: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
     it('passes the OIDC trust check on scoped trust', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

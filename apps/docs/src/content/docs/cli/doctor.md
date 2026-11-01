@@ -9,7 +9,7 @@ Verify your machine is ready to provision and deploy, telling you exactly which 
 
 - Checks for `terraform`, `aws`, `docker`, and `git`, printing a pass/fail line for each with an install hint for anything missing.
 - Verifies your AWS credentials are actually valid — expired SSO tokens fail the line with recovery guidance instead of a false green.
-- Inside a grada project, additionally checks for a held Terraform state lock, an interrupted previous run, and an open `repo:*` OIDC trust (warning-grade — it never fails the run; list trusts flag when any entry is open, non-literal claims report an honest not-parseable skip); outside a project these report as skipped.
+- Inside a grada project, additionally checks for a held Terraform state lock, an interrupted previous run, an open `repo:*` OIDC trust (warning-grade — it never fails the run; list trusts flag when any entry is open, non-literal claims report an honest not-parseable skip), and an ALB predating the CloudFront origin-secret restriction (warning-grade — re-run setup to add the wiring); outside a project these report as skipped.
 - Results group into `System Environment` (your machine) and `Project State` (your project), so host health never reads as project health. Read-only — it changes nothing.
 
 ## Usage

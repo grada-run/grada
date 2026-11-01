@@ -34,6 +34,7 @@ export const PROJECT_CHECKS = [
     { id: 'interrupted_run', label: 'Interrupted Terraform run', scope: 'project', severity: 'warn', run: checkInterruptedRun, hint: () => 'Review the last apply/destroy output before trusting applied state; the next run overwrites the marker.' },
     { id: 'oidc_trust_scope', label: 'OIDC trust scope', scope: 'project', severity: 'warn', run: checkOidcTrustScope, hint: () => 'Re-scope with: npx grada-run init --github-repo owner/name (or edit the sub claim in terraform/oidc.tf).' },
     { id: 'oidc_immutable_claims', label: 'OIDC trust formats', scope: 'project', severity: 'warn', run: checkOidcImmutableClaims, hint: () => 'Re-run npx grada-run init to upgrade the trust, or add a repo:<owner>@*/<name>@*:* entry to terraform/oidc.tf.' },
+    { id: 'origin_restriction', label: 'ALB origin restriction', scope: 'project', severity: 'warn', run: checkOriginRestriction, hint: () => 'Re-run npx grada-run init to add the CloudFront origin-secret wiring, then apply.' },
 ];
 
 const INSTALL_HINTS = {
@@ -207,6 +208,28 @@ function workspaceSuffix(lockKey) {
 // by default): surfaces yellow without flipping the verdict red. List
 // trusts flag when any entry is open; non-literal claims (var/ref)
 // skip honestly as not parseable rather than as missing.
+// Project check: the apply-time Direct URL only bypasses the CDN on
+// trees predating the CloudFront origin-secret restriction (listener
+// rule 403ing hits without the header). Warning-grade: the URL still
+// prints, but on unwired trees it misleads. Non-ECS targets have no
+// ALB — skip.
+function checkOriginRestriction({ cwd }) {
+    let mainTf;
+    try {
+        mainTf = fs.readFileSync(path.join(cwd, 'terraform', 'main.tf'), 'utf8');
+    } catch {
+        return { ok: true, skipped: 'no terraform/main.tf found' };
+    }
+    if (!mainTf.includes('aws_lb_listener')) {
+        return { ok: true, skipped: 'no ALB in this tree (non-ECS target)' };
+    }
+    if (mainTf.includes('X-Grada-Origin-Secret')) return { ok: true };
+    return {
+        ok: false,
+        detailLines: ['ALB accepts direct traffic (no CloudFront origin-secret restriction) — the apply-time Direct URL bypasses the CDN on this tree.'],
+    };
+}
+
 function checkOidcTrustScope({ cwd }) {
     const trust = readTerraformOidcTrust(cwd);
     if (trust === null) return { ok: true, skipped: 'no oidc.tf trust found' };

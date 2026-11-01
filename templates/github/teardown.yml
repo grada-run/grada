@@ -49,21 +49,15 @@ jobs:
           role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
-      # A missing role means the stack is absent (never provisioned or
-      # destroyed): skip loud instead of bursting red assume noise. Any
-      # other assume failure fails loud with both cases named (BUG-138).
+      # STS denies a missing role and a trust mismatch with the same
+      # message, so the API won't support distinguishing them: every
+      # assume failure skips loud (green) with both cases + pointers
+      # named (BUG-199).
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
           ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role"
-          TOKEN="$(curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')"
-          ERR="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" --role-session-name grada-preflight --web-identity-token "$TOKEN" 2>&1)" || true
-          if echo "$ERR" | grep -qiE 'NoSuchEntity|does not exist|cannot be found'; then
-            echo "::notice::AWS role $ROLE_ARN does not exist — the stack was likely never provisioned or was destroyed. Skipping this run (re-bootstrap with: npx grada-run apply)."
-          else
-            echo "::error::AWS credential assumption failed. Either the role is missing (stack absent — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf). Raw error: $ERR"
-            exit 1
-          fi
+          echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3

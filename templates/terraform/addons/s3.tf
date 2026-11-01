@@ -86,10 +86,12 @@ resource "aws_cloudfront_origin_access_control" "storage_oac" {
 }
 
 # trivy:ignore:AVD-AWS-0011 - WAF is omitted by default to prevent unexpected monthly costs for users
-# Access logging is intentionally disabled (no logging_config): it doubles
-# request costs into a second bucket. Restrict price_class to
-# PriceClass_100/200 as well if most traffic is US/EU — edge coverage
-# shrinks but so does the transfer bill.
+# Access logging is intentionally disabled: at starter scale these logs go
+# unread (CloudWatch metrics cover ops), while a log bucket adds a delivery
+# policy + lifecycle + review surface. Enable logging_config to a dedicated
+# bucket if compliance needs it. Restrict price_class to PriceClass_100/200
+# as well if most traffic is US/EU — edge coverage shrinks but so does the
+# transfer bill.
 resource "aws_cloudfront_distribution" "storage_cdn" {
   enabled             = true
   is_ipv6_enabled     = true

@@ -1,5 +1,5 @@
 # --- Stage 1: Build dependencies into an isolated venv ---
-FROM python:3.12-alpine AS builder
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS builder
 
 # Prevent Python from writing .pyc files and buffer stdout for cleaner logs
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -22,7 +22,7 @@ RUN python -m venv /opt/venv && \
     rm -rf /root/.cache/pip
 
 # --- Stage 2: Production runner (no build tools, no pip) ---
-FROM python:3.12-alpine AS runner
+FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS runner
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

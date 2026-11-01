@@ -669,7 +669,10 @@ async function applyStackMain(input = {}) {
 
         let finalMessage = color.green('✅ Infrastructure is live!');
         if (cfUrl) finalMessage += `\n  🌍 App URL: ${color.cyan(cfUrl)} ${color.dim('(global CDN — share this link)')}`;
-        if (albUrl) finalMessage += `\n  🚦 Direct URL: ${color.gray(albUrl)} ${color.dim('(bypasses the CDN — for debugging)')}`;
+        // The origin only answers CloudFront (listener rule 403s direct
+        // hits without the origin-secret header) — label the URL as
+        // unreachable instead of a working bypass (BUG-136).
+        if (albUrl) finalMessage += `\n  🚦 Direct URL: ${color.gray(albUrl)} ${color.dim('(CloudFront-only origin — direct hits 403)')}`;
         // Lambda stacks have no CDN: without a CloudFront URL the API
         // URL is the primary link, not a debug bypass.
         if (apiUrl) {

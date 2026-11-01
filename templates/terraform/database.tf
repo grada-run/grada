@@ -30,7 +30,11 @@ resource "aws_db_instance" "postgres" {
   # grow the volume (and the bill) without bound.
   max_allocated_storage   = 200
   backup_retention_period = 7
-  storage_encrypted       = true
+  # Explicit off-peak UTC windows: without them AWS assigns windows
+  # that can land in peak hours (and drift between stacks).
+  backup_window      = "03:00-04:00"
+  maintenance_window = "sun:04:00-sun:05:00"
+  storage_encrypted  = true
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")

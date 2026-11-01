@@ -1,5 +1,5 @@
 # Stage 1: Build the Rails application
-FROM ruby:3.3.5-alpine AS builder
+FROM ruby:3.3.5-alpine@sha256:b4c321a99b9f21b7bb24f22e558bf1477630fb55d692aba4e25b2fe5deb7eaf1 AS builder
 WORKDIR /app
 
 # Install native build tools required to compile C extensions (like pg or nokogiri)
@@ -21,7 +21,7 @@ COPY . .
 RUN SECRET_KEY_BASE=dummy bundle exec rails assets:precompile || true
 
 # Stage 2: Production runner
-FROM ruby:3.3.5-alpine AS runner
+FROM ruby:3.3.5-alpine@sha256:b4c321a99b9f21b7bb24f22e558bf1477630fb55d692aba4e25b2fe5deb7eaf1 AS runner
 WORKDIR /app
 
 ENV RAILS_ENV=production \

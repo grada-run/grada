@@ -1133,6 +1133,14 @@ describe('Command: db migrate (mocked AWS)', () => {
         expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
     });
 
+    it('stops the spinner on success so the CLI exits', async () => {
+        const ecsClient = mockEcsMigrateClient({ taskSequence: [stoppedTask(0)] });
+        const result = await runDbMigrate(migrateOptions({ ecsClient, logsClient: mockLogsClient() }));
+        expect(result.ok).toBe(true);
+        const spin = mockSpinner.mock.results[mockSpinner.mock.results.length - 1].value;
+        expect(spin.stop).toHaveBeenCalled();
+    });
+
     it('ignores ResourceNotFoundException while the stream initializes', async () => {
         const notFound = new Error('stream missing');
         notFound.name = 'ResourceNotFoundException';
@@ -1155,6 +1163,16 @@ describe('Command: db migrate (mocked AWS)', () => {
         expect(stripVTControlCharacters(output.join('\n'))).toContain('migration boom');
         expect(mockTrackEvent).toHaveBeenCalledWith('db_migrate_run', expect.objectContaining({
             success: false, error_code: 'MIGRATION_TASK_FAILED', exit_code: 3,
+        }));
+    });
+
+    it('stamps the stopped reason as error_message on task failure', async () => {
+        const ecsClient = mockEcsMigrateClient({ taskSequence: [stoppedTask(3, 'migration boom')] });
+        const result = await runDbMigrate(migrateOptions({ ecsClient, logsClient: mockLogsClient() }));
+        expect(result.reason).toBe('migration-task-failed');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_migrate_run', expect.objectContaining({
+            success: false, error_code: 'MIGRATION_TASK_FAILED',
+            error_message: 'Migration failed with exit code 3: migration boom',
         }));
     });
 
@@ -1795,6 +1813,18 @@ describe('Command: db enable-vector (mocked AWS)', () => {
         expect(mockTrackEvent).toHaveBeenCalledWith('db_enable_vector_run', expect.objectContaining({
             success: true, engine: 'postgres', duration_ms: expect.any(Number),
         }));
+    });
+
+    it('stops the spinner on success so the CLI exits', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-vector-'));
+        writeDatabaseTf(dir);
+        const ecsClient = mockEcsMigrateClient({ taskSequence: [stoppedTask(0)] });
+        const result = await runDbEnableVector(vectorOptions({
+            cwd: dir, ecsClient, logsClient: mockLogsClient(),
+        }));
+        expect(result.ok).toBe(true);
+        const spin = mockSpinner.mock.results[mockSpinner.mock.results.length - 1].value;
+        expect(spin.stop).toHaveBeenCalled();
     });
 
     it('prints the Prisma hint only when postgresqlExtensions is missing', async () => {

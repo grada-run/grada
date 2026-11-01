@@ -348,6 +348,7 @@ async function handleSecretsCatch({
     notFoundGuidance,
     spinnerStopped = false,
     stackTraceOnTypeError = false,
+    postVaultStep = null,
 }) {
     await trackFailure(event, {
         projectName,
@@ -361,13 +362,25 @@ async function handleSecretsCatch({
         for (const line of notFoundGuidance) console.log(line);
     } else if (handleAuthErrorBranch(error, s, opts)) {
         return;
-    } else if (spinnerStopped) {
+    }
+    // BUG-161: failures after the vault write (keys file, ECS restart)
+    // must report the vault as updated with the recovery step — a bare
+    // "Failed to push" lies about what succeeded.
+    const postVaultHints = {
+        'secret_keys.json write': '  Re-run the push to regenerate terraform/secret_keys.json — the vault already holds the new values.\n',
+        'ECS restart': '  Trigger the restart by hand (aws ecs update-service --force-new-deployment) or deploy — the vault already holds the new values.\n',
+    };
+    const failureMessage = postVaultStep === null
+        ? `❌ Failed to ${verb} secrets: ${error.message}`
+        : `❌ Vault updated, but the ${postVaultStep} failed: ${error.message}`;
+    const failureHint = postVaultStep === null ? null : (postVaultHints[postVaultStep] ?? null);
+    if (spinnerStopped) {
         // The spinner already stopped, so its stop is a no-op —
         // route the message through the failure stamp instead.
-        return failCommand({ message: `❌ Failed to ${verb} secrets: ${error.message}`, exitCode: 1 });
-    } else {
-        s.stop(`❌ Failed to ${verb} secrets: ${error.message}`);
+        return failCommand({ message: failureMessage, hint: failureHint, exitCode: 1 });
     }
+    s.stop(failureMessage);
+    if (failureHint) console.log(color.dim(failureHint));
 
     return failCommand({ exitCode: 1 });
 }
@@ -450,6 +463,10 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
     const s = spinner();
     s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
 
+    // BUG-161: write progress for the catch below — names the post-vault
+    // follow-up step when one fails, so the report says the vault is
+    // updated instead of misreporting a failed push.
+    let postVaultStep = null;
     try {
         // 1. Read and parse the local .env file
         const envPath = path.resolve(process.cwd(), resolvedFilePath);
@@ -683,6 +700,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
             keysUnchanged = false;
         }
         if (!keysUnchanged) {
+            postVaultStep = 'secret_keys.json write';
             await atomicWriteFile(keysFilePath, nextKeysContent);
         }
 
@@ -751,6 +769,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
                 const restartSpinner = spinner();
                 restartSpinner.start('Triggering rolling ECS restart...');
                 try {
+                    postVaultStep = 'ECS restart';
                     await ecsClient.send(new UpdateServiceCommand({
                         cluster,
                         service,
@@ -797,6 +816,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
             s,
             opts,
             projectName: resolvedProjectName,
+            postVaultStep,
             notFoundMessage: `❌ Secrets Vault "${secretVaultId(resolvedProjectName)}" does not exist in AWS yet.`,
             notFoundGuidance: [
                 `Run ${color.cyan('npx --yes grada-run apply')} first to provision the infrastructure and Secrets Manager vault.`,
@@ -849,8 +869,9 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
         const envPath = path.resolve(process.cwd(), resolvedFilePath);
         let localSecrets = {};
         let localExists = true;
+        let envContent = null;
         try {
-            const envContent = await fs.readFile(envPath, 'utf-8');
+            envContent = await fs.readFile(envPath, 'utf-8');
             localSecrets = dotenv.parse(envContent);
         } catch (fsError) {
             if (fsError.code === 'ENOENT') {
@@ -896,13 +917,16 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             ...Object.keys(localSecrets),
             ...remoteKeys.filter((k) => !Object.hasOwn(localSecrets, k)),
         ];
-        // BUG-161: the merge appends remote-only keys (reviving local
-        // deletions) — name what came back instead of syncing silently.
+        // The merge appends remote-only keys (reviving local deletions)
+        // — name what came back instead of syncing silently.
         const appended = localExists ? remoteKeys.filter((k) => !Object.hasOwn(localSecrets, k)) : [];
         if (appended.length > 0) {
             console.log(color.yellow(`⚠️  Pulled ${appended.length} key${appended.length === 1 ? '' : 's'} not present locally (revived deletions?): ${appended.join(', ')}`));
         }
-        const unrepresentable = orderedKeys.filter((key) =>
+        // Only keys being added/overwritten can block the write: a
+        // local-only exotic value must not abort an unrelated sync.
+        const writtenKeys = remoteKeys.filter((key) => !Object.hasOwn(localSecrets, key) || overwrite);
+        const unrepresentable = writtenKeys.filter((key) =>
             key === '__proto__' || quoteEnvValue(merged[key]) === null
         );
         if (unrepresentable.length > 0) {
@@ -914,7 +938,12 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             abort.code = 'SECRETS_PULL_UNREPRESENTABLE_VALUE';
             throw abort;
         }
-        await fs.writeFile(envPath, serializeEnv(orderedKeys, merged));
+        // Skip the write when the file is already byte-identical so
+        // in-sync pulls don't strip comments/formatting for no reason.
+        const nextEnvContent = serializeEnv(orderedKeys, merged);
+        if (!localExists || envContent !== nextEnvContent) {
+            await fs.writeFile(envPath, nextEnvContent);
+        }
 
         outro(`Successfully synced ${remoteKeys.length} secrets to ${resolvedFilePath}`);
 

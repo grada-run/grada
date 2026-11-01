@@ -1571,6 +1571,10 @@ describe('terraform template safety nets (carried P4s)', () => {
         const content = await readTf(file);
         expect(content).toMatch(/max_allocated_storage\s*=\s*200/);
         expect(content).toMatch(/backup_retention_period\s*=\s*7/);
+        // BUG-111 remainder: explicit backup + maintenance windows so
+        // AWS never picks peak-hour defaults.
+        expect(content).toMatch(/backup_window\s*=\s*"[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}"/);
+        expect(content).toMatch(/maintenance_window\s*=\s*"[a-z]{3}:[0-9]{2}:[0-9]{2}-[a-z]{3}:[0-9]{2}:[0-9]{2}"/);
     });
 
     it('storage addon versions the bucket and expires old versions', async () => {
