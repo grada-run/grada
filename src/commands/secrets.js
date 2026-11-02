@@ -938,11 +938,17 @@ async function pullSecretsMain(envFilePath, projectName, options = {}) {
             abort.code = 'SECRETS_PULL_UNREPRESENTABLE_VALUE';
             throw abort;
         }
-        // Skip the write when the file is already byte-identical so
-        // in-sync pulls don't strip comments/formatting for no reason.
-        const nextEnvContent = serializeEnv(orderedKeys, merged);
-        if (!localExists || envContent !== nextEnvContent) {
-            await fs.writeFile(envPath, nextEnvContent);
+        // Skip the write when the merge changes nothing semantically.
+        // Byte comparison always differs on commented files
+        // (serializeEnv emits canonical lines), so compare parsed
+        // content instead: same keys + same values means the file —
+        // comments and all — already holds exactly this state.
+        const localKeys = Object.keys(localSecrets);
+        const semanticallyEqual = localExists
+            && localKeys.length === orderedKeys.length
+            && orderedKeys.every((key) => Object.hasOwn(localSecrets, key) && String(localSecrets[key]) === String(merged[key]));
+        if (!semanticallyEqual) {
+            await fs.writeFile(envPath, serializeEnv(orderedKeys, merged));
         }
 
         outro(`Successfully synced ${remoteKeys.length} secrets to ${resolvedFilePath}`);

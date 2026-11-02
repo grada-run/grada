@@ -683,6 +683,32 @@ describe('Secrets Pull Command', () => {
         expect(await fs.readFile('.env', 'utf-8')).toBe('A="1"\n');
     });
 
+    // BUG-160 remainder: byte comparison always differs on commented
+    // files (serializeEnv emits canonical lines), so compare parsed
+    // content — an in-sync commented file must keep its comments.
+    it('leaves a commented .env untouched when pull is semantically in sync', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ A: '1' }) });
+        await fs.writeFile('.env', '# managed by grada\nA="1"\n');
+        const past = new Date(Date.now() - 60000);
+        await fs.utimes('.env', past, past);
+
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(result.synced).toBe(1);
+        expect((await fs.stat('.env')).mtimeMs).toBe(past.getTime());
+        expect(await fs.readFile('.env', 'utf-8')).toBe('# managed by grada\nA="1"\n');
+    });
+
+    it('rewrites a commented .env when remote values actually changed', async () => {
+        mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ A: '2' }) });
+        await fs.writeFile('.env', '# managed by grada\nA="1"\n');
+
+        const result = await pullSecrets('.env', 'my-project', { isHeadless: true });
+
+        expect(result.synced).toBe(1);
+        expect(await fs.readFile('.env', 'utf-8')).toBe('A="2"\n');
+    });
+
     // BUG-160: the unrepresentable check ranged over every key incl.
     // local-only ones, so a local-only exotic value blocked unrelated
     // syncs. Only added/overwritten keys can block the write.

@@ -82,6 +82,12 @@ resource "aws_rds_cluster" "postgres" {
   skip_final_snapshot = true
   storage_encrypted   = true
 
+  # Match the instance engines: 7-day retention with explicit off-peak
+  # UTC windows instead of AWS-assigned ones (BUG-203).
+  backup_retention_period      = 7
+  preferred_backup_window      = "03:00-04:00"
+  preferred_maintenance_window = "sun:04:00-sun:05:00"
+
   # grada destroy lifts this only via --allow-data-loss (or a per-run
   # data-loss confirm); grada snapshots the database first unless the
   # flag says the data may go. grada destroy also pre-wakes stopped

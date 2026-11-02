@@ -526,6 +526,10 @@ async function runDbMigrateMain(input = {}) {
         const exitCode = outcome.exitCode;
         const stoppedReason = outcome.stoppedReason;
         if (exitCode === 0) {
+            // Owner pairs its own start/stop: the runner usually stops
+            // first (idempotent no-op then), but success must never
+            // depend on a callee for the spinner lifecycle (BUG-202).
+            try { s.stop(color.green('Migration succeeded.')); } catch { /* already stopped */ }
             console.log(color.green('\n✅ Migration succeeded.'));
             await trackSuccess('db_migrate_run', { projectName, cmd_source: cmdSource, ci_setup: false });
             outro(color.green('Done.'));

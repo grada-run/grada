@@ -1577,6 +1577,15 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(content).toMatch(/maintenance_window\s*=\s*"[a-z]{3}:[0-9]{2}:[0-9]{2}-[a-z]{3}:[0-9]{2}:[0-9]{2}"/);
     });
 
+    // BUG-203: the Aurora cluster carried no retention or windows
+    // while both instance engines do — same 7 days + off-peak UTC.
+    it('aurora cluster keeps 7-day retention and explicit preferred windows', async () => {
+        const content = await readTf('database-aurora-postgresql.tf');
+        expect(content).toMatch(/backup_retention_period\s*=\s*7/);
+        expect(content).toMatch(/preferred_backup_window\s*=\s*"[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}"/);
+        expect(content).toMatch(/preferred_maintenance_window\s*=\s*"[a-z]{3}:[0-9]{2}:[0-9]{2}-[a-z]{3}:[0-9]{2}:[0-9]{2}"/);
+    });
+
     it('storage addon versions the bucket and expires old versions', async () => {
         const s3 = await readTf('addons', 's3.tf');
         expect(s3).toContain('aws_s3_bucket_versioning');
