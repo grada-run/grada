@@ -303,6 +303,60 @@ export function analyzeAstroConfig(targetDir) {
 // framework markers. Pure: reads files under `cwd`, never throws (malformed
 // or unreadable files fall through to the next marker). Returns the shell
 // command string or null when nothing matches.
+// ORM runner matrix (npx-trap fix): stripped runners have no npm/npx,
+// so marker-detected ORMs map to compiled node commands instead of
+// task-guaranteed-to-fail shims. Returns { command, orm } or null.
+// - Drizzle (dep or config): the prescribed bundle path. The file may
+//   not exist until the user builds — callers warn about that.
+// - Prisma v6/v7 (schema or dep): the direct CLI entry. v8 moved the
+//   entry (dist/prisma.js) and other majors are unverified, so only
+//   6/7 map; anything else falls through to the npx form (which the
+//   stripped-runner guard refuses with a hint).
+export function detectOrmMigrationCommand(cwd = process.cwd()) {
+    const readJson = (file) => {
+        try {
+            return JSON.parse(fsSync.readFileSync(path.join(cwd, file), 'utf-8'));
+        } catch {
+            return null;
+        }
+    };
+    const exists = (file) => {
+        try {
+            return fsSync.existsSync(path.join(cwd, file));
+        } catch {
+            return false;
+        }
+    };
+    const pkg = readJson('package.json');
+    const deps = pkg && typeof pkg === 'object'
+        ? { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
+        : {};
+    if (deps['drizzle-kit'] || deps['drizzle-orm']
+        || exists('drizzle.config.ts') || exists('drizzle.config.js') || exists('drizzle.config.mjs')) {
+        return { command: 'node ./dist/migrate.cjs', orm: 'drizzle' };
+    }
+    const hasPrismaMarkers = exists(path.join('prisma', 'schema.prisma')) || deps.prisma;
+    if (hasPrismaMarkers) {
+        const major = /^\D*(\d+)/.exec(String(deps.prisma ?? ''))?.[1];
+        if (major === '6' || major === '7') {
+            return { command: 'node ./node_modules/prisma/build/index.js migrate deploy', orm: 'prisma' };
+        }
+    }
+    return null;
+}
+
+const ORM_DISPLAY_NAMES = { drizzle: 'Drizzle ORM', prisma: 'Prisma' };
+
+// Shared refusal-hint sentence naming the mapped ORM command, so the
+// migrate/init guard sites can't skew. Empty when nothing maps.
+// `flagForm` carries the caller's joiner ('--cmd ' vs '--setup-ci-migrate=').
+export function ormMappedHintSegment(cwd, flagForm) {
+    const mapped = detectOrmMigrationCommand(cwd);
+    if (!mapped) return '';
+    const label = ORM_DISPLAY_NAMES[mapped.orm] || mapped.orm;
+    return ` Detected ${label} — re-run with ${flagForm}"${mapped.command}" instead`;
+}
+
 export function detectMigrationCommand(cwd = process.cwd()) {
     const readJson = (file) => {
         try {
@@ -337,17 +391,17 @@ export function detectMigrationCommand(cwd = process.cwd()) {
         return 'npm run migrate';
     }
 
-    // 2. Prisma: schema file or dependency in either dep block.
+    // 2. ORM matrix: stripped-runner-safe node commands win over shims.
+    const ormMapped = detectOrmMigrationCommand(cwd);
+    if (ormMapped) return ormMapped.command;
+
+    // 3. Unmappable Prisma (other majors, unresolvable range): legacy npx
+    // form, which the stripped-runner guard refuses with a hint.
     const deps = pkg && typeof pkg === 'object'
         ? { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
         : {};
     if (exists(path.join('prisma', 'schema.prisma')) || deps.prisma) {
         return 'npx prisma migrate deploy';
-    }
-
-    // 3. Drizzle: config file in any supported extension.
-    if (exists('drizzle.config.ts') || exists('drizzle.config.js') || exists('drizzle.config.mjs')) {
-        return 'npx drizzle-kit migrate';
     }
 
     // 4. Alembic.

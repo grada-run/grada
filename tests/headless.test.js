@@ -869,10 +869,63 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
-    it('headless --setup-ci-migrate refuses detected npm-shim commands on stripped runners', async () => {
+    it('headless --setup-ci-migrate maps detected Drizzle markers to the node migrator', async () => {
         process.chdir(tmpDir);
-        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { drizzle: '1.0.0' } }));
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { 'drizzle-orm': '^0.30.0' } }));
         await fs.writeFile(path.join(tmpDir, 'drizzle.config.ts'), 'export default {};');
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--needsDatabase', '--setup-ci-migrate']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expectNoInteractivePrompts();
+            expect(exitSpy).not.toHaveBeenCalled();
+            const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+            expect(deployYml).toContain('# grada:db-migrate-start');
+            expect(deployYml).toContain('node ./dist/migrate.cjs');
+            const warnings = clack.mockLogWarn.mock.calls.map(([message]) => String(message));
+            expect(warnings.find((message) => message.includes('Detected Drizzle ORM'))).toBeDefined();
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('headless --setup-ci-migrate maps detected Prisma v6 markers to the node CLI entry', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { prisma: '^6.0.0' } }));
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--needsDatabase', '--setup-ci-migrate']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expectNoInteractivePrompts();
+            expect(exitSpy).not.toHaveBeenCalled();
+            const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
+            expect(deployYml).toContain('node ./node_modules/prisma/build/index.js migrate deploy');
+            const warnings = clack.mockLogWarn.mock.calls.map(([message]) => String(message));
+            expect(warnings.find((message) => message.includes('Detected Prisma'))).toBeDefined();
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('headless --setup-ci-migrate refuses detected npm-shim commands with no ORM mapping', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ scripts: { 'db:migrate': 'knex migrate:latest' } }));
         const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--needsDatabase', '--setup-ci-migrate']);
         const spies = mockConsoleTrio();
         const { exitSpy, logSpy } = spies;
@@ -889,6 +942,31 @@ describe('Headless contract (automation-safe)', () => {
             expect(exitSpy).toHaveBeenCalledWith(1);
             expect(provisionStateBucket).not.toHaveBeenCalled();
             expect(logSpy.mock.calls.flat().join('\n')).toContain('node ./');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('headless refusal names the mapped ORM command when markers exist', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({
+            scripts: { 'db:migrate': 'prisma migrate deploy' },
+            dependencies: { prisma: '^6.0.0' },
+        }));
+        const parsed = parseCliArgs(['--headless', '--framework=nextjs', '--needsDatabase', '--setup-ci-migrate']);
+        const spies = mockConsoleTrio();
+        const { logSpy } = spies;
+
+        try {
+            const result = await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expect(result).toMatchObject({ ok: false, reason: 'npm-cmd-stripped-runner' });
+            expect(logSpy.mock.calls.flat().join('\n')).toContain('node ./node_modules/prisma/build/index.js migrate deploy');
         } finally {
             spies.restore();
         }

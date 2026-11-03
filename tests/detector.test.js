@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { analyzeNextConfig, detectFramework, detectMigrationCommand, frameworkDefaultPort, frameworkUsesStrippedRunner, isNpmShimCommand, dockerfileStripsNpmShims, toHclStringArray } from '../src/utils/detector.js';
+import { analyzeNextConfig, detectFramework, detectMigrationCommand, detectOrmMigrationCommand, frameworkDefaultPort, frameworkUsesStrippedRunner, isNpmShimCommand, dockerfileStripsNpmShims, ormMappedHintSegment, toHclStringArray } from '../src/utils/detector.js';
 
 function makeProject(files = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-migrate-'));
@@ -40,11 +40,84 @@ describe('detectMigrationCommand', () => {
         }))).toBe('npx prisma migrate deploy');
     });
 
-    it('detects Drizzle via config file extensions', () => {
+    it('maps Drizzle markers to the bundled node migrator', () => {
         for (const file of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs']) {
             expect(detectMigrationCommand(makeProject({ [file]: 'export default {}' })))
-                .toBe('npx drizzle-kit migrate');
+                .toBe('node ./dist/migrate.cjs');
         }
+        for (const dep of ['drizzle-kit', 'drizzle-orm']) {
+            expect(detectMigrationCommand(makeProject({
+                'package.json': JSON.stringify({ dependencies: { [dep]: '^0.30.0' } }),
+            }))).toBe('node ./dist/migrate.cjs');
+            expect(detectMigrationCommand(makeProject({
+                'package.json': JSON.stringify({ devDependencies: { [dep]: '^0.30.0' } }),
+            }))).toBe('node ./dist/migrate.cjs');
+        }
+    });
+
+    it('maps Prisma v6/v7 markers to the direct node CLI entry', () => {
+        for (const version of ['^6.0.0', '~7.2.1', '6.19.3']) {
+            expect(detectMigrationCommand(makeProject({
+                'package.json': JSON.stringify({ dependencies: { prisma: version } }),
+            }))).toBe('node ./node_modules/prisma/build/index.js migrate deploy');
+        }
+        expect(detectMigrationCommand(makeProject({
+            'prisma/schema.prisma': 'datasource db {}',
+            'package.json': JSON.stringify({ dependencies: { prisma: '^6.0.0' } }),
+        }))).toBe('node ./node_modules/prisma/build/index.js migrate deploy');
+    });
+
+    it('keeps the npx fallback for unmappable Prisma (v5, v8, unresolvable)', () => {
+        for (const version of ['^5.0.0', '^8.0.0', 'latest', '*']) {
+            expect(detectMigrationCommand(makeProject({
+                'package.json': JSON.stringify({ dependencies: { prisma: version } }),
+            }))).toBe('npx prisma migrate deploy');
+        }
+        expect(detectMigrationCommand(makeProject({ 'prisma/schema.prisma': 'datasource db {}' })))
+            .toBe('npx prisma migrate deploy');
+    });
+
+    it('exposes the mapped ORM command for hints and warnings', () => {
+        expect(detectOrmMigrationCommand(makeProject({
+            'package.json': JSON.stringify({ dependencies: { 'drizzle-orm': '^0.30.0' } }),
+        }))).toEqual({ command: 'node ./dist/migrate.cjs', orm: 'drizzle' });
+        expect(detectOrmMigrationCommand(makeProject({
+            'package.json': JSON.stringify({ dependencies: { prisma: '^7.0.0' } }),
+        }))).toEqual({ command: 'node ./node_modules/prisma/build/index.js migrate deploy', orm: 'prisma' });
+        expect(detectOrmMigrationCommand(makeProject({
+            'package.json': JSON.stringify({ dependencies: { prisma: '^8.0.0' } }),
+        }))).toBeNull();
+        expect(detectOrmMigrationCommand(makeProject({ 'manage.py': '# django' }))).toBeNull();
+        expect(detectOrmMigrationCommand(makeProject({}))).toBeNull();
+    });
+
+    it('builds the mapped-hint segment for refusal hints and warnings', () => {
+        const drizzle = makeProject({
+            'package.json': JSON.stringify({ dependencies: { 'drizzle-orm': '^0.30.0' } }),
+        });
+        expect(ormMappedHintSegment(drizzle, '--cmd '))
+            .toBe(' Detected Drizzle ORM — re-run with --cmd "node ./dist/migrate.cjs" instead');
+        expect(ormMappedHintSegment(drizzle, '--setup-ci-migrate='))
+            .toBe(' Detected Drizzle ORM — re-run with --setup-ci-migrate="node ./dist/migrate.cjs" instead');
+        const prisma = makeProject({
+            'package.json': JSON.stringify({ dependencies: { prisma: '^6.0.0' } }),
+        });
+        expect(ormMappedHintSegment(prisma, '--cmd '))
+            .toBe(' Detected Prisma — re-run with --cmd "node ./node_modules/prisma/build/index.js migrate deploy" instead');
+        expect(ormMappedHintSegment(makeProject({}))).toBe('');
+        expect(ormMappedHintSegment(makeProject({
+            'package.json': JSON.stringify({ dependencies: { prisma: '^8.0.0' } }),
+        }))).toBe('');
+    });
+
+    it('keeps explicit scripts ahead of ORM markers', () => {
+        const dir = makeProject({
+            'package.json': JSON.stringify({
+                scripts: { 'db:migrate': 'node custom.js' },
+                dependencies: { 'drizzle-orm': '^0.30.0' },
+            }),
+        });
+        expect(detectMigrationCommand(dir)).toBe('npm run db:migrate');
     });
 
     it('detects Alembic, Django, and Rails markers', () => {

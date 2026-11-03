@@ -59,7 +59,7 @@ The printed connection string already percent-encodes special characters in the 
 
 Run schema migrations or seed scripts (Prisma, Drizzle, Alembic, Django, Rails, or anything custom) inside your VPC as a short-lived ECS task — no tunnel, no local database access needed. Logs stream live to your terminal, and the command exits with your migration's own exit code.
 
-When you omit `--cmd`, the project is inspected for a known migration setup (`db:migrate` / `migrate` npm scripts, Prisma, Drizzle, Alembic, Django, Rails) and the detected command is used (in CI) or offered for confirmation (interactively).
+When you omit `--cmd`, the project is inspected for a known migration setup (`db:migrate` / `migrate` npm scripts, Prisma, Drizzle, Alembic, Django, Rails) and the detected command is used (in CI) or offered for confirmation (interactively). Drizzle and Prisma v6/v7 projects map straight to stripped-runner-safe commands (`node ./dist/migrate.cjs`, or the Prisma CLI entry) instead of `npx` shims — make sure your build bundles the migrator, and (for Prisma) that `prisma` is a production dependency.
 
 > **Stripped runners:** Grada's Node-family images remove `npm`/`npx`/`yarn` from the production stage for security, so `npm ...` / `npx ...` commands fail with `command not found` inside the task. Bundle a framework-compiled runner and pass it explicitly (e.g. `--cmd "node ./dist/migrate.cjs"`). When your `Dockerfile` strips those binaries, `db migrate` refuses `npm`/`npx` commands headless (`NPM_CMD_STRIPPED_RUNNER`) and warns loudly interactively — the same guard covers `add cron` and `init --setup-ci-migrate`. Detection looks for the `/usr/local/bin/npx` removal outside `#` comments, so mentioning the path in a comment won't trip the guard.
 

@@ -1555,6 +1555,21 @@ describe('db migrate: --setup-ci and gate injection', () => {
         expect(updated).not.toContain('# grada:db-migrate-start');
     });
 
+    it('names the mapped ORM command in the stripped-runner refusal hint', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        writeWorkflow(dir);
+        fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22-alpine AS runner\nRUN rm -rf /usr/local/bin/npx\n');
+        fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { prisma: '^6.0.0' } }));
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, isHeadless: true,
+            cmd: 'npx prisma migrate deploy',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('npm-cmd-stripped-runner');
+        expect(stripVTControlCharacters(output.join('\n'))).toContain('node ./node_modules/prisma/build/index.js migrate deploy');
+    });
+
     it('interactive --setup-ci warns but proceeds on a stripped runner', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
         const workflowFile = writeWorkflow(dir);

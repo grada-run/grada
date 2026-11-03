@@ -18,7 +18,7 @@ import {
     readFileSafe,
     readTerraformComputeTarget,
 } from '../../utils/resolvers.js';
-import { detectMigrationCommand, isNpmShimCommand, dockerfileStripsNpmShims } from '../../utils/detector.js';
+import { detectMigrationCommand, isNpmShimCommand, dockerfileStripsNpmShims, ormMappedHintSegment } from '../../utils/detector.js';
 import { resolveContainer } from '../../utils/ecs.js';
 import { runEphemeralEcsTask } from '../../utils/ecs-runner.js';
 import { parseTimeoutSeconds } from '../../utils/system.js';
@@ -336,10 +336,11 @@ async function runDbMigrateMain(input = {}) {
     // headless; warn loudly (and proceed) interactively. Fail-open when
     // no Dockerfile is present — nothing to prove breakage against.
     if (isNpmShimCommand(resolvedCmd) && dockerfileStripsNpmShims(readFileSafe(path.join(cwd, 'Dockerfile')))) {
+        const ormHint = ormMappedHintSegment(cwd, '--cmd ');
         if (headless) {
             return failCommand({
                 message: `\n✖ Refusing to run "${resolvedCmd}": your Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" inside the task.\n`,
-                hint: '  Bundle a framework-compiled runner instead and re-run with an explicit node-based command, e.g. --cmd "node ./dist/migrate.cjs". Ensure your Dockerfile builds the bundle and copies it into the runner image.\n',
+                hint: `  Bundle a framework-compiled runner instead and re-run with an explicit node-based command, e.g. --cmd "node ./dist/migrate.cjs". Ensure your Dockerfile builds the bundle and copies it into the runner image${ormHint}.\n`,
                 event: 'db_migrate_run',
                 telemetry: { projectName, cmd_source: cmdSource, ci_setup: setupCi, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
                 errorCode: 'NPM_CMD_STRIPPED_RUNNER',
@@ -347,7 +348,7 @@ async function runDbMigrateMain(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
-        console.log(color.yellow(`⚠️  "${resolvedCmd}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.`));
+        console.log(color.yellow(`⚠️  "${resolvedCmd}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.${ormHint}`));
         trackEvent('npm_cmd_stripped_runner', { projectName, cmd_source: cmdSource, ci_setup: setupCi });
     }
 

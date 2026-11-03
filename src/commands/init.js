@@ -18,6 +18,8 @@ import {
     frameworkDefaultPort,
     frameworkUsesStrippedRunner,
     isNpmShimCommand,
+    detectOrmMigrationCommand,
+    ormMappedHintSegment,
     SUPPORTED_FRAMEWORKS
 } from '../utils/detector.js';
 import { detectProjectCapabilities } from '../utils/capabilities.js';
@@ -577,17 +579,18 @@ async function mainStackMain(input = {}) {
     // gate would fail 100% of deploys. Fail fast headless (re-run with an
     // explicit node command); warn loudly interactively and continue.
     if (migrationGateEnabled && isNpmShimCommand(migrationCmd) && target === 'ecs' && frameworkUsesStrippedRunner(config.framework)) {
+        const ormHint = ormMappedHintSegment(dirConfig.targetDir, '--setup-ci-migrate=');
         if (!isInteractive) {
             return failCommand({
                 message: `\n✖ Refusing to wire the pre-deploy migration gate with "${migrationCmd}": the generated ${config.framework} Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" on every deploy.\n`,
-                hint: '  Re-run with an explicit node-based command, e.g. `--setup-ci-migrate="node ./dist/migrate.cjs"`, or wire the gate later with `grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci`. Ensure your Dockerfile builds the bundle and copies it into the runner image.\n',
+                hint: `  Re-run with an explicit node-based command, e.g. \`--setup-ci-migrate="node ./dist/migrate.cjs"\`, or wire the gate later with \`grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci\`. Ensure your Dockerfile builds the bundle and copies it into the runner image${ormHint}.\n`,
                 event: 'cli-error',
                 telemetry: { step: 'init_setup', cmd_source: migrationCmdSource, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
                 errorCode: 'NPM_CMD_STRIPPED_RUNNER',
                 reason: 'npm-cmd-stripped-runner',
             });
         }
-        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.`));
+        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.${ormHint}`));
         trackEvent('npm_cmd_stripped_runner', { projectName: dirConfig.actualProjectName, cmd_source: migrationCmdSource, ci_setup: true });
     }
 
@@ -1094,6 +1097,19 @@ async function mainStackMain(input = {}) {
         }
         if (upcoming.mysql) {
             console.log(color.dim('  💡 MySQL dependencies detected: RDS currently provisions PostgreSQL; MySQL support is coming soon.'));
+        }
+    }
+
+    // ORM runner matrix: when the gate was auto-wired to a mapped ORM
+    // command, say which one and what the user must guarantee (the
+    // bundle path / production dependency), while the run is fresh.
+    if (migrationGateEnabled && migrationCmdSource === 'detected') {
+        const ormMapped = detectOrmMigrationCommand(dirConfig.targetDir);
+        if (ormMapped && ormMapped.command === migrationCmd) {
+            const ormWarning = ormMapped.orm === 'drizzle'
+                ? 'Detected Drizzle ORM. Configured migration gate to use \'node ./dist/migrate.cjs\'. Ensure your build script bundles your migrator to this path.'
+                : 'Detected Prisma. Configured migration gate to run via \'node_modules/prisma/build/index.js\'. Ensure Prisma is in your production dependencies.';
+            log.warn(color.yellow(`⚠️  ${ormWarning}`));
         }
     }
 
