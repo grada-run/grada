@@ -131,7 +131,7 @@ function runCommand(promise) {
 // Help wins over every subcommand: no flow — destructive or otherwise —
 // may execute from a help invocation. `db` keeps its own usage path
 // inside runDb (db usage for `db --help` and every `db <leaf> --help`,
-// exit 0; bare `db` still reports its missing subcommand).
+// exit 0; bare `db` prints usage the same untracked way).
 const wantsHelp = positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h');
 // Version wins over every subcommand like help does — but unlike help it
 // needs no `db` exemption: the version is global, identical everywhere.

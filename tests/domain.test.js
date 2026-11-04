@@ -598,7 +598,7 @@ describe('workspace guards', () => {
 });
 
 describe('domain: guards and validation order', () => {
-    it('fails unknown and missing subcommands with UNKNOWN_DOMAIN_SUBCOMMAND', async () => {
+    it('fails unknown subcommands with UNKNOWN_DOMAIN_SUBCOMMAND', async () => {
         const unknown = await runDomain({ subcommand: 'frobnicate' });
         expect(unknown.ok).toBe(false);
         expect(unknown.reason).toBe('unknown-domain-subcommand');
@@ -607,11 +607,21 @@ describe('domain: guards and validation order', () => {
             success: false, error_code: 'UNKNOWN_DOMAIN_SUBCOMMAND',
         }));
         expect(capturedOutput()).toContain('Usage:');
+    });
 
-        vi.clearAllMocks();
+    it('treats a missing subcommand as help: usage, exit 0, untracked', async () => {
         const missing = await runDomain({ cwd: makeTmp() });
-        expect(missing.ok).toBe(false);
-        expect(missing.reason).toBe('unknown-domain-subcommand');
+        expect(missing.ok).toBe(true);
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(trackEvent).not.toHaveBeenCalled();
+        expect(capturedOutput()).toContain('Usage:');
+
+        for (const bad of [null, '', '   ', 42, ['add']]) {
+            vi.clearAllMocks();
+            const result = await runDomain({ cwd: makeTmp(), subcommand: bad });
+            expect(result.ok).toBe(true);
+            expect(trackEvent).not.toHaveBeenCalled();
+        }
     });
 
     it('reports a closed-enum subcommand without echoing user input', async () => {
@@ -625,16 +635,12 @@ describe('domain: guards and validation order', () => {
 
         vi.clearAllMocks();
         await runDomain({ cwd: makeTmp() });
-        expect(trackEvent).toHaveBeenCalledWith('domain_run', expect.objectContaining({
-            success: false, error_code: 'UNKNOWN_DOMAIN_SUBCOMMAND', subcommand: 'none',
-        }));
+        expect(trackEvent).not.toHaveBeenCalled();
 
         for (const bad of [null, '', '   ', 42, ['add']]) {
             vi.clearAllMocks();
             await runDomain({ cwd: makeTmp(), subcommand: bad });
-            expect(trackEvent).toHaveBeenCalledWith('domain_run', expect.objectContaining({
-                success: false, subcommand: 'none',
-            }));
+            expect(trackEvent).not.toHaveBeenCalled();
         }
 
         vi.clearAllMocks();
@@ -681,8 +687,7 @@ describe('domain: guards and validation order', () => {
     it('hardens runDomain against non-object input', async () => {
         for (const bad of [null, 42, 'add', []]) {
             const result = await runDomain(bad);
-            expect(result.ok).toBe(false);
-            expect(result.reason).toBe('unknown-domain-subcommand');
+            expect(result).toEqual({ ok: true });
         }
     });
 });

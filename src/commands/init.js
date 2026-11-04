@@ -903,7 +903,7 @@ async function mainStackMain(input = {}) {
         const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION }) : null;
         if (gated) {
             atomicWriteFileSync(deployYmlPath, gated);
-            console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml'));
+            console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml (snapshot first, then migrate)'));
         } else {
             log.warn(color.yellow('⚠️  Could not wire the migration gate: the deploy workflow anchor was not found.'));
         }

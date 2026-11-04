@@ -735,12 +735,12 @@ describe('db: dispatcher', () => {
         }));
     });
 
-    it('reports a missing subcommand', async () => {
+    it('treats a missing subcommand as help: usage, exit 0, untracked', async () => {
         const result = await runDb(['db']);
-        expect(result.ok).toBe(false);
-        expect(result.reason).toBe('unknown-db-subcommand');
+        expect(result.ok).toBe(true);
         expect(stripVTControlCharacters(output.join('\n'))).toContain('Missing db subcommand');
-        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(mockTrackEvent).not.toHaveBeenCalled();
     });
 
     it('routes to each subcommand', async () => {
@@ -775,11 +775,11 @@ describe('db: dispatcher', () => {
         expect(result.reason).toBe('invalid-port');
     });
 
-    it.each([null, 42, true, { port: 'string' }])('runDb(%s) reports a missing subcommand', async (bad) => {
+    it.each([null, 42, true, { port: 'string' }])('runDb(%s) treats non-array input as help', async (bad) => {
         const result = await runDb(bad, null);
-        expect(result.ok).toBe(false);
-        expect(result.reason).toBe('unknown-db-subcommand');
-        expect(exitSpy).toHaveBeenCalledWith(1);
+        expect(result).toEqual({ ok: true });
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(mockTrackEvent).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -1649,6 +1649,34 @@ describe('db migrate: gate helpers', () => {
 
     it('injectMigrationGate returns null without an anchor', () => {
         expect(injectMigrationGate('steps: []', { cmd: 'x' })).toBeNull();
+    });
+
+    it('injectMigrationGate snapshots the database before migrating', () => {
+        const updated = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.44.0' });
+        expect(updated).toContain('- name: Take pre-migration database snapshot');
+        expect(updated).toContain('npx --yes @grada-run/grada@0.44.0 db backup --id "pre-deploy-${{ github.sha }}" --headless');
+        expect(updated.indexOf('Take pre-migration database snapshot'))
+            .toBeLessThan(updated.indexOf('- name: Pre-Deploy Database Migration'));
+        // The backup step honors the credential gate like its sibling.
+        const backupBlock = updated.split('Take pre-migration database snapshot')[1].split('- name: Pre-Deploy')[0];
+        expect(backupBlock).toContain(`if: steps.aws-creds.outcome == 'success'`);
+        // Refreshing replaces the whole block: still exactly one snapshot step.
+        const refreshed = injectMigrationGate(updated, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.44.0' });
+        expect(refreshed.match(/Take pre-migration database snapshot/g)).toHaveLength(1);
+    });
+
+    it('injectPreviewMigrationGate stays snapshot-free (ephemeral preview DBs)', () => {
+        const preview = [
+            'name: Ephemeral PR Preview',
+            'jobs:',
+            '  deploy-preview:',
+            '    steps:',
+            '      - name: Comment PR',
+            '        uses: actions/github-script@v7',
+        ].join('\n');
+        const updated = injectPreviewMigrationGate(preview, { cmd: 'node ./dist/migrate.cjs' });
+        expect(updated).toContain('- name: Preview Database Migration');
+        expect(updated).not.toContain('db backup');
     });
 
     it('buildRunnerInvocation pins known versions and floats unknown ones', () => {
@@ -2737,6 +2765,22 @@ describe('Command: db backup (mocked AWS)', () => {
         expect(result.reason).toBe('error');
         expect(mockTrackEvent).toHaveBeenCalledWith('db_backup_run', expect.objectContaining({
             success: false, error_code: 'SnapshotQuotaExceeded',
+        }));
+    });
+
+    it('treats an existing snapshot id as success (idempotent retry)', async () => {
+        const exists = new Error('snapshot already exists');
+        exists.name = 'DBSnapshotAlreadyExists';
+        const rdsClient = mockRdsBackupClient({
+            createError: exists,
+            snapshotScript: [
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available' }] },
+            ],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient }));
+        expect(result).toEqual({ ok: true, snapshotId: 's1', status: 'available' });
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_backup_run', expect.objectContaining({
+            success: true, waited: true,
         }));
     });
 

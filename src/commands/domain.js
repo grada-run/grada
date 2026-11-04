@@ -386,24 +386,28 @@ async function runDomainMain(input = {}) {
     intro(color.bgCyan(color.black(' grada domain 🌐 ')));
 
     if (!DOMAIN_SUBCOMMANDS.includes(subcommand)) {
-        // Closed enum only — never echo the raw user token into telemetry.
-        const telemetrySubcommand = typeof options.subcommand === 'string' && options.subcommand.trim() !== ''
-            ? 'unknown'
-            : 'none';
+        // Blank input trims to '' rather than undefined — same missing
+        // case the old 'none' telemetry bucket covered.
+        if (subcommand === undefined || subcommand === '') {
+            // Bare invocation is help-seeking, not an error: usage + exit
+            // 0, untracked like --help (keeps probe noise out of error
+            // telemetry).
+            console.log(color.yellow('\n⚠ Missing domain subcommand.'));
+            console.log('');
+            printDomainUsage();
+            console.log('');
+            return { ok: true };
+        }
         return failCommand({
             noExit,
             print: () => {
-                if (subcommand === undefined) {
-                    console.log(color.yellow('\n⚠ Missing domain subcommand.'));
-                } else {
-                    console.log(color.red(`\n✖ Unknown domain subcommand "${options.subcommand}".`));
-                }
+                console.log(color.red(`\n✖ Unknown domain subcommand "${options.subcommand}".`));
                 console.log('');
                 printDomainUsage();
                 console.log('');
             },
             event: 'domain_run',
-            telemetry: { subcommand: telemetrySubcommand },
+            telemetry: { subcommand: 'unknown' },
             errorCode: 'UNKNOWN_DOMAIN_SUBCOMMAND',
             reason: 'unknown-domain-subcommand',
         });

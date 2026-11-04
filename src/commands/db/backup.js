@@ -15,6 +15,12 @@ export const DEFAULT_BACKUP_POLL_INTERVAL_MS = 5000;
 
 const SNAPSHOT_NOT_FOUND_NAMES = new Set(['DBSnapshotNotFound', 'DBSnapshotNotFoundFault']);
 const CLUSTER_SNAPSHOT_NOT_FOUND_NAMES = new Set(['DBClusterSnapshotNotFound', 'DBClusterSnapshotNotFoundFault']);
+const SNAPSHOT_ALREADY_EXISTS_NAMES = new Set([
+    'DBSnapshotAlreadyExists',
+    'DBSnapshotAlreadyExistsFault',
+    'DBClusterSnapshotAlreadyExists',
+    'DBClusterSnapshotAlreadyExistsFault',
+]);
 // Snapshot states that never become available: polling past them only
 // wastes the timeout and misreports.
 const TERMINAL_SNAPSHOT_STATUSES = new Set(['failed', 'deleted', 'deleting']);
@@ -142,25 +148,43 @@ async function runDbBackupMain(input = {}) {
             { Key: 'ManagedBy', Value: 'grada' },
             { Key: 'Project', Value: projectName },
         ];
-        if (isCluster) {
-            await rdsClient.send(new CreateDBClusterSnapshotCommand({
-                DBClusterIdentifier: target.id,
-                DBClusterSnapshotIdentifier: snapshotId,
-                Tags: snapshotTags,
-            }));
-        } else {
-            await rdsClient.send(new CreateDBSnapshotCommand({
-                DBInstanceIdentifier: target.id,
-                DBSnapshotIdentifier: snapshotId,
-                Tags: snapshotTags,
-            }));
+        // An existing id is success, not failure: CI retries and re-runs of
+        // the same migration must not fail just because the snapshot step
+        // already ran. The wait below then resolves its actual state
+        // (available, still creating, or failed) the same as a fresh create.
+        let reusedExisting = false;
+        try {
+            if (isCluster) {
+                await rdsClient.send(new CreateDBClusterSnapshotCommand({
+                    DBClusterIdentifier: target.id,
+                    DBClusterSnapshotIdentifier: snapshotId,
+                    Tags: snapshotTags,
+                }));
+            } else {
+                await rdsClient.send(new CreateDBSnapshotCommand({
+                    DBInstanceIdentifier: target.id,
+                    DBSnapshotIdentifier: snapshotId,
+                    Tags: snapshotTags,
+                }));
+            }
+        } catch (error) {
+            if (error && SNAPSHOT_ALREADY_EXISTS_NAMES.has(error.name)) {
+                reusedExisting = true;
+            } else {
+                throw error;
+            }
         }
 
         if (noWait) {
-            s.stop(color.green('Snapshot creation started.'));
-            console.log(`\n  Snapshot ${color.cyan(snapshotId)} is being created (status: creating).`);
+            if (reusedExisting) {
+                s.stop(color.green('Snapshot already exists.'));
+                console.log(`\n  Snapshot ${color.cyan(snapshotId)} already exists — reusing it.`);
+            } else {
+                s.stop(color.green('Snapshot creation started.'));
+                console.log(`\n  Snapshot ${color.cyan(snapshotId)} is being created (status: creating).`);
+            }
             console.log(color.dim(`  Restore it later with: npx grada-run db restore ${snapshotId}\n`));
-            await trackSuccess('db_backup_run', { projectName, waited: false, db_kind: target.kind });
+            await trackSuccess('db_backup_run', { projectName, waited: false, db_kind: target.kind, reused_existing: reusedExisting });
             outro(color.green('Done.'));
             return { ok: true, snapshotId, status: 'creating' };
         }
@@ -243,7 +267,7 @@ async function runDbBackupMain(input = {}) {
         s.stop(color.green('Snapshot available.'));
         console.log(`\n  Snapshot ${color.cyan(snapshotId)} is ready.`);
         console.log(color.dim(`  Restore it with: npx grada-run db restore ${snapshotId}\n`));
-        await trackSuccess('db_backup_run', { projectName, waited: true, db_kind: target.kind });
+        await trackSuccess('db_backup_run', { projectName, waited: true, db_kind: target.kind, reused_existing: reusedExisting });
         outro(color.green('Done.'));
         return { ok: true, snapshotId, status: 'available' };
     } catch (error) {

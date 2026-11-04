@@ -155,7 +155,7 @@ describe('matrix: db suite (GUARD static × 6)', () => {
     it('still shows usage for missing/unknown subcommands (guard only wraps known ones)', async () => {
         const dir = makeProject('db-usage-static');
         const result = await runDb(['db'], { cwd: dir, json: true });
-        expect(result).toMatchObject({ ok: false, reason: 'unknown-db-subcommand' });
+        expect(result).toMatchObject({ ok: true });
     });
 });
 

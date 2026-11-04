@@ -86,7 +86,7 @@ export function quoteShellArg(value) {
     return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function renderGateBlock({ includeSetupNode, stepName, runLine }) {
+function renderGateBlock({ includeSetupNode, steps }) {
     const lines = [`      ${GATE_START_MARKER}`];
     if (includeSetupNode) {
         lines.push(
@@ -97,16 +97,18 @@ function renderGateBlock({ includeSetupNode, stepName, runLine }) {
             ''
         );
     }
-    lines.push(
-        `      - name: ${stepName}`,
-        // Gates run AWS calls: honor the credential-skip outcome like
-        // every other post-assume step (BUG-138). Neutral on deploy
-        // (a failed assume fails the run before any gate runs).
-        `        if: steps.aws-creds.outcome == 'success'`,
-        '        run: |',
-        `          ${runLine}`,
-        `      ${GATE_END_MARKER}`
-    );
+    for (const { stepName, runLine } of steps) {
+        lines.push(
+            `      - name: ${stepName}`,
+            // Gates run AWS calls: honor the credential-skip outcome like
+            // every other post-assume step (BUG-138). Neutral on deploy
+            // (a failed assume fails the run before any gate runs).
+            `        if: steps.aws-creds.outcome == 'success'`,
+            '        run: |',
+            `          ${runLine}`
+        );
+    }
+    lines.push(`      ${GATE_END_MARKER}`);
     return `${lines.join('\n')}\n`;
 }
 
@@ -132,10 +134,10 @@ export function buildRunnerInvocation(cliVersion) {
 
 // Shared injection core: strips any previous gate, renders the block, and
 // splices it before the anchor step. Returns null without the anchor.
-function injectGateBlock(content, { runLine, stepName, anchor }) {
+function injectGateBlock(content, { steps, anchor }) {
     const base = stripPreviousGateBlock(String(content ?? ''));
     const includeSetupNode = !base.includes('actions/setup-node');
-    const block = renderGateBlock({ includeSetupNode, stepName, runLine });
+    const block = renderGateBlock({ includeSetupNode, steps });
     const anchorIdx = base.indexOf(anchor);
     if (anchorIdx === -1) return null;
     const insertAt = base.lastIndexOf('\n', anchorIdx) + 1;
@@ -147,9 +149,18 @@ function injectGateBlock(content, { runLine, stepName, anchor }) {
 // anchor step is present. Pure and unit-tested.
 export function injectMigrationGate(workflowContent, { cmd, cliVersion } = {}) {
     const taskDefRef = '${{ steps.register-task-def.outputs.task-arn }}';
+    const runner = buildRunnerInvocation(cliVersion);
     return injectGateBlock(workflowContent, {
-        stepName: 'Pre-Deploy Database Migration',
-        runLine: `${buildRunnerInvocation(cliVersion)} db migrate --cmd ${quoteShellArg(cmd)} --task-def "${taskDefRef}" --headless`,
+        steps: [
+            {
+                stepName: 'Take pre-migration database snapshot',
+                runLine: `${runner} db backup --id "pre-deploy-\${{ github.sha }}" --headless`,
+            },
+            {
+                stepName: 'Pre-Deploy Database Migration',
+                runLine: `${runner} db migrate --cmd ${quoteShellArg(cmd)} --task-def "${taskDefRef}" --headless`,
+            },
+        ],
         anchor: '- name: Force ECS deployment',
     });
 }
@@ -160,8 +171,12 @@ export function injectMigrationGate(workflowContent, { cmd, cliVersion } = {}) {
 // service itself via --workspace. Returns null without the anchor.
 export function injectPreviewMigrationGate(workflowContent, { cmd, cliVersion } = {}) {
     return injectGateBlock(workflowContent, {
-        stepName: 'Preview Database Migration',
-        runLine: `${buildRunnerInvocation(cliVersion)} db migrate --cmd ${quoteShellArg(cmd)} --workspace "\${{ env.WORKSPACE }}" --headless`,
+        steps: [
+            {
+                stepName: 'Preview Database Migration',
+                runLine: `${buildRunnerInvocation(cliVersion)} db migrate --cmd ${quoteShellArg(cmd)} --workspace "\${{ env.WORKSPACE }}" --headless`,
+            },
+        ],
         anchor: '- name: Comment PR',
     });
 }
@@ -398,7 +413,7 @@ async function runDbMigrateMain(input = {}) {
         }
         await atomicWriteFile(workflowFile, updated, 'utf8');
         console.log(color.green('\n✅ Pre-deploy migration gate installed in .github/workflows/deploy.yml.'));
-        console.log(color.dim('  Migrations now run against the new image revision before the ECS service updates.\n'));
+        console.log(color.dim('  Each deploy now snapshots the database, then runs migrations against the new image revision before the ECS service updates.\n'));
         if (readTerraformComputeTarget(cwd) === 'ecs') {
             const previewFile = path.join(cwd, '.github', 'workflows', 'preview.yml');
             let previewContent = null;

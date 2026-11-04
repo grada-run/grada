@@ -114,13 +114,20 @@ async function runDbMain(argv = [], extraOptions = {}) {
         return runDbImport({ ...parseDbImportArgs(argv), ...extra });
     }
 
+    if (subcommand === undefined) {
+        // Bare invocation is help-seeking, not an error: usage + exit
+        // 0, untracked like --help (keeps probe noise out of error
+        // telemetry).
+        console.log(color.yellow('\n⚠ Missing db subcommand.'));
+        console.log('');
+        printDbUsage();
+        console.log('');
+        return { ok: true };
+    }
+
     return failCommand({
         print: () => {
-            if (subcommand === undefined) {
-                console.log(color.yellow('\n⚠ Missing db subcommand.'));
-            } else {
-                console.log(color.red(`\n✖ Unknown db subcommand "${subcommand}".`));
-            }
+            console.log(color.red(`\n✖ Unknown db subcommand "${subcommand}".`));
             console.log('');
             printDbUsage();
             console.log('');

@@ -217,7 +217,7 @@ describe('programmatic command context', () => {
     });
 
     it('domain subcommand failures return stamped errors when headless', async () => {
-        const result = await runDomain({ isHeadless: true });
+        const result = await runDomain({ isHeadless: true, subcommand: 'frobnicate' });
         expect(exitSpy).not.toHaveBeenCalled();
         expect(result).toMatchObject({ ok: false, exitCode: 1, reason: 'unknown-domain-subcommand' });
     });
