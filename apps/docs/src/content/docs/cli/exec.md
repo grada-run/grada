@@ -47,6 +47,7 @@ Type `exit` to leave the shell.
 
 ## See also
 
+- [run](/grada/cli/run/) — one-off commands in a fresh, disposable container instead of the live one
 - [status](/grada/cli/status/)
 - [logs](/grada/cli/logs/)
 - [diagnose](/grada/cli/diagnose/)

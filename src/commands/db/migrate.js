@@ -2,8 +2,8 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner, text, isCancel } from '@clack/prompts';
-import { trackEvent, trackSuccess, setActiveCommandName, resetActiveCommandName, getCliVersion } from '../../core/telemetry.js';
-import { failCommand, failAwsError, failNamedContainerMissing, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
+import { trackSuccess, setActiveCommandName, resetActiveCommandName, getCliVersion } from '../../core/telemetry.js';
+import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, refuseUnknownFlags } from '../../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../../utils/args.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../../utils/aws.js';
 import {
@@ -15,13 +15,11 @@ import {
     resolveAppName,
     resolveHeadless,
     resolveCwd,
-    readFileSafe,
     readTerraformComputeTarget,
 } from '../../utils/resolvers.js';
-import { detectMigrationCommand, isNpmShimCommand, dockerfileStripsNpmShims, ormMappedHintSegment } from '../../utils/detector.js';
+import { detectMigrationCommand } from '../../utils/detector.js';
 import { resolveContainer } from '../../utils/ecs.js';
-import { runEphemeralEcsTask } from '../../utils/ecs-runner.js';
-import { parseTimeoutSeconds } from '../../utils/system.js';
+import { runEphemeralEcsTask, buildRunnerCommand, parseRunnerTimeout, guardNpmStrippedRunner, reportRunnerOutcome } from '../../utils/ecs-runner.js';
 import { atomicWriteFile } from '../../utils/atomic-write.js';
 import { pinnedActionUse } from '../../data/action-pins.js';
 import fsSync from 'fs';
@@ -181,69 +179,9 @@ export function injectPreviewMigrationGate(workflowContent, { cmd, cliVersion } 
     });
 }
 
-// Sniffs the URL scheme from discrete credentials. Explicit values win;
-// when DB_ENGINE/DB_PORT are secrets-sourced (valueFrom, values unknown
-// to the CLI) the reference text is sniffed for engine/port hints
-// instead (BUG-171). Indeterminate stays postgresql (back-compat).
-function sniffMigrationScheme(entries, values) {
-    const engine = values.get('DB_ENGINE');
-    if (typeof engine === 'string' && engine !== '') {
-        return /mysql|maria/i.test(engine) ? 'mysql' : 'postgresql';
-    }
-    const port = values.get('DB_PORT');
-    if (typeof port === 'string' && port !== '') {
-        return port === '3306' ? 'mysql' : 'postgresql';
-    }
-    const refs = entries.map((entry) => entry?.valueFrom).filter((ref) => typeof ref === 'string').join('\n');
-    if (/mysql|maria|3306/i.test(refs)) return 'mysql';
-    return 'postgresql';
-}
-
-// Runtime userinfo encoder for the synthesized URL (BUG-139): node sees
-// only shell references, never the values, so the encoding ladder ships
-// inside the script — node (encodeURIComponent) → sed (the URL-breaking
-// subset: %, ?, #, @, :, /) → warned raw. Quoting alone cannot save a
-// `?` or `#` in the password: the URL parser (not the shell) is what
-// breaks, so the shell refs must be encoded, not quoted.
-function buildEncodedUrlExport({ scheme, defaultPort, defaultName }) {
-    const nodeEncode = `node -e 'var s="${scheme}",a=process.argv.slice(1);console.log(s+"://"+encodeURIComponent(a[0])+":"+encodeURIComponent(a[1])+"@"+a[2]+":"+a[3]+"/"+a[4])' "$_u" "$_p" "$_h" "$_o" "$_n"`;
-    const sedEncode = `printf '${scheme}://%s:%s@%s:%s/%s' "$(_grada_enc "$_u")" "$(_grada_enc "$_p")" "$_h" "$_o" "$_n"`;
-    const rawEncode = `printf '${scheme}://%s:%s@%s:%s/%s' "$_u" "$_p" "$_h" "$_o" "$_n"`;
-    return `_grada_db_url() { _u="\${DB_USER}"; _p="\${DB_PASSWORD}"; _h="\${DB_HOST}"; _o="\${DB_PORT:-${defaultPort}}"; _n="\${DB_NAME:-${defaultName}}"; `
-        + `if command -v node >/dev/null 2>&1; then ${nodeEncode}; `
-        + `elif command -v sed >/dev/null 2>&1; then _grada_enc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's|/|%2F|g'; }; ${sedEncode}; `
-        + `else echo "grada: warning: DATABASE_URL built without userinfo encoding (no node or sed in image)" >&2; ${rawEncode}; fi; }; `
-        + `if [ -z "\${DATABASE_URL:-}" ]; then export DATABASE_URL="$(_grada_db_url)"; fi`;
-}
-
-// Builds the container override command for the migration task. When the
-// task definition provides discrete `DB_*` credentials but no
-// `DATABASE_URL`, the command exports a runtime-synthesized URL (from the
-// container's own environment, so secrets never cross the RunTask API
-// call) before running the user's migration command. Pure and unit-tested.
-export function buildMigrationCommand(resolvedCmd, containerDef) {
-    const cmd = String(resolvedCmd ?? '');
-    const environment = Array.isArray(containerDef?.environment) ? containerDef.environment : [];
-    const secrets = Array.isArray(containerDef?.secrets) ? containerDef.secrets : [];
-    const entries = [...environment, ...secrets];
-    const names = new Set(entries.map((entry) => entry?.name));
-    if (names.has('DATABASE_URL')) return ['sh', '-c', cmd];
-    if (!names.has('DB_HOST') || !names.has('DB_USER') || !names.has('DB_PASSWORD')) {
-        return ['sh', '-c', cmd];
-    }
-    const values = new Map(entries.map((entry) => [entry?.name, entry?.value]));
-    const scheme = sniffMigrationScheme(entries, values);
-    // RDS/Aurora enforces `rds.force_ssl = 1` by default: require TLS for
-    // synthesized postgres URLs so libpq-based migrations never fail on a
-    // plaintext connection (MySQL clients ignore PGSSLMODE; leave them alone).
-    const tlsPrefix = scheme === 'postgresql' ? 'export PGSSLMODE="${PGSSLMODE:-require}"; ' : '';
-    const urlExport = buildEncodedUrlExport({
-        scheme,
-        defaultPort: scheme === 'mysql' ? '3306' : '5432',
-        defaultName: scheme === 'mysql' ? 'mysql' : 'postgres',
-    });
-    return ['sh', '-c', `${tlsPrefix}${urlExport}; ${cmd}`];
-}
+// Back-compat alias: the synthesis logic now lives in ecs-runner.js as
+// buildRunnerCommand (shared by migrate, enable-vector, and run).
+export { buildRunnerCommand as buildMigrationCommand };
 
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
 // invocation path, including direct imports that bypass bin/cli.js and MCP.
@@ -297,17 +235,13 @@ async function runDbMigrateMain(input = {}) {
         });
     }
 
-    const timeoutSeconds = parseTimeoutSeconds(options.timeout, DEFAULT_MIGRATE_TIMEOUT_SECONDS);
-    if (timeoutSeconds === null) {
-        return failCommand({
-            message: `\n✖ Invalid --timeout "${options.timeout}". Use a positive number of seconds (default ${DEFAULT_MIGRATE_TIMEOUT_SECONDS}).\n`,
-            event: 'db_migrate_run',
-            telemetry: { projectName },
-            errorCode: 'INVALID_TIMEOUT',
-            reason: 'invalid-timeout',
-            resultExtra: { cluster, service, region },
-        });
-    }
+    const parsedTimeout = await parseRunnerTimeout(options.timeout, DEFAULT_MIGRATE_TIMEOUT_SECONDS, {
+        event: 'db_migrate_run',
+        telemetry: { projectName },
+        resultExtra: { cluster, service, region },
+    });
+    if (typeof parsedTimeout !== 'number') return parsedTimeout;
+    const timeoutSeconds = parsedTimeout;
 
     // 1. Resolve the migration command (shared by live runs and --setup-ci).
     let resolvedCmd = null;
@@ -345,27 +279,14 @@ async function runDbMigrateMain(input = {}) {
         }
     }
 
-    // 1b. Stripped-runner guard: Grada's node-family images
-    // remove npm/npx/yarn from the runner stage, so an npm-shim command
-    // is a guaranteed `command not found` inside the task. Fail fast
-    // headless; warn loudly (and proceed) interactively. Fail-open when
-    // no Dockerfile is present — nothing to prove breakage against.
-    if (isNpmShimCommand(resolvedCmd) && dockerfileStripsNpmShims(readFileSafe(path.join(cwd, 'Dockerfile')))) {
-        const ormHint = ormMappedHintSegment(cwd, '--cmd ');
-        if (headless) {
-            return failCommand({
-                message: `\n✖ Refusing to run "${resolvedCmd}": your Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" inside the task.\n`,
-                hint: `  Bundle a framework-compiled runner instead and re-run with an explicit node-based command, e.g. --cmd "node ./dist/migrate.cjs". Ensure your Dockerfile builds the bundle and copies it into the runner image${ormHint}.\n`,
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: setupCi, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
-                errorCode: 'NPM_CMD_STRIPPED_RUNNER',
-                reason: 'npm-cmd-stripped-runner',
-                resultExtra: { cluster, service, region },
-            });
-        }
-        console.log(color.yellow(`⚠️  "${resolvedCmd}" starts with npm/npx but your Dockerfile strips those binaries from the runner image — this will fail with "command not found" unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.${ormHint}`));
-        trackEvent('npm_cmd_stripped_runner', { projectName, cmd_source: cmdSource, ci_setup: setupCi });
-    }
+    // 1b. Stripped-runner guard (shared with `run`).
+    const strippedRefusal = await guardNpmStrippedRunner({
+        resolvedCmd, cwd, headless,
+        event: 'db_migrate_run',
+        telemetry: { projectName, cmd_source: cmdSource, ci_setup: setupCi },
+        resultExtra: { cluster, service, region },
+    });
+    if (strippedRefusal) return strippedRefusal;
 
     // 2. --setup-ci: patch the workflow file, no AWS calls.
     if (setupCi) {
@@ -456,7 +377,7 @@ async function runDbMigrateMain(input = {}) {
             service,
             containerName,
             taskDef: (typeof options.taskDef === 'string' && options.taskDef.trim()) ? options.taskDef.trim() : null,
-            command: (containerDef) => buildMigrationCommand(resolvedCmd, containerDef),
+            command: (containerDef) => buildRunnerCommand(resolvedCmd, containerDef),
             startedBy: 'grada-db-migrate',
             logGroupName,
             timeoutMs,
@@ -468,103 +389,20 @@ async function runDbMigrateMain(input = {}) {
             taskNoun: 'migration',
         });
 
-        if (!outcome.ok && outcome.code === 'ECS_SERVICE_NOT_FOUND') {
-            s.stop(color.yellow('Service not found.'));
-            return failCommand({
-                print: () => {
-                    console.log(`\n  The ECS service ${color.cyan(service)} does not exist or is inactive.`);
-                    console.log(`  Run ${color.green('npx grada-run apply')} to provision your infrastructure.\n`);
-                },
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-                errorCode: 'ECS_SERVICE_NOT_FOUND',
-                reason: 'ecs-service-not-found',
-                resultExtra: { cluster, service, region },
-            });
-        }
-
-        if (!outcome.ok && outcome.code === 'NO_VPC_CONFIG') {
-            s.stop(color.red('Service has no VPC configuration.'));
-            return failCommand({
-                message: `\n✖ The ECS service ${color.cyan(service)} has no VPC network configuration, so the migration task cannot be placed.\n`,
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-                errorCode: 'RUN_TASK_FAILED',
-                reason: 'run-task-failed',
-                resultExtra: { cluster, service, region },
-            });
-        }
-
-        if (!outcome.ok && outcome.code === 'CONTAINER_NOT_FOUND') {
-            s.stop(color.red('Container not found.'));
-            return failCommand({
-                message: `\n✖ Container "${containerName}" does not exist in task definition "${outcome.targetTaskDef}".\n`,
-                hint: `Override with --container <name>. Available: ${outcome.available.join(', ') || 'none'}\n`,
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-                errorCode: 'CONTAINER_NOT_FOUND',
-                reason: 'container-not-found',
-                resultExtra: { cluster, service, region },
-            });
-        }
-
-        if (!outcome.ok && outcome.code === 'RUN_TASK_FAILED') {
-            s.stop(color.red('Failed to start migration task.'));
-            return failCommand({
-                message: `\n✖ ECS could not start the migration task: ${outcome.reason}.\n`,
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-                errorCode: 'RUN_TASK_FAILED',
-                reason: 'run-task-failed',
-                resultExtra: { cluster, service, region },
-            });
-        }
-        if (!outcome.ok && outcome.code === 'NAMED_CONTAINER_MISSING') {
-            return failNamedContainerMissing({
-                spinner: s, outcome, cluster, service, region,
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-                noun: 'Migration',
-            });
-        }
-        if (!outcome.ok && outcome.code === 'TIMEOUT') {
-            try { s.stop(color.yellow('Migration timed out.')); } catch { /* already stopped */ }
-            return failCommand({
-                message: `\n✖ Migration timed out after ${timeoutSeconds}s. The task was stopped (best-effort); increase --timeout and retry.\n`,
-                event: 'db_migrate_run',
-                telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-                errorCode: 'MIGRATION_TIMEOUT',
-                reason: 'migration-timeout',
-                resultExtra: { cluster, service, region, taskArn: outcome.taskArn },
-            });
-        }
-
-        const exitCode = outcome.exitCode;
-        const stoppedReason = outcome.stoppedReason;
-        if (exitCode === 0) {
-            // Owner pairs its own start/stop: the runner usually stops
-            // first (idempotent no-op then), but success must never
-            // depend on a callee for the spinner lifecycle (BUG-202).
-            try { s.stop(color.green('Migration succeeded.')); } catch { /* already stopped */ }
-            console.log(color.green('\n✅ Migration succeeded.'));
-            await trackSuccess('db_migrate_run', { projectName, cmd_source: cmdSource, ci_setup: false });
-            outro(color.green('Done.'));
-            return { ok: true, success: true, exitCode: 0, taskArn: outcome.taskArn };
-        }
-        const propagated = (typeof exitCode === 'number' && exitCode > 0) ? exitCode : 1;
-        // The ECS stopped reason is the only diagnosis PostHog gets for a
-        // failed task (exit codes alone can't distinguish image-pull from
-        // command-not-found from migration errors) — stamp it.
-        const failureDetail = `Migration failed with exit code ${exitCode ?? 'unknown'}: ${stoppedReason}`;
-        return failCommand({
-            message: `\n✖ ${failureDetail}.\n`,
+        // Outcome mapping shared with `run` (labels parameterize the copy).
+        return reportRunnerOutcome({
+            outcome, spinner: s,
             event: 'db_migrate_run',
             telemetry: { projectName, cmd_source: cmdSource, ci_setup: false },
-            errorCode: 'MIGRATION_TASK_FAILED',
-            extra: { exit_code: exitCode ?? -1, error_message: failureDetail },
-            reason: 'migration-task-failed',
-            resultExtra: { cluster, service, region, taskArn: outcome.taskArn },
-            exitCode: propagated,
+            cluster, service, region,
+            containerName,
+            label: 'Migration',
+            taskPhrase: 'migration task',
+            timeoutSeconds,
+            timeoutCode: 'MIGRATION_TIMEOUT',
+            timeoutReason: 'migration-timeout',
+            taskFailedCode: 'MIGRATION_TASK_FAILED',
+            taskFailedReason: 'migration-task-failed',
         });
     } catch (error) {
         if (isAuthError(error)) {

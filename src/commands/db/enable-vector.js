@@ -16,9 +16,8 @@ import {
     resolveCwd,
 } from '../../utils/resolvers.js';
 import { resolveContainer } from '../../utils/ecs.js';
-import { runEphemeralEcsTask } from '../../utils/ecs-runner.js';
+import { runEphemeralEcsTask, buildRunnerCommand } from '../../utils/ecs-runner.js';
 import { parseTimeoutSeconds } from '../../utils/system.js';
-import { buildMigrationCommand } from './migrate.js';
 import fsSync from 'fs';
 import path from 'path';
 
@@ -235,7 +234,7 @@ async function runDbEnableVectorMain(input = {}) {
             service,
             containerName,
             taskDef: (typeof options.taskDef === 'string' && options.taskDef.trim()) ? options.taskDef.trim() : null,
-            command: (containerDef) => buildMigrationCommand(vectorScript, containerDef),
+            command: (containerDef) => buildRunnerCommand(vectorScript, containerDef),
             startedBy: 'grada-db-enable-vector',
             logGroupName,
             timeoutMs,

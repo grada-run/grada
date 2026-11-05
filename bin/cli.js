@@ -12,6 +12,7 @@ import { syncAi } from '../src/commands/sync-ai.js';
 import { runLogs, parseLogsArgs } from '../src/commands/logs.js';
 import { runStatus, parseStatusArgs } from '../src/commands/status.js';
 import { runExec, parseExecArgs } from '../src/commands/exec.js';
+import { runRun, parseRunArgs } from '../src/commands/run.js';
 import { runDb } from '../src/commands/db.js';
 import { runRollback, parseRollbackArgs } from '../src/commands/rollback.js';
 import { runGc, parseGcArgs } from '../src/commands/gc.js';
@@ -42,6 +43,7 @@ const HELP_TEXT = [
     '  status               Service health dashboard (--region, --json, --watch, --workspace)',
     '  rollback [rev]       Roll back ECS service to a previous task revision (ECS only — Lambda uses image tags)',
     '  exec                 Open an interactive shell in a running container (--cluster, --service, --container, --command, --region, --workspace)',
+    '  run                  Run a one-off command in an ephemeral ECS task (--cmd, --task-def, --timeout, --workspace)',
     '  db connect           Open a secure local tunnel to your database (--port, --show-credentials, --workspace, --region)',
     '  db enable-vector     Enable the pgvector extension via a one-off ECS task (--task-def, --timeout)',
     '  db import            Import a SQL dump into your database (--file, --from, --yes)',
@@ -172,6 +174,8 @@ if (wantsVersion) {
     runCommand(runRollback({ ...parseRollbackArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'exec') {
     runCommand(runExec({ ...parseExecArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
+} else if (positionalArgs[0] === 'run') {
+    runCommand(runRun({ ...parseRunArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'db') {
     runCommand(runDb(commandArgs, { ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'gc') {

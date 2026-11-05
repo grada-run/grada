@@ -13,6 +13,7 @@ import { parseGcArgs } from '../src/commands/gc.js';
 import { parseLogsArgs } from '../src/commands/logs.js';
 import { parseMcpArgs } from '../src/commands/mcp.js';
 import { parseRollbackArgs } from '../src/commands/rollback.js';
+import { parseRunArgs } from '../src/commands/run.js';
 import { parseSleepArgs } from '../src/commands/sleep.js';
 import { parseStatusArgs } from '../src/commands/status.js';
 import { parseWakeArgs } from '../src/commands/wake.js';
@@ -144,6 +145,7 @@ describe('unknown-flag capture (per-command wiring)', () => {
         ['logs', parseLogsArgs],
         ['mcp', parseMcpArgs],
         ['rollback', parseRollbackArgs],
+        ['run', parseRunArgs],
         ['sleep', parseSleepArgs],
         ['status', parseStatusArgs],
         ['wake', parseWakeArgs],
@@ -158,6 +160,7 @@ describe('honored globals are never unknown flags', () => {
         ['destroy', parseDestroyArgs, ['--headless', '--yes']],
         ['eject', parseEjectArgs, ['--headless', '--yes']],
         ['rollback', parseRollbackArgs, ['--headless']],
+        ['run', parseRunArgs, ['--headless']],
         ['wake', parseWakeArgs, ['--headless']],
         ['alerts', parseAlertsArgs, ['--headless']],
         ['drift', parseDriftArgs, ['--headless']],
@@ -180,6 +183,7 @@ describe('honored globals are never unknown flags', () => {
 describe('greedy shell-text flags', () => {
     it.each([
         ['db migrate', parseDbMigrateArgs, '--cmd', 'cmd'],
+        ['run', parseRunArgs, '--cmd', 'cmd'],
         ['exec', parseExecArgs, '--command', 'command'],
         ['add', parseAddArgs, '--cmd', 'cronCommand'],
     ])('%s %s consumes a dash-leading value', (_name, parse, flag, key) => {

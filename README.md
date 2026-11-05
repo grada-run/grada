@@ -102,6 +102,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`status`](./apps/docs/src/content/docs/cli/status.md) | Health dashboard with live Golden Signals, auto-`diagnose` on degradation, `--json` for scripts, and `--watch` for live repaint. |
 | [`rollback`](./apps/docs/src/content/docs/cli/rollback.md) | Returns the live service to a previous task revision, with live progress (ECS only). |
 | [`exec`](./apps/docs/src/content/docs/cli/exec.md) | Opens a shell in a running container via Session Manager (ECS only). |
+| [`run`](./apps/docs/src/content/docs/cli/run.md) | Runs a one-off command in a fresh, disposable container inside the VPC — backfills, seeders, admin scripts — with live logs (ECS only). |
 | [`db connect`](./apps/docs/src/content/docs/cli/db.md) | Opens a `localhost` tunnel to your private database (PostgreSQL, MySQL, or Aurora). |
 | [`db migrate`](./apps/docs/src/content/docs/cli/db.md) | Runs migrations inside the VPC (auto-detected) or installs the CI pre-deploy gate. |
 | [`db enable-vector`](./apps/docs/src/content/docs/cli/db.md) | Enables `pgvector` for AI embeddings with a one-off VPC task. |

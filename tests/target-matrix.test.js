@@ -6,6 +6,7 @@
 //
 //   sleep/wake  ecs ADAPT / lambda ADAPT / static GUARD  -> tests/sleep-wake.test.js
 //   exec        ecs ADAPT / lambda GUARD / static GUARD  -> tests/exec.test.js
+//   run         ecs ADAPT / lambda GUARD / static GUARD  -> tests/run.test.js
 //   rollback    ecs ADAPT / lambda GUARD / static GUARD  -> tests/rollback.test.js
 //   logs        ecs ADAPT / lambda ADAPT / static ADAPT  -> tests/logs.test.js + below
 //   add sqs     ecs ADAPT / lambda WARN  / static WARN   -> tests/add.test.js + below

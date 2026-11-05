@@ -49,7 +49,7 @@ describe('CLI Executable', () => {
         expect(content).toContain('Fargate vs Lambda');
     });
 
-    it.each(['destroy', 'sleep', 'gc', 'logs', 'status', 'rollback', 'exec'])(
+    it.each(['destroy', 'sleep', 'gc', 'logs', 'status', 'rollback', 'exec', 'run'])(
         '%s --help prints usage instead of executing',
         (cmd) => {
             const { status, stdout } = runCliHelp([cmd, '--help']);
