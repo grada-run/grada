@@ -141,6 +141,7 @@ export function parseCliArgs(processArgs) {
         githubRepo: getValueFlag('github-repo'),
         setupCiMigrate: getBoolOrValueFlag('setup-ci-migrate'),
         setupCiDrift: getBoolFlag('setup-ci-drift') === true,
+        setupCiPlan: getBoolFlag('setup-ci-plan') === true,
     };
 
     // 5. Isolate positional commands (non-string elements are positionals;

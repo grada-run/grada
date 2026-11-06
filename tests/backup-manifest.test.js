@@ -87,16 +87,16 @@ describe('R15: preserved files across regenerate', () => {
     });
 });
 
-describe('BUG-158: preview/teardown/drift manifest + backup coverage', () => {
-    it('flags hand edits to the three workflows and backs them up under --force', async () => {
+describe('BUG-158: preview/teardown/drift/plan manifest + backup coverage', () => {
+    it('flags hand edits to the four workflows and backs them up under --force', async () => {
         writeTree();
-        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml']) {
+        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml']) {
             fs.mkdirSync(path.join(tmpDir, '.github', 'workflows'), { recursive: true });
             fs.writeFileSync(path.join(tmpDir, '.github', 'workflows', wf), `# ${wf}\n`);
         }
         backup.writeInitManifest(tmpDir, { target: 'ecs' });
         const manifest = JSON.parse(fs.readFileSync(path.join(tmpDir, '.grada', 'manifest.json'), 'utf-8'));
-        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml']) {
+        for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml']) {
             expect(manifest.files[path.join('.github', 'workflows', wf)]).toBeTruthy();
         }
         fs.writeFileSync(path.join(tmpDir, '.github', 'workflows', 'preview.yml'), '# hand-edited\n');

@@ -39,6 +39,8 @@ describe('CLI Argument Parser', () => {
         expect(parseCliArgs(['--preconfigured=true']).isPreconfigured).toBe(true);
         expect(parseCliArgs(['init', '--setup-ci-drift=true']).initOptions.setupCiDrift).toBe(true);
         expect(parseCliArgs(['init', '--setup-ci-drift=false']).initOptions.setupCiDrift).toBe(false);
+        expect(parseCliArgs(['init', '--setup-ci-plan=true']).initOptions.setupCiPlan).toBe(true);
+        expect(parseCliArgs(['init', '--setup-ci-plan=false']).initOptions.setupCiPlan).toBe(false);
     });
 
     it('correctly maps headless assignment flags', () => {
@@ -80,6 +82,7 @@ describe('CLI Argument Parser', () => {
             githubRepo: null,
             setupCiMigrate: false,
             setupCiDrift: false,
+            setupCiPlan: false,
         });
         expect(parseCliArgs(['--force']).initOptions.force).toBe(true);
         expect(parseCliArgs(['--offline']).initOptions.offline).toBe(true);
@@ -111,6 +114,7 @@ describe('CLI Argument Parser', () => {
         expect(joined.initOptions.fromEmail).toBe('hi@example.com');
         expect(joined.initOptions.setupCiMigrate).toBe(true);
         expect(parseCliArgs(['--setup-ci-drift']).initOptions.setupCiDrift).toBe(true);
+        expect(parseCliArgs(['--setup-ci-plan']).initOptions.setupCiPlan).toBe(true);
     });
 
     it('parses --project-name in space and equals forms', () => {

@@ -50,6 +50,10 @@ On `--target static` projects the workflow has no build-and-push stages: after t
 
 `--setup-ci-drift` (or `drift --setup` on an existing project) scaffolds a second workflow, `.github/workflows/drift.yml`, that runs `terraform plan` daily at 06:00 UTC plus on manual dispatch. When live AWS state differs from Terraform it opens (or updates, without spamming) a GitHub Issue labeled `iac-drift` with the plan diff; when drift resolves it comments `✅ Drift resolved` and closes the issue. Set a `SLACK_WEBHOOK_URL` repository secret to also post alerts to Slack. Run `npx grada-run drift` anytime for the same check locally. See [`drift`](/grada/cli/drift/).
 
+## Plan on PR (on by default)
+
+`init` also scaffolds `.github/workflows/plan.yml` (decline the prompt, or omit `--setup-ci-plan` headless, to skip it). Every pull request touching `terraform/` gets a `terraform plan` run whose result lands as a single sticky PR comment: a bold `Plan: X to add, Y to change, Z to destroy` summary up top with the full output in a collapsible diff-highlighted block. Rapid pushes cancel superseded runs, no-change runs clear stale plans, and plan errors fail the check with the error posted — never green-silent. Same-repo PRs only: fork PRs skip loudly without AWS credentials.
+
 ## Why you see a 503 first
 
 `npx grada-run apply` provisions the ALB, cluster, and service, but no container image exists until this workflow runs once. Pushing to your deploy branch (`git add . && git commit -m "ci: infra" && git push`) builds and deploys the first image, clearing the `503`. If the service stays unhealthy after that, run `npx grada-run diagnose` — usually the container failed its ALB health check (see [Dockerfiles](/grada/guides/dockerfiles/)). (On `--target lambda` projects the same flow provisions the API Gateway and function instead; `apply` seeds a placeholder image so Day-0 succeeds, and the first push replaces it.)

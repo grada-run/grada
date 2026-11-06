@@ -294,6 +294,43 @@ describe('github workflow templates', () => {
         expect(raw).toContain('iac-drift-check-failed');
     });
 
+    it('plan.yml gates PR plans behind the same-repo guard with a fork notice', () => {
+        const doc = parseTemplate('plan.yml');
+        expect(doc.on.pull_request, 'plan.yml must not trigger on pull_request (BUG-140)').toBeUndefined();
+        expect(doc.on.pull_request_target.types).toEqual(['opened', 'synchronize', 'reopened']);
+        expect(doc.on.pull_request_target.paths).toEqual(['terraform/**']);
+        expect(doc.permissions).toMatchObject({ 'id-token': 'write', contents: 'read', 'pull-requests': 'write' });
+        expect(doc.concurrency.group).toContain('github.event.pull_request.number');
+        expect(doc.concurrency['cancel-in-progress']).toBe(true);
+        const job = doc.jobs['terraform-plan'];
+        expect(job.if).toContain('github.event.pull_request.head.repo.full_name == github.repository');
+        const checkout = job.steps.find((s) => s?.uses?.startsWith('actions/checkout@'));
+        expect(checkout?.with?.ref).toBe('${{ github.event.pull_request.head.sha }}');
+        expect(doc.jobs['fork-notice'].if).toContain('github.event.pull_request.head.repo.full_name != github.repository');
+    });
+
+    it('plan.yml fails loud (never skips) on credential failure', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'plan.yml'), 'utf8');
+        expect(raw).toContain('id: aws-creds');
+        expect(raw).toContain('continue-on-error: true');
+        expect(raw).toContain('- name: Interpret credential failure');
+        expect(raw).toContain('npx grada-run apply');
+        expect(raw).not.toContain("steps.aws-creds.outcome == 'success'");
+    });
+
+    it('plan.yml posts a sticky diff-highlighted comment with truncation', () => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'plan.yml'), 'utf8');
+        expect(raw).toContain('<!-- grada-plan -->');
+        expect(raw).toContain('<details><summary>Show Plan</summary>');
+        // Fence is backslash-escaped in source (it sits inside a JS template literal).
+        expect(raw).toContain('\\`\\`\\`diff');
+        expect(raw).toContain('30000');
+        expect(raw).toContain('terraform_wrapper: false');
+        expect(raw).toContain('-detailed-exitcode');
+        expect(raw).toContain('terraform show -no-color tfplan > plan.txt');
+        expect(raw).toContain('-lock-timeout=5m');
+    });
+
     it('teardown.yml destroys same-repo previews only', () => {
         const doc = parseTemplate('teardown.yml');
         expect(doc.on.pull_request, 'teardown.yml must not trigger on pull_request').toBeUndefined();

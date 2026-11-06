@@ -27,6 +27,7 @@ import { ADDON_REGISTRY, addonTargetDisposition, addonSupportedTargets } from '.
 import { validateAddonFlags, resolveAddonOptions, scaffoldAddon, DEFAULT_BEDROCK_MODEL } from './add.js';
 import { injectMigrationGate, injectPreviewMigrationGate } from './db/migrate.js';
 import { scaffoldDriftWorkflow } from './drift.js';
+import { scaffoldPlanWorkflow } from '../utils/ci-workflows.js';
 import { trackEvent, flushTelemetry, getCliVersion, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand } from '../utils/command.js';
 import { getFrameworkWarning } from '../utils/warnings.js';
@@ -609,6 +610,21 @@ async function mainStackMain(input = {}) {
         driftEnabled = driftAnswer === true;
     }
 
+    // Plan-on-PR: explicit flag wins, else offer. Defaults ON —
+    // reviewing infra changes before merge is the safe default.
+    const setupCiPlanFlag = initOptions.setupCiPlan === true;
+    let planEnabled = false;
+    if (setupCiPlanFlag) {
+        planEnabled = true;
+    } else if (isInteractive) {
+        const planAnswer = await confirm({
+            message: 'Post Terraform plans as PR comments (review infra changes before merge)?',
+            initialValue: true,
+        });
+        if (typeof planAnswer === 'symbol') process.exit(0);
+        planEnabled = planAnswer === true;
+    }
+
     // Addon selection: interactive multiselect, or explicit --with.
     let selectedAddons;
     if (isInteractive && !isStaticSite) {
@@ -937,6 +953,20 @@ async function mainStackMain(input = {}) {
         }
     }
 
+    if (planEnabled) {
+        // plan.yml rides the manifest + backup like drift.yml (R1):
+        // re-init backs the old file up and regenerates fresh (current
+        // role ARN) instead of silently keeping a stale copy.
+        const planned = scaffoldPlanWorkflow(dirConfig.targetDir, {
+            region: config.region,
+            roleArn: `arn:aws:iam::${awsAccountId}:role/${dirConfig.actualProjectName}${resourceSuffix}-github-actions-role`,
+            force: initOptions.force,
+        });
+        if (planned.ok) {
+            console.log(color.green('✅ Scaffolded .github/workflows/plan.yml (Terraform plan on PR)'));
+        }
+    }
+
     // 7b2. Restore preserved files over the fresh output, then record
     // content hashes of everything generated above so a later re-run can
     // distinguish pristine output from hand edits (F3), plus the intended
@@ -989,6 +1019,7 @@ async function mainStackMain(input = {}) {
         detected_addons: Object.keys(ADDON_REGISTRY).filter((cap) => capabilities.addons[cap]?.detected === true),
         migration_gate_enabled: migrationGateEnabled,
         drift_detection_enabled: driftEnabled,
+        plan_on_pr_enabled: planEnabled,
     });
 
     s.stop('Infrastructure provisioned successfully!');

@@ -1,0 +1,153 @@
+name: Terraform Plan on PR
+
+on:
+  # pull_request_target (not pull_request): this file comes from the base
+  # branch, so a fork PR cannot delete the same-repo guard below to reach
+  # the admin CI role (BUG-140). The PR head is checked out explicitly by
+  # SHA in the guarded step instead.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'terraform/**'
+
+# One runner per PR: rapid pushes cancel superseded plans instead of
+# overlapping runs on the same state.
+concurrency:
+  group: plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: {{REGION}}
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write # Required to post the plan comment
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    # Same-repo PRs only: fork code must never execute with the admin CI
+    # role. Trustworthy because this file comes from base (see trigger
+    # above). Public repos needing fork plans should gate this job
+    # behind an environment with required reviewers instead of deleting
+    # the guard.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Pinned SHA (not a ref name): the exact head this event fired
+          # for, immune to ref moves between event and checkout.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Configure AWS credentials
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
+        with:
+          role-to-assume: {{ROLE_ARN}}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Plan-on-PR is a merge signal: a failed assume fails the run with
+      # the bootstrap pointer (deploy shape, BUG-138) — never green-silent.
+      - name: Interpret credential failure
+        if: steps.aws-creds.outcome == 'failure'
+        run: |
+          echo "::error::AWS credential assumption failed — if the stack was never provisioned, bootstrap it first (npx grada-run apply); otherwise check terraform/oidc.tf trust."
+          exit 1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          # The wrapper mangles -detailed-exitcode; raw codes (0/1/2) are the signal.
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init -input=false
+
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
+      # Exit 2 posts the plan and stays green — the comment is the signal.
+      # Exit 1 (plan ERROR) fails the job after the comment posts below.
+      - name: Terraform Plan
+        id: plan
+        working-directory: ./terraform
+        run: |
+          set +e
+          terraform plan -input=false -lock-timeout=5m -detailed-exitcode -no-color -out=tfplan > plan-full.txt 2>&1
+          EXITCODE=$?
+          echo "exitcode=$EXITCODE" >> "$GITHUB_OUTPUT"
+          if [ "$EXITCODE" != "1" ]; then
+            terraform show -no-color tfplan > plan.txt
+          else
+            cp plan-full.txt plan.txt
+          fi
+          # Exit 1 fails the job; the comment step still posts via its
+          # always() gate so the error lands on the PR, not just the log.
+          if [ "$EXITCODE" = "1" ]; then exit 1; fi
+
+      - name: Comment plan on PR
+        if: always() && steps.plan.outputs.exitcode != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const marker = '<!-- grada-plan -->';
+            const exitcode = '${{ steps.plan.outputs.exitcode }}';
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            let plan = '';
+            try {
+              plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            } catch (error) {
+              plan = '(plan output unavailable)';
+            }
+            if (plan.length > 30000) {
+              plan = `${plan.slice(0, 30000)}\n... (truncated, see ${runUrl})`;
+            }
+            let summary = '';
+            if (exitcode === '2') {
+              const match = /^Plan:.*$/m.exec(plan);
+              summary = match ? match[0] : 'Plan: changes present';
+            } else if (exitcode === '1') {
+              summary = 'Plan: errored';
+            } else {
+              summary = 'No changes';
+            }
+            const heading = exitcode === '1' ? '## ❌ Terraform Plan Failed' : '## Terraform Plan';
+            const body = `${marker}\n${heading}\n\n**${summary}** ([workflow run](${runUrl})).\n\n<details><summary>Show Plan</summary>\n\n\`\`\`diff\n${plan}\n\`\`\`\n\n</details>`;
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find((comment) => comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
+
+  # Fork PRs skip the privileged job above loudly instead of silently:
+  # no credentials are issued and no plan is posted.
+  fork-notice:
+    name: Fork PR notice
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "Terraform plan runs for same-repo pull requests only — fork PR #${{ github.event.pull_request.number }} skipped (no AWS credentials issued)."

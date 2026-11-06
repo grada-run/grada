@@ -33,7 +33,7 @@ function collectManifestFiles(targetDir) {
     // hand edits like deploy.yml — manifest them so re-init refuses
     // dirty trees and backs them up instead of silently overwriting or
     // leaving them stale (BUG-158).
-    for (const rel of ['Dockerfile', 'preview.yml', 'teardown.yml', 'drift.yml'].map((name) => (
+    for (const rel of ['Dockerfile', 'preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml'].map((name) => (
         name === 'Dockerfile' ? name : path.join('.github', 'workflows', name)
     ))) {
         if (fs.existsSync(path.join(targetDir, rel))) relPaths.push(rel);
@@ -226,7 +226,7 @@ export async function planExistingFiles(targetDir, { isHeadless = false, force =
     const tfPath = path.join(targetDir, 'terraform');
     const dockerfilePath = path.join(targetDir, 'Dockerfile');
     const wfPath = path.join(targetDir, '.github', 'workflows', 'deploy.yml');
-    const extraWorkflows = ['preview.yml', 'teardown.yml', 'drift.yml']
+    const extraWorkflows = ['preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml']
         .map((workflow) => path.join('.github', 'workflows', workflow))
         .filter((rel) => fs.existsSync(path.join(targetDir, rel)));
 
@@ -303,7 +303,7 @@ export async function executeBackup(targetDir, plan = {}) {
         ['terraform/', path.join(targetDir, 'terraform')],
         ['Dockerfile', path.join(targetDir, 'Dockerfile')],
         ['.github/workflows/deploy.yml', path.join(targetDir, '.github', 'workflows', 'deploy.yml')],
-        ...['preview.yml', 'teardown.yml', 'drift.yml'].map((workflow) => {
+        ...['preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml'].map((workflow) => {
             const rel = path.join('.github', 'workflows', workflow);
             return [rel, path.join(targetDir, rel)];
         }),

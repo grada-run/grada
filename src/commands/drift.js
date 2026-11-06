@@ -8,7 +8,7 @@ import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../c
 import { failCommand, failAwsError, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { resolveRegion, resolveProjectName, resolveCwd, readFileSafe } from '../utils/resolvers.js';
-import { atomicWriteFileSync } from '../utils/atomic-write.js';
+import { renderCiWorkflow } from '../utils/ci-workflows.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,17 +44,13 @@ export function extractRoleArn(deployYmlContent) {
 // Renders `templates/github/drift.yml` into the project. Shared by
 // `drift --setup` and `--setup-ci-drift`; never exits, never tracks.
 export function scaffoldDriftWorkflow(cwd = process.cwd(), { region, roleArn, force = false } = {}) {
-    const template = fsSync.readFileSync(DRIFT_TEMPLATE_PATH, 'utf8');
-    const rendered = template
-        .replaceAll('{{REGION}}', region)
-        .replaceAll('{{ROLE_ARN}}', roleArn);
-    const targetPath = path.join(cwd, DRIFT_WORKFLOW_FILE);
-    if (fsSync.existsSync(targetPath) && force !== true && force !== 'true') {
-        return { ok: false, reason: 'exists', path: targetPath };
-    }
-    fsSync.mkdirSync(path.dirname(targetPath), { recursive: true });
-    atomicWriteFileSync(targetPath, rendered, 'utf8');
-    return { ok: true, path: targetPath };
+    return renderCiWorkflow({
+        templatePath: DRIFT_TEMPLATE_PATH,
+        region,
+        roleArn,
+        targetPath: path.join(cwd, DRIFT_WORKFLOW_FILE),
+        force,
+    });
 }
 
 // Condenses `terraform plan` output to the resource-change lines plus the

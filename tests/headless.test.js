@@ -490,6 +490,58 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('scaffolds plan.yml headless with --setup-ci-plan and skips it by default', async () => {
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node', '--setup-ci-plan']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy, errorSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            expectNoInteractivePrompts();
+            expect(exitSpy).not.toHaveBeenCalled();
+            const planYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'plan.yml'), 'utf-8');
+            expect(planYml).toContain('role-to-assume: arn:aws:iam::123456789012:role/');
+            expect(planYml).toContain('pull_request_target');
+            expect(trackEvent).toHaveBeenCalledWith(
+                'project_provisioned',
+                expect.objectContaining({ plan_on_pr_enabled: true })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('does not scaffold plan.yml without the flag', async () => {
+        process.chdir(tmpDir);
+        const parsed = parseCliArgs(['--headless', '--framework=node']);
+        const spies = mockConsoleTrio();
+        const { exitSpy, logSpy, errorSpy } = spies;
+
+        try {
+            await mainStack({
+                isHeadless: parsed.isHeadless,
+                isPreconfigured: parsed.isPreconfigured,
+                headlessOptions: { ...parsed.headlessOptions, dir: '.' },
+                initOptions: parsed.initOptions,
+            });
+
+            await expect(fs.stat(path.join(tmpDir, '.github', 'workflows', 'plan.yml'))).rejects.toThrow();
+            expect(trackEvent).toHaveBeenCalledWith(
+                'project_provisioned',
+                expect.objectContaining({ plan_on_pr_enabled: false })
+            );
+        } finally {
+            spies.restore();
+        }
+    });
+
     it.each([
         [['--headless', '--framework=static', '--target=static', '--with=storage:s3'], 'static-target-unsupported', 'STATIC_TARGET_UNSUPPORTED'],
         [['--headless', '--with=db:nope'], 'unsupported-capability', 'UNSUPPORTED_CAPABILITY'],

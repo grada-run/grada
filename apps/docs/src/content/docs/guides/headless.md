@@ -43,6 +43,7 @@ You can append any of these flags to customize the generated architecture. These
 | `--from-email=<email>` | Default SES sender address. | `noreply@<domain>` |
 | `--setup-ci-migrate[=<cmd>]` | Wire the pre-deploy database migration gate into the generated workflow when a database and migration command are detected. An explicit `=<cmd>` overrides detection. | `false` |
 | `--setup-ci-drift` | Scaffold `.github/workflows/drift.yml`: a daily 06:00 UTC `terraform plan` check that opens (or updates) a GitHub Issue labeled `iac-drift` on drift and closes it when resolved. | `false` |
+| `--setup-ci-plan` | Scaffold `.github/workflows/plan.yml`: runs `terraform plan` on pull requests touching `terraform/` and posts the result as a sticky, diff-highlighted PR comment. | `false` (on by default in interactive mode) |
 | `--force` | Re-run over modified files: back them up and regenerate. Without it, headless re-runs over hand edits fail with `MODIFIED_TREE`, and re-runs over ejected projects fail with `EJECTED_PROJECT`. | `false` |
 | `--adopt-state` | Take over existing remote state when the state bucket already holds a key for this project name. Without it, headless inits fail with `STATE_ALREADY_EXISTS`. | `false` |
 | `--github-repo=<owner/name>` | Scope the CI OIDC trust to this repo. Without it, headless init reads the git remote, else warns and renders the open `repo:*` trust. | git remote, else open |

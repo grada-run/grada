@@ -116,7 +116,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`domain`](./apps/docs/src/content/docs/cli/domain.md) | Attaches a custom domain with automated ACM TLS (Route 53 or external DNS). |
 | [`destroy`](./apps/docs/src/content/docs/cli/destroy.md) | Tears down AWS resources to stop billing (state bucket optionally retained). |
 | [`eject`](./apps/docs/src/content/docs/cli/eject.md) | Strips `grada` metadata, leaving pure Terraform and Actions files. |
-| [`--headless`](./apps/docs/src/content/docs/guides/headless.md) | Fully programmatic runs for CI/CD (`--target`, `--with`, `--db-engine`, `--setup-ci-migrate`, `--setup-ci-drift`, `--offline`). |
+| [`--headless`](./apps/docs/src/content/docs/guides/headless.md) | Fully programmatic runs for CI/CD (`--target`, `--with`, `--db-engine`, `--setup-ci-migrate`, `--setup-ci-drift`, `--setup-ci-plan`, `--offline`). |
 | [`sync-ai`](./apps/docs/src/content/docs/cli/sync-ai.md) | Generates IDE assistant rules for your stack (Cursor, Copilot, Windsurf, Claude). |
 | [`mcp`](./apps/docs/src/content/docs/cli/mcp.md) | Serves the MCP server for AI agents (STDIO/HTTP) or installs editor config (`--install`). |
 
@@ -134,7 +134,8 @@ your-project/
 ├── .github/
 │   └── workflows/
 │       ├── deploy.yml          # Keyless OIDC CI/CD deployment pipeline
-│       └── drift.yml           # Scheduled IaC drift detection (opt-in via `--setup-ci-drift` or `drift --setup`)
+│       ├── drift.yml           # Scheduled IaC drift detection (opt-in via `--setup-ci-drift` or `drift --setup`)
+│       └── plan.yml            # Terraform plan comments on PRs (via `--setup-ci-plan`, on by default interactively)
 └── terraform/
     ├── main.tf                 # ECR repository + compute (ECS Cluster/Fargate Task, Lambda + API Gateway with `--target lambda`, or S3 + CloudFront with `--target static`)
     ├── network.tf              # VPC, Public Subnets, ALB, and Security Groups
