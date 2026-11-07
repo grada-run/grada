@@ -132,13 +132,23 @@ export function renderOidcRoleSubs(resolvedSub, deployBranch) {
 
 // Centralized CI role-name construction (R1): the deploy/preview role
 // names rendered into oidc.tf, the workflow templates, and the drift/plan
-// scaffold calls all come from these builders.
+// scaffold calls all come from these builders. IAM caps role names at 64
+// chars, so long projects truncate from the project part — the entropy
+// suffix (uniqueness) and the role-kind suffix always survive intact.
+export const MAX_IAM_ROLE_NAME_LENGTH = 64;
+
+function buildCiRoleName(projectName, suffix, kind) {
+    const tail = `${suffix}-github-actions-${kind}-role`;
+    const head = String(projectName ?? '').slice(0, Math.max(MAX_IAM_ROLE_NAME_LENGTH - tail.length, 0)).replace(/-+$/, '');
+    return `${head}${tail}`;
+}
+
 export function buildDeployRoleName(projectName, suffix) {
-    return `${projectName}${suffix}-github-actions-deploy-role`;
+    return buildCiRoleName(projectName, suffix, 'deploy');
 }
 
 export function buildPreviewRoleName(projectName, suffix) {
-    return `${projectName}${suffix}-github-actions-preview-role`;
+    return buildCiRoleName(projectName, suffix, 'preview');
 }
 
 export function buildRoleArn(accountId, roleName) {

@@ -11,7 +11,7 @@ import { parseCliArgs } from '../src/core/parser.js';
 import { getProjectConfig, getTargetDirectory, sanitizeProjectName } from '../src/utils/prompts.js';
 import { trackEvent } from '../src/core/telemetry.js';
 import { provisionStateBucket } from '../src/utils/aws.js';
-import { mainStack, resolveOidcTrust, renderOidcSubClaim, renderOidcRoleSubs, immutableCompanion } from '../src/commands/init.js';
+import { mainStack, resolveOidcTrust, renderOidcSubClaim, renderOidcRoleSubs, buildDeployRoleName, buildPreviewRoleName, immutableCompanion } from '../src/commands/init.js';
 
 // Deep-mock the interactive prompt library. The CLI only uses
 // `@clack/prompts` for interactive mode (verified: no `inquirer` or
@@ -1917,5 +1917,21 @@ describe('resolveOidcTrust', () => {
             deploySub: '["repo:acme/widgets:environment:prod", "repo:acme@*/widgets@*:environment:prod"]',
             previewSub: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
         });
+    });
+
+    it('role-name builders keep short names intact', () => {
+        expect(buildDeployRoleName('myapp', '-abc123')).toBe('myapp-abc123-github-actions-deploy-role');
+        expect(buildPreviewRoleName('myapp', '-abc123')).toBe('myapp-abc123-github-actions-preview-role');
+        expect(buildDeployRoleName('myapp', '')).toBe('myapp-github-actions-deploy-role');
+    });
+
+    it('role-name builders truncate long projects to the 64-char IAM limit', () => {
+        const project = 'test-app-lambda-aurora-addons-domain';
+        const deploy = buildDeployRoleName(project, '-e46ae8');
+        const preview = buildPreviewRoleName(project, '-e46ae8');
+        expect(deploy.length).toBeLessThanOrEqual(64);
+        expect(preview.length).toBeLessThanOrEqual(64);
+        expect(deploy).toBe('test-app-lambda-aurora-addons-e46ae8-github-actions-deploy-role');
+        expect(preview).toBe('test-app-lambda-aurora-addons-e46ae8-github-actions-preview-role');
     });
 });
