@@ -114,6 +114,37 @@ export function renderOidcSubClaim(sub) {
     return `["${sub}", "${companion}"]`;
 }
 
+// Renders both CI roles' trust claims as HCL fragments from the resolved
+// repo trust: the deploy role binds to the effective deploy branch (the
+// same value rendered into the deploy trigger, so the two stay in sync),
+// the preview role binds to pull request events. The open trust and
+// hand-customized claims render verbatim — never silently widened.
+export function renderOidcRoleSubs(resolvedSub, deployBranch) {
+    const match = typeof resolvedSub === 'string' && resolvedSub.match(/^repo:([^:]+\/[^:]+)(?::(.*))?$/);
+    if (!match) return { deploySub: renderOidcSubClaim(resolvedSub), previewSub: renderOidcSubClaim(resolvedSub) };
+    const [, slug, rest] = match;
+    const preview = `repo:${slug}:pull_request`;
+    const deploy = rest === undefined || rest === '*' || rest.startsWith('ref:refs/heads/')
+        ? `repo:${slug}:ref:refs/heads/${deployBranch}`
+        : resolvedSub;
+    return { deploySub: renderOidcSubClaim(deploy), previewSub: renderOidcSubClaim(preview) };
+}
+
+// Centralized CI role-name construction (R1): the deploy/preview role
+// names rendered into oidc.tf, the workflow templates, and the drift/plan
+// scaffold calls all come from these builders.
+export function buildDeployRoleName(projectName, suffix) {
+    return `${projectName}${suffix}-github-actions-deploy-role`;
+}
+
+export function buildPreviewRoleName(projectName, suffix) {
+    return `${projectName}${suffix}-github-actions-preview-role`;
+}
+
+export function buildRoleArn(accountId, roleName) {
+    return `arn:aws:iam::${accountId}:role/${roleName}`;
+}
+
 // Classifies an existing tree's OIDC claim for re-init: a bare string (or
 // single-entry list, IAM-identical) renders verbatim; our own canonical
 // dual-format pair resolves back to its classic entry so re-init stays
@@ -868,6 +899,7 @@ async function mainStackMain(input = {}) {
 
     // 7. Synthesize Templates
     s.message('Synthesizing Terraform templates...');
+    const { deploySub, previewSub } = renderOidcRoleSubs(oidcTrustSub, config.branch);
     const renderConfig = {
         PROJECT_NAME: dirConfig.actualProjectName,
         RESOURCE_SUFFIX: resourceSuffix,
@@ -882,7 +914,10 @@ async function mainStackMain(input = {}) {
         HEALTH_CHECK_PATH: config.healthCheckPath,
         DESIRED_COUNT: config.desiredCount,
         DEPLOY_BRANCH: config.branch,
-        GITHUB_REPO_SUB: renderOidcSubClaim(oidcTrustSub),
+        DEPLOY_ROLE_NAME: buildDeployRoleName(dirConfig.actualProjectName, resourceSuffix),
+        PREVIEW_ROLE_NAME: buildPreviewRoleName(dirConfig.actualProjectName, resourceSuffix),
+        GITHUB_DEPLOY_SUB: deploySub,
+        GITHUB_PREVIEW_SUB: previewSub,
         BUILD_DIR: buildDir,
         finalFramework: config.framework,
         NEEDS_DATABASE: config.needsDatabase,
@@ -945,7 +980,7 @@ async function mainStackMain(input = {}) {
         // Hand edits trip refuse-dirty before this point; --force regenerates.
         const drifted = scaffoldDriftWorkflow(dirConfig.targetDir, {
             region: config.region,
-            roleArn: `arn:aws:iam::${awsAccountId}:role/${dirConfig.actualProjectName}${resourceSuffix}-github-actions-role`,
+            roleArn: buildRoleArn(awsAccountId, buildDeployRoleName(dirConfig.actualProjectName, resourceSuffix)),
             force: initOptions.force,
         });
         if (drifted.ok) {
@@ -959,7 +994,7 @@ async function mainStackMain(input = {}) {
         // role ARN) instead of silently keeping a stale copy.
         const planned = scaffoldPlanWorkflow(dirConfig.targetDir, {
             region: config.region,
-            roleArn: `arn:aws:iam::${awsAccountId}:role/${dirConfig.actualProjectName}${resourceSuffix}-github-actions-role`,
+            roleArn: buildRoleArn(awsAccountId, buildPreviewRoleName(dirConfig.actualProjectName, resourceSuffix)),
             force: initOptions.force,
         });
         if (planned.ok) {

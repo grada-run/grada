@@ -85,6 +85,18 @@ describe('findUnreconciledFiles', () => {
         const empty = tmp.makeTmp('reconcile-');
         expect(findUnreconciledFiles(empty)).toEqual([]);
     });
+
+    it('includes terraform/oidc.tf when its deny ARNs carry the placeholder', () => {
+        const dir = tmp.makeTmp('reconcile-');
+        writeBackend(dir, `myapp-tfstate-${ACCOUNT}`);
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'oidc.tf'),
+            `resource = "arn:aws:s3:::myapp-tfstate-${PLACEHOLDER_ACCOUNT_ID}"\n`
+        );
+
+        expect(findUnreconciledFiles(dir)).toEqual([path.join('terraform', 'oidc.tf')]);
+    });
 });
 
 describe('isValidAccountId', () => {

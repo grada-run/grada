@@ -3,8 +3,12 @@ title: "GitHub OIDC Authentication, No Stored AWS Keys"
 description: "Authenticate CI/CD with short-lived OIDC tokens instead of long-lived AWS keys."
 ---
 
-* **Status:** Accepted
+* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles — see below)
 * **Date:** 2026-09-24 (Retroactive)
+
+## Amendment (v0.48.0): Least-Privilege Role Split
+
+The original decision created one `<project>-github-actions-role` with `AdministratorAccess`. That role is now split: a deploy role (mainline deploys + drift checks, branch-bound trust) and a preview role (PR-triggered preview/teardown/plan workflows, pull-request-bound trust), both on `PowerUserAccess` + `IAMFullAccess` with explicit deny guardrails (audit/billing planes and state-bucket deletion for deploy; production data destruction, EC2 compute, and IAM backdoors for preview). Existing trees migrate by re-running setup, which regenerates `terraform/oidc.tf` and the workflow role ARNs; the old admin role is destroyed on the next apply. The zero-secret federation mechanism itself is unchanged.
 
 ## Context and Problem Statement
 

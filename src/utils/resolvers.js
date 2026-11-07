@@ -137,17 +137,29 @@ export function readTerraformOidcTrust(cwd = process.cwd()) {
     const base = resolveCwd({}, cwd);
     const oidcTf = readFileSafe(path.join(base, 'terraform', 'oidc.tf'));
     if (!oidcTf) return null;
-    const claimMatch = oidcTf.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*(\[[\s\S]*?\]|"[^"]*")/);
-    if (!claimMatch) {
-        const hasClaim = /"token\.actions\.githubusercontent\.com:sub"\s*:/.test(oidcTf);
-        return hasClaim ? { kind: 'unparseable' } : null;
-    }
-    const raw = claimMatch[1];
-    if (raw.startsWith('[')) {
-        const entries = [...raw.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    // Dual-role files carry two claims: anchor on the deploy role block so
+    // re-init resolves trust from the deploy claim even if the file is
+    // reordered. Legacy single-role files fall back to the first claim.
+    // The value is classified in place (never skipped past): a non-literal
+    // deploy claim must read unparseable, not silently resolve to the
+    // preview claim further down.
+    const deployScope = oidcTf.match(/resource\s+"aws_iam_role"\s+"github_actions_deploy"[\s\S]*/);
+    const scope = deployScope ? deployScope[0] : oidcTf;
+    const keyMatch = scope.match(/"token\.actions\.githubusercontent\.com:sub"\s*:\s*/);
+    if (!keyMatch) return null;
+    const after = scope.slice(keyMatch.index + keyMatch[0].length);
+    if (after.startsWith('[')) {
+        const listMatch = after.match(/^\[[\s\S]*?\]/);
+        if (!listMatch) return { kind: 'unparseable' };
+        const entries = [...listMatch[0].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
         return { kind: 'list', entries };
     }
-    return { kind: 'string', value: raw.slice(1, -1) };
+    if (after.startsWith('"')) {
+        const strMatch = after.match(/^"[^"]*"/);
+        if (!strMatch) return { kind: 'unparseable' };
+        return { kind: 'string', value: strMatch[0].slice(1, -1) };
+    }
+    return { kind: 'unparseable' };
 }
 
 // Index just past the `]` matching the `[` at openIdx (quoted regions

@@ -64,3 +64,25 @@ output "redis_endpoint" {
 output "redis_port" {
   value = aws_elasticache_replication_group.redis.port
 }
+
+# Preview guardrail fragment: the replication group ID is content-hashed,
+# so its ARN cannot be rebuilt by name in oidc.tf — deny by live reference
+# instead. Only rendered with the addon; count-matched to the preview role
+# so preview-workspace plans never evaluate it.
+resource "aws_iam_role_policy" "preview_deny_redis" {
+  count = terraform.workspace == "default" ? 1 : 0
+  name  = "${local.app_name}-preview-deny-redis"
+  role  = aws_iam_role.github_actions_preview[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "DenyProdRedisDestruction"
+        Effect   = "Deny"
+        Action   = ["elasticache:DeleteReplicationGroup", "elasticache:ModifyReplicationGroup"]
+        Resource = [aws_elasticache_replication_group.redis.arn]
+      },
+    ]
+  })
+}

@@ -3,7 +3,7 @@ name: Ephemeral PR Preview
 on:
   # pull_request_target (not pull_request): this file comes from the base
   # branch, so a fork PR cannot delete the same-repo guard below to reach
-  # the admin CI role (BUG-140). The PR head is checked out explicitly by
+  # the privileged CI roles (BUG-140). The PR head is checked out explicitly by
   # SHA in the guarded step instead.
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -52,7 +52,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         continue-on-error: true
         with:
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PREVIEW_ROLE_NAME}}
           aws-region: ${{ env.AWS_REGION }}
 
       # STS denies a missing role and a trust mismatch with the same
@@ -62,7 +62,7 @@ jobs:
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
-          ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role"
+          ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PREVIEW_ROLE_NAME}}"
           echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Login to Amazon ECR

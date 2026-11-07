@@ -19,8 +19,8 @@ grada automates the infrastructure, but a few steps inherently need a human: AWS
 
 ## Access and trust
 
-- [ ] **CI trust scoped to your repo.** `terraform/oidc.tf` should read `repo:<owner>/<name>:*`, not `repo:*` — scaffolded automatically from `--github-repo`, your git remote, or the setup prompt, and flagged by `doctor` when open. An open trust lets any GitHub repo's Actions assume the deploy role.
-- [ ] **Fork-PR approvals on.** `pull_request` events from forks carry the base repo identity, so even a scoped trust admits fork-PR workflows running attacker-controlled code with the deploy role. Keep GitHub's "require approval for outside collaborators" enabled (default on public repos).
+- [ ] **CI trust scoped to your repo.** `terraform/oidc.tf` should read `repo:<owner>/<name>:ref:refs/heads/<branch>` (deploy role) and `repo:<owner>/<name>:pull_request` (preview role), not `repo:*` — scaffolded automatically from `--github-repo`, your git remote, or the setup prompt, and flagged by `doctor` when open. An open trust lets any GitHub repo's Actions assume the CI roles.
+- [ ] **Fork-PR approvals on.** `pull_request` events from forks carry the base repo identity. The PR workflows stop fork runs with same-repo guards before any credentials are issued, and the preview role cannot destroy production data — but keep GitHub's "require approval for outside collaborators" enabled anyway (default on public repos) as defense in depth.
 
 ## Operations
 

@@ -3,7 +3,7 @@ name: Terraform Plan on PR
 on:
   # pull_request_target (not pull_request): this file comes from the base
   # branch, so a fork PR cannot delete the same-repo guard below to reach
-  # the admin CI role (BUG-140). The PR head is checked out explicitly by
+  # the privileged CI roles (BUG-140). The PR head is checked out explicitly by
   # SHA in the guarded step instead.
   pull_request_target:
     types: [opened, synchronize, reopened]

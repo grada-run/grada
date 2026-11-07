@@ -6,8 +6,6 @@
 # ($0.023/GB-mo), S3 PUT/GET requests, and CloudFront data transfer out
 # are billed by usage on top of the stack's fixed baseline.
 
-data "aws_caller_identity" "current" {}
-
 # --- Private S3 Bucket ---
 resource "aws_s3_bucket" "storage" {
   # Truncate and sanitize the prefix so the full account ID suffix always fits
@@ -177,4 +175,26 @@ output "s3_bucket_name" {
 
 output "s3_cdn_domain" {
   value = aws_cloudfront_distribution.storage_cdn.domain_name
+}
+
+# Preview guardrail fragment: the bucket name transform cannot be rebuilt
+# by name in oidc.tf — deny by live reference instead. Only rendered with
+# the addon; count-matched to the preview role so preview-workspace plans
+# never evaluate it.
+resource "aws_iam_role_policy" "preview_deny_storage" {
+  count = terraform.workspace == "default" ? 1 : 0
+  name  = "${local.app_name}-preview-deny-storage"
+  role  = aws_iam_role.github_actions_preview[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "DenyProdStorageDestruction"
+        Effect   = "Deny"
+        Action   = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
+        Resource = [aws_s3_bucket.storage.arn, "${aws_s3_bucket.storage.arn}/*"]
+      },
+    ]
+  })
 }

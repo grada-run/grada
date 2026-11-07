@@ -23,8 +23,6 @@ locals {
   app_name = "{{PROJECT_NAME}}${local.env_suffix}${local.grada_resource_suffix}"
 }
 
-data "aws_caller_identity" "current" {}
-
 # --- Static site bucket (private; CloudFront reads via OAC) ---
 # NOTE: the bucket name embeds the AWS account ID so CI can reconstruct it
 # without terraform outputs: {{PROJECT_NAME}}-site-{{AWS_ACCOUNT_ID}}.

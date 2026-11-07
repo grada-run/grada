@@ -23,7 +23,13 @@ permissions:
   contents: read
 ```
 
-and assumes the `{{PROJECT_NAME}}-github-actions-role` IAM role created by `terraform/oidc.tf`. There is nothing to rotate and no secret to leak. The role's trust is scoped to your repo at scaffold time — from `--github-repo`, your git remote, or the setup prompt — instead of the open `repo:*`; `doctor` flags trees that still carry the open trust. Scoped trusts cover both GitHub subject-claim formats (classic `repo:<owner>/<name>:*` plus the immutable-claim companion for repos created after July 2026), and re-running setup upgrades older classic-only trusts automatically. (If your AWS account already has a GitHub OIDC provider, set `create_oidc_provider = false` in `terraform/grada.auto.tfvars` — see [apply](/grada/cli/apply/).)
+and assumes the deploy IAM role created by `terraform/oidc.tf`. There is nothing to rotate and no secret to leak.
+
+## Two CI roles: deploy and preview
+
+`terraform/oidc.tf` provisions two least-privilege roles instead of one admin role. The **deploy role** (`<project>-github-actions-deploy-role`) is assumed by `deploy.yml` and `drift.yml`; its trust is bound to your deploy branch. The **preview role** (`<project>-github-actions-preview-role`) is assumed by `preview.yml`, `teardown.yml`, and `plan.yml`; its trust is bound to pull request events. Both start from `PowerUserAccess` + `IAMFullAccess` (no `AdministratorAccess` anywhere), with guardrails on top: the deploy role cannot touch audit/billing planes or delete the state bucket, and the preview role cannot destroy production data (state, databases, queues, tables, caches, images, services), mint EC2 compute, or open IAM backdoors. Preview guardrails name exact production ARNs, so `pr-*` preview resources keep working — and fork PRs never reach either role: the PR workflows carry same-repo guards plus a loud skip notice.
+
+Trust is scoped to your repo at scaffold time — from `--github-repo`, your git remote, or the setup prompt — instead of the open `repo:*`; `doctor` flags trees that still carry the open trust. Scoped trusts cover both GitHub subject-claim formats (classic `repo:<owner>/<name>:...` plus the immutable-claim companion for repos created after July 2026), and re-running setup upgrades older single-role trusts automatically. (If your AWS account already has a GitHub OIDC provider, set `create_oidc_provider = false` in `terraform/grada.auto.tfvars` — see [apply](/grada/cli/apply/).)
 
 ## The six stages
 

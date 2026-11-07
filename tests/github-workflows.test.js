@@ -331,6 +331,26 @@ describe('github workflow templates', () => {
         expect(raw).toContain('-lock-timeout=5m');
     });
 
+    it.each([
+        ['deploy.yml', 'DEPLOY_ROLE_NAME'],
+        ['deploy-lambda.yml', 'DEPLOY_ROLE_NAME'],
+        ['deploy-static.yml', 'DEPLOY_ROLE_NAME'],
+        ['preview.yml', 'PREVIEW_ROLE_NAME'],
+        ['preview-lambda.yml', 'PREVIEW_ROLE_NAME'],
+        ['teardown.yml', 'PREVIEW_ROLE_NAME'],
+    ])('%s assumes the {{%s}} role', (filename, placeholder) => {
+        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        expect(raw).toContain(`role/{{${placeholder}}}`);
+        expect(raw).not.toMatch(/-github-actions-role["'\s]/);
+    });
+
+    it('drift.yml and plan.yml keep the scaffolded {{ROLE_ARN}} placeholder', () => {
+        for (const filename of ['drift.yml', 'plan.yml']) {
+            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            expect(raw).toContain('role-to-assume: {{ROLE_ARN}}');
+        }
+    });
+
     it('teardown.yml destroys same-repo previews only', () => {
         const doc = parseTemplate('teardown.yml');
         expect(doc.on.pull_request, 'teardown.yml must not trigger on pull_request').toBeUndefined();

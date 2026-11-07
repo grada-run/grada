@@ -84,4 +84,6 @@ npx grada-run secrets audit   # diff local .env vs AWS, change nothing
 | New machine / lost `.env` | `secrets pull` |
 | "Why doesn't my app see the new value?" | `secrets audit` first, then push or restart accordingly |
 
+> ⚠️ **Preview roles can read the vault.** The vault is shared per project (previews are not namespaced), so the preview CI role necessarily gets `GetSecretValue` on production secrets. PR workflows stop fork runs before credentials are issued, and the preview role cannot destroy production data — but treat vault contents as readable from any PR-triggered run and keep fork-PR approvals on.
+
 See the [secrets CLI reference](/grada/cli/secrets/) for flags, merge rules, and prerequisites.

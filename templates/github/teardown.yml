@@ -46,7 +46,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         continue-on-error: true
         with:
-          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role
+          role-to-assume: arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PREVIEW_ROLE_NAME}}
           aws-region: ${{ env.AWS_REGION }}
 
       # STS denies a missing role and a trust mismatch with the same
@@ -56,7 +56,7 @@ jobs:
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
-          ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-github-actions-role"
+          ROLE_ARN="arn:aws:iam::{{AWS_ACCOUNT_ID}}:role/{{PREVIEW_ROLE_NAME}}"
           echo "::notice::AWS credential assumption failed for $ROLE_ARN — skipping this run. Either the stack is absent (never provisioned or destroyed — re-bootstrap with: npx grada-run apply) or the OIDC trust does not cover this run (check terraform/oidc.tf)."
 
       - name: Setup Terraform

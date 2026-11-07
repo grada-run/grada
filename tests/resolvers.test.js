@@ -68,6 +68,40 @@ describe('readTerraformOidcTrust', () => {
         writeOidc(dir, body);
         expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'unparseable' });
     });
+
+    it('reads the deploy role claim from dual-role files regardless of order', () => {
+        const dir = makeTmp();
+        writeOidc(dir, [
+            'resource "aws_iam_role" "github_actions_preview" {',
+            '  assume_role_policy = jsonencode({ Statement = [{ Condition = { StringLike = {',
+            '    "token.actions.githubusercontent.com:sub" : "repo:acme/widgets:pull_request"',
+            '  } } }] })',
+            '}',
+            'resource "aws_iam_role" "github_actions_deploy" {',
+            '  assume_role_policy = jsonencode({ Statement = [{ Condition = { StringLike = {',
+            '    "token.actions.githubusercontent.com:sub" : ["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            '  } } }] })',
+            '}',
+            '',
+        ].join('\n'));
+        expect(readTerraformOidcTrust(dir)).toEqual({
+            kind: 'list',
+            entries: ['repo:acme/widgets:ref:refs/heads/main', 'repo:acme@*/widgets@*:ref:refs/heads/main'],
+        });
+    });
+
+    it('falls back to the first claim for legacy single-role files', () => {
+        const dir = makeTmp();
+        writeOidc(dir, [
+            'resource "aws_iam_role" "github_actions" {',
+            '  assume_role_policy = jsonencode({ Statement = [{ Condition = { StringLike = {',
+            '    "token.actions.githubusercontent.com:sub" : "repo:acme/widgets:*"',
+            '  } } }] })',
+            '}',
+            '',
+        ].join('\n'));
+        expect(readTerraformOidcTrust(dir)).toEqual({ kind: 'string', value: 'repo:acme/widgets:*' });
+    });
 });
 
 describe('readRenderedContainerEnvNames', () => {

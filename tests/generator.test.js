@@ -86,7 +86,10 @@ describe('Infrastructure Generator', () => {
                 HEALTH_CHECK_PATH: '/health',
                 DESIRED_COUNT: '1',
                 DEPLOY_BRANCH: 'main',
-                GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+                GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+                GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+                DEPLOY_ROLE_NAME: `test-${tc.name.toLowerCase()}-github-actions-deploy-role`,
+                PREVIEW_ROLE_NAME: `test-${tc.name.toLowerCase()}-github-actions-preview-role`,
                 BUILD_DIR: tc.buildDir,
                 finalFramework: tc.framework,
                 NEEDS_DATABASE: tc.needsDb,
@@ -203,7 +206,10 @@ describe('worker.tf without a database', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'test-nodb-worker-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'test-nodb-worker-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -267,7 +273,10 @@ describe('database env vars render as bare HCL references', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'test-db-refs-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'test-db-refs-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: true,
@@ -327,7 +336,10 @@ describe('multi-engine database generation', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'test-db-engine-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'test-db-engine-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: true,
@@ -407,7 +419,10 @@ describe('Generator gitignore handling of secret_keys.json', () => {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
-        GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+        GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+        GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+        DEPLOY_ROLE_NAME: 'test-gitignore-github-actions-deploy-role',
+        PREVIEW_ROLE_NAME: 'test-gitignore-github-actions-preview-role',
         BUILD_DIR: '',
         finalFramework: 'node',
         NEEDS_DATABASE: false,
@@ -477,7 +492,10 @@ describe('Generator doc ownership & secret_keys preservation', () => {
         HEALTH_CHECK_PATH: '/health',
         DESIRED_COUNT: '1',
         DEPLOY_BRANCH: 'main',
-        GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+        GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+        GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+        DEPLOY_ROLE_NAME: 'test-docs-github-actions-deploy-role',
+        PREVIEW_ROLE_NAME: 'test-docs-github-actions-preview-role',
         BUILD_DIR: '',
         finalFramework: 'node',
         NEEDS_DATABASE: false,
@@ -641,7 +659,10 @@ describe('Infrastructure Generator: --target lambda', () => {
             HEALTH_CHECK_PATH: '/',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'test-lambda-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'test-lambda-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -892,7 +913,10 @@ describe('ALB origin secret (BUG-91)', () => {
                 MEMORY: '512', COMPUTE_TIER: 'Micro', ESTIMATED_COST: '30.00',
                 STATE_BUCKET: 'test-bucket-123', AWS_ACCOUNT_ID: '123456789012',
                 HEALTH_CHECK_PATH: '/health', DESIRED_COUNT: '1', DEPLOY_BRANCH: 'main',
-                GITHUB_REPO_SUB: '["repo:acme/widgets:*"]', BUILD_DIR: '',
+                GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+                GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+                DEPLOY_ROLE_NAME: 'test-ecs', REGION: 'us-east-2', PORT: '3000', CPU: '256-github-actions-deploy-role',
+                PREVIEW_ROLE_NAME: 'test-ecs', REGION: 'us-east-2', PORT: '3000', CPU: '256-github-actions-preview-role',
                 finalFramework: 'node', NEEDS_DATABASE: false, DB_ENGINE: 'postgres',
                 DISABLE_DEFAULT_CI: false,
             });
@@ -942,7 +966,10 @@ describe('Infrastructure Generator: --target static', () => {
             HEALTH_CHECK_PATH: '/',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'test-static-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'test-static-github-actions-preview-role',
             BUILD_DIR: 'dist',
             finalFramework: 'static',
             NEEDS_DATABASE: false,
@@ -995,12 +1022,18 @@ describe('Infrastructure Generator: --target static', () => {
         await expect(fs.stat(path.join(staticTargetDir, '.dockerignore'))).rejects.toThrow();
     });
 
-    it('renders the OIDC trust from GITHUB_REPO_SUB with no leftover placeholder', async () => {
+    it('renders both OIDC trusts with no leftover placeholder', async () => {
         await generateTemplates(staticTargetDir, staticConfig());
 
         const oidcTf = await readTf('oidc.tf');
-        expect(oidcTf).toContain('"token.actions.githubusercontent.com:sub" : ["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]');
-        expect(oidcTf).not.toContain('{{GITHUB_REPO_SUB}}');
+        expect(oidcTf).toContain('"token.actions.githubusercontent.com:sub" : ["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]');
+        expect(oidcTf).toContain('"token.actions.githubusercontent.com:sub" : ["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]');
+        expect(oidcTf).toContain('name  = "test-static-github-actions-deploy-role"');
+        expect(oidcTf).toContain('name  = "test-static-github-actions-preview-role"');
+        expect(oidcTf).not.toContain('{{GITHUB_DEPLOY_SUB}}');
+        expect(oidcTf).not.toContain('{{GITHUB_PREVIEW_SUB}}');
+        expect(oidcTf).not.toContain('{{DEPLOY_ROLE_NAME}}');
+        expect(oidcTf).not.toContain('{{PREVIEW_ROLE_NAME}}');
     });
 
     it('deploys by syncing the build output instead of building images', async () => {
@@ -1117,7 +1150,10 @@ describe('R18: sleep auto-vars guards (plan-identity fixtures)', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '2',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'test-r18-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'test-r18-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -1216,7 +1252,10 @@ describe('M2: GradaProject default tag in all provider blocks', () => {
                 HEALTH_CHECK_PATH: '/health',
                 DESIRED_COUNT: '1',
                 DEPLOY_BRANCH: 'main',
-                GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+                GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+                GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+                DEPLOY_ROLE_NAME: 'taggy-github-actions-deploy-role',
+                PREVIEW_ROLE_NAME: 'taggy-github-actions-preview-role',
                 BUILD_DIR: '',
                 finalFramework: 'node',
                 NEEDS_DATABASE: false,
@@ -1262,7 +1301,10 @@ describe('Compose merge safety', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'composy-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'composy-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'nextjs',
             NEEDS_DATABASE: false,
@@ -1419,7 +1461,10 @@ describe('Managed env names list (BUG-81 CI cover)', () => {
             HEALTH_CHECK_PATH: '/health',
             DESIRED_COUNT: '1',
             DEPLOY_BRANCH: 'main',
-            GITHUB_REPO_SUB: '["repo:acme/widgets:*", "repo:acme@*/widgets@*:*"]',
+            GITHUB_DEPLOY_SUB: '["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            GITHUB_PREVIEW_SUB: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+            DEPLOY_ROLE_NAME: 'managedy-github-actions-deploy-role',
+            PREVIEW_ROLE_NAME: 'managedy-github-actions-preview-role',
             BUILD_DIR: '',
             finalFramework: 'node',
             NEEDS_DATABASE: false,
@@ -1598,5 +1643,56 @@ describe('terraform template safety nets (carried P4s)', () => {
         const s3 = await readTf('addons', 's3.tf');
         expect(s3).toMatch(/price_class\s*=\s*"PriceClass_All"/);
         expect(s3).toMatch(/logging.*disabled|disabled.*logging/i);
+    });
+});
+
+describe('oidc.tf dual-role shape', () => {
+    const OIDC_TEMPLATE = path.resolve('templates/terraform/oidc.tf');
+
+    it('provisions deploy + preview roles with parameterized trust', async () => {
+        const raw = await fs.readFile(OIDC_TEMPLATE, 'utf8');
+        expect(raw).toContain('resource "aws_iam_role" "github_actions_deploy"');
+        expect(raw).toContain('resource "aws_iam_role" "github_actions_preview"');
+        expect(raw).toContain('{{DEPLOY_ROLE_NAME}}');
+        expect(raw).toContain('{{PREVIEW_ROLE_NAME}}');
+        expect(raw).toContain('{{GITHUB_DEPLOY_SUB}}');
+        expect(raw).toContain('{{GITHUB_PREVIEW_SUB}}');
+        expect(raw).not.toContain('{{GITHUB_REPO_SUB}}');
+        expect(raw).not.toContain('arn:aws:iam::aws:policy/AdministratorAccess');
+    });
+
+    it('attaches PowerUser + IAMFullAccess to both roles with boundary denies on deploy', async () => {
+        const raw = await fs.readFile(OIDC_TEMPLATE, 'utf8');
+        expect(raw).toContain('arn:aws:iam::aws:policy/PowerUserAccess');
+        expect(raw).toContain('arn:aws:iam::aws:policy/IAMFullAccess');
+        expect(raw).toContain('cloudtrail:*');
+        expect(raw).toContain('organizations:*');
+        expect(raw).toContain('s3:DeleteBucket');
+    });
+
+    it('denies compute abuse, backdoors, and prod-ARN destruction on the preview role', async () => {
+        const raw = await fs.readFile(OIDC_TEMPLATE, 'utf8');
+        expect(raw).toContain('ec2:RunInstances');
+        expect(raw).toContain('iam:CreateUser');
+        expect(raw).toContain('iam:CreateAccessKey');
+        for (const action of [
+            's3:DeleteBucket', 's3:DeleteObjectVersion',
+            'ecs:UpdateService', 'ecs:DeleteService', 'ecs:DeleteCluster',
+            'ecr:BatchDeleteImage',
+            'lambda:UpdateFunctionCode', 'lambda:DeleteFunction',
+            'sqs:PurgeQueue', 'sqs:DeleteQueue',
+            'rds:DeleteDBInstance', 'rds:ModifyDBInstance', 'rds:ModifyDBSnapshotAttribute',
+            'rds:DeleteDBCluster', 'rds:ModifyDBCluster',
+            'dynamodb:DeleteTable',
+        ]) {
+            expect(raw, action).toContain(action);
+        }
+    });
+
+    it('builds prod ARNs from rendered names + data sources, never local.entropy', async () => {
+        const raw = await fs.readFile(OIDC_TEMPLATE, 'utf8');
+        expect(raw).not.toContain('local.entropy');
+        expect(raw).toContain('data "aws_caller_identity" "current"');
+        expect(raw).toContain('data "aws_region" "current"');
     });
 });

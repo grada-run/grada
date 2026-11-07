@@ -2,9 +2,10 @@ import fs from 'fs';
 import path from 'path';
 
 // Token offline scaffolds (`init --offline`) leave where the AWS account
-// ID belongs: the bucket name in terraform/backend.tf plus every
-// role-to-assume ARN in .github/workflows/*.yml. Detection only —
-// rewriting lives in apply's reconcile pre-step.
+// ID belongs: the bucket name in terraform/backend.tf, the state-bucket
+// deny ARNs in terraform/oidc.tf, plus every role-to-assume ARN in
+// .github/workflows/*.yml. Detection only — rewriting lives in apply's
+// reconcile pre-step.
 export const PLACEHOLDER_ACCOUNT_ID = 'YOUR_AWS_ACCOUNT_ID';
 
 // Repo-relative paths still containing the placeholder (`[]` when the
@@ -23,6 +24,7 @@ export function findUnreconciledFiles(targetDir) {
         if (content.includes(PLACEHOLDER_ACCOUNT_ID)) found.push(repoPath);
     };
     check(path.join('terraform', 'backend.tf'));
+    check(path.join('terraform', 'oidc.tf'));
     let entries = [];
     try {
         entries = fs.readdirSync(path.join(targetDir, '.github', 'workflows'));

@@ -106,7 +106,7 @@ description: Where grada has been and what comes next — completed phases and t
 - [x] **The npx Trap Fix:** Generate framework-compiled runners instead of guaranteed-to-fail `npx` commands, with a headless refusal and interactive warning guardrail.
 - [x] **Automated Pre-Migration Snapshots:** Take an RDS snapshot automatically before the CI migration gate runs.
 - [x] **Generic One-Off Task Runner:** `grada run --cmd "..."` executes backfills, admin scripts, and repairs in an ephemeral VPC task with live log streaming. See [run](/grada/cli/run/).
-- [ ] **Least-Privilege CI Roles:** Replace the provisioning role's `AdministratorAccess` with least-privilege policies and split preview workflows onto a minimal role (fork PRs carry the base repo identity).
+- [x] **Least-Privilege CI Roles:** Two roles — deploy (branch-bound trust) and preview (pull-request-bound trust) — on managed baselines with explicit deny guardrails.
 - [ ] **High-Conversion `grada.run` Launch Site:** Ship the flagship marketing front-end above the Starlight docs with interactive terminal demos, a cost savings calculator, and a capability matrix.
 - [x] **Migration Guide Deep Review:** Re-verify every migration flow end to end and rewrite the guides to be accurate click-by-click.
 - [ ] **Ecosystem Rebrand to Grada:** Rename the `deploy-stack-*` repositories, framework integrations, and starters to the Grada brand with updated READMEs and listings.

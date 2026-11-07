@@ -50,7 +50,7 @@ The project name is read back out of the existing tree (`app_name` in `terraform
 
 ## The OIDC trust survives re-runs
 
-The CI trust is read back out of the existing tree (`terraform/oidc.tf`) and re-rendered verbatim — re-running setup never re-derives it from the git remote or re-prompts, so an explicit `--github-repo` re-scope is the only thing that changes it. Trees that still carry the open `repo:*` trust keep it (with a warning); `doctor` flags them until re-scoped. Single-entry lists unwrap to their bare string (IAM-identical); multi-entry lists and non-literal claims (`var.x`) can never silently widen to `repo:*` — headless refuses (`OIDC_TRUST_WIDENING_REFUSED`), interactive confirms explicitly.
+The CI trust's repo scope is read back out of the existing tree (`terraform/oidc.tf`, deploy role) and preserved — re-running setup never re-derives it from the git remote or re-prompts, so an explicit `--github-repo` re-scope is the only thing that changes it. The deploy trust is re-bound to the effective deploy branch (the same branch rendered into the deploy trigger); legacy single-role trees are upgraded to the deploy/preview split automatically. Trees that still carry the open `repo:*` trust keep it (with a warning); `doctor` flags them until re-scoped. Single-entry lists unwrap to their bare string (IAM-identical); multi-entry lists and non-literal claims (`var.x`) can never silently widen to `repo:*` — headless refuses (`OIDC_TRUST_WIDENING_REFUSED`), interactive confirms explicitly.
 
 ## Suggested workflow
 
