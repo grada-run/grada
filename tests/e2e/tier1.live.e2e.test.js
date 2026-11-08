@@ -7,7 +7,9 @@ import path from 'node:path';
 import {
     e2eEnv,
     assertPrerequisites,
-    commandExists,
+    assertImageBuildPrereqs,
+    adoptSharedOidcProvider,
+    buildAndPushImage,
     makeTmpDir,
     removeDir,
     run,
@@ -15,7 +17,6 @@ import {
     sleep,
     readBackendBucket,
     readBackendRegion,
-    readTerraformOutput,
 } from './helpers.js';
 
 const env = e2eEnv({ mockAws: false });
@@ -55,13 +56,7 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 1: live lifecycle', () => 
 
     beforeAll(() => {
         assertPrerequisites();
-        for (const cmd of ['docker', 'aws']) {
-            if (!commandExists(cmd)) {
-                throw new Error(
-                    `Tier 1 E2E requires ${cmd} on PATH to build and push the fixture image.`
-                );
-            }
-        }
+        assertImageBuildPrereqs('Tier 1');
         dir = makeTmpDir('tier1-live');
     });
 
@@ -111,12 +106,7 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 1: live lifecycle', () => 
             // The Tier-1 account hosts a permanent OIDC provider (shared
             // with the bedrock-sync role), so adopt it instead of creating
             // one — AWS allows a single provider per account.
-            const oidcTfPath = path.join(dir, 'terraform', 'oidc.tf');
-            const oidcTf = fs.readFileSync(oidcTfPath, 'utf-8');
-            expect(oidcTf).toContain('variable "create_oidc_provider"');
-            const adopted = oidcTf.replace(/default\s*=\s*true/, 'default     = false');
-            expect(adopted).not.toBe(oidcTf);
-            fs.writeFileSync(oidcTfPath, adopted);
+            adoptSharedOidcProvider(dir);
 
             const apply = runCli(['apply', '--auto-approve'], { cwd: dir, env });
             expect(apply.status).toBe(0);
@@ -130,21 +120,7 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 1: live lifecycle', () => 
             // builds and pushes the fixture image itself, mirroring the
             // generated deploy.yml (build -> push :latest -> redeploy).
             const region = readBackendRegion(dir);
-            const ecrUrl = readTerraformOutput(dir, 'ecr_repository_url', env);
-            const image = `${ecrUrl}:latest`;
-            const registry = ecrUrl.split('/')[0];
-
-            const password = run('aws', ['ecr', 'get-login-password', '--region', region], { cwd: dir, env, capture: true });
-            expect(password.status).toBe(0);
-
-            const login = run('docker', ['login', '--username', 'AWS', '--password-stdin', registry], { cwd: dir, env, capture: true, input: password.stdout });
-            expect(login.status).toBe(0);
-
-            const build = run('docker', ['build', '-t', image, '.'], { cwd: dir, env });
-            expect(build.status).toBe(0);
-
-            const push = run('docker', ['push', image], { cwd: dir, env });
-            expect(push.status).toBe(0);
+            const { ecrUrl } = buildAndPushImage({ dir, env, region });
 
             // The service was created against an empty repo; force a fresh
             // deployment now that :latest exists instead of waiting on the

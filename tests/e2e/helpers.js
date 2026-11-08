@@ -65,6 +65,63 @@ export function removeDir(dir) {
     fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// Container-image prerequisites for the live suites (Tier 1 + Tier 2):
+// docker builds the fixture image, aws fetches the ECR login password.
+export function assertImageBuildPrereqs(suite) {
+    for (const cmd of ['docker', 'aws']) {
+        if (!commandExists(cmd)) {
+            throw new Error(
+                `${suite} E2E requires ${cmd} on PATH to build and push the fixture image.`
+            );
+        }
+    }
+}
+
+// Adopt the account's permanent OIDC provider instead of creating one (AWS
+// allows a single provider per account). Shared by the live suites; throws
+// when the scaffolded oidc.tf lacks the expected variable or default.
+export function adoptSharedOidcProvider(projectDir) {
+    const oidcTfPath = path.join(projectDir, 'terraform', 'oidc.tf');
+    const oidcTf = fs.readFileSync(oidcTfPath, 'utf-8');
+    if (!oidcTf.includes('variable "create_oidc_provider"')) {
+        throw new Error('expected variable "create_oidc_provider" in terraform/oidc.tf');
+    }
+    const adopted = oidcTf.replace(/default\s*=\s*true/, 'default     = false');
+    if (adopted === oidcTf) {
+        throw new Error('could not flip create_oidc_provider default to false in terraform/oidc.tf');
+    }
+    fs.writeFileSync(oidcTfPath, adopted);
+}
+
+// Build the fixture image and push it to the scaffolded ECR repository,
+// mirroring the generated deploy.yml (build -> push :latest). Returns the
+// pushed image URI plus the repository URL (callers derive suffixed names
+// from the latter). Shared by the live suites; throws with the tool output
+// attached when any step fails.
+export function buildAndPushImage({ dir, env, region }) {
+    const ecrUrl = readTerraformOutput(dir, 'ecr_repository_url', env);
+    const image = `${ecrUrl}:latest`;
+    const registry = ecrUrl.split('/')[0];
+
+    const password = run('aws', ['ecr', 'get-login-password', '--region', region], { cwd: dir, env, capture: true });
+    if (password.status !== 0) {
+        throw new Error(`aws ecr get-login-password failed: ${password.output.trim()}`);
+    }
+    const login = run('docker', ['login', '--username', 'AWS', '--password-stdin', registry], { cwd: dir, env, capture: true, input: password.stdout });
+    if (login.status !== 0) {
+        throw new Error(`docker login to ${registry} failed: ${login.output.trim()}`);
+    }
+    const build = run('docker', ['build', '-t', image, '.'], { cwd: dir, env });
+    if (build.status !== 0) {
+        throw new Error(`docker build ${image} failed with exit ${build.status}`);
+    }
+    const push = run('docker', ['push', image], { cwd: dir, env });
+    if (push.status !== 0) {
+        throw new Error(`docker push ${image} failed with exit ${push.status}`);
+    }
+    return { image, ecrUrl };
+}
+
 // Run the real CLI with stdin always closed (headless purity: a prompt
 // crashes loudly instead of hanging). Output is inherited for visibility
 // unless capture is requested for assertions.

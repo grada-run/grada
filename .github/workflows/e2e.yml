@@ -75,3 +75,58 @@ jobs:
           name: e2e-tier1-workspace
           path: tests/e2e/.tmp/
           if-no-files-found: ignore
+
+  tier2:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: grada-e2e-tier2
+      cancel-in-progress: false
+    env:
+      E2E_TMP_ROOT: ${{ github.workspace }}/tests/e2e/.tmp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      - name: Run Tier 2 live-service E2E
+        run: npm run test:e2e:tier2
+
+      # Workspace-scoped fallback: gc reads the project name and resource
+      # suffix from the cwd's terraform/ tree, so both commands must run
+      # inside each surviving workspace (a repo-root gc would scan the
+      # wrong project). Successful suites remove their workspace, so the
+      # loop no-ops on green runs.
+      - name: Guaranteed teardown (destroy then gc)
+        if: always()
+        run: |
+          for d in tests/e2e/.tmp/tier2-live-*/; do
+            [ -d "$d" ] || continue
+            (cd "$d" && node "${{ github.workspace }}/bin/cli.js" destroy --headless --yes --allow-data-loss)
+            (cd "$d" && node "${{ github.workspace }}/bin/cli.js" gc --headless --yes)
+          done
+
+      - name: Upload workspace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-tier2-workspace
+          path: tests/e2e/.tmp/
+          if-no-files-found: ignore

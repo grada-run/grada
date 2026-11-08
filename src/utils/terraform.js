@@ -338,7 +338,7 @@ export async function getTerraformStateBuckets(cwd) {
 // state), missing keys warn (conservative start to avoid false
 // positives on customized trees).
 export const EXPECTED_OUTPUT_KEYS = {
-    ecs: ['alb_direct_url', 'ecr_repository_url'],
+    ecs: ['alb_direct_url', 'ecr_repository_url', 'ecs_task_role_arn'],
     lambda: ['api_gateway_url', 'ecr_repository_url'],
     static: ['site_url'],
 };

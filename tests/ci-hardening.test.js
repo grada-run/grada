@@ -147,3 +147,30 @@ describe('Shift-left: local test:iac matches blocking CI scans', () => {
         expect(yml).toContain('aquasec/trivy config --exit-code 1 --severity HIGH,CRITICAL');
     });
 });
+
+describe('Tier 2 live-service job in e2e.yml', () => {
+    it('runs tier2 on schedule/manual dispatch with a 90-minute timeout', () => {
+        const yml = readRepo('.github/workflows/e2e.yml');
+        expect(yml).toContain('tier2:');
+        expect(yml).toContain("if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'");
+        expect(yml).toContain('timeout-minutes: 90');
+        expect(yml).toContain('npm run test:e2e:tier2');
+    });
+
+    it('queues overlapping runs instead of cancelling them', () => {
+        const yml = readRepo('.github/workflows/e2e.yml');
+        expect(yml).toContain('group: grada-e2e-tier2');
+        expect(yml).toContain('cancel-in-progress: false');
+    });
+
+    it('guarantees destroy then gc in an always() fallback with artifact upload', () => {
+        const yml = readRepo('.github/workflows/e2e.yml');
+        const tier2 = yml.slice(yml.indexOf('tier2:'));
+        expect(tier2).toContain('if: always()');
+        const destroyIdx = tier2.indexOf('destroy --headless --yes --allow-data-loss');
+        const gcIdx = tier2.indexOf('gc --headless --yes');
+        expect(destroyIdx).toBeGreaterThan(-1);
+        expect(gcIdx).toBeGreaterThan(destroyIdx);
+        expect(tier2).toContain('e2e-tier2-workspace');
+    });
+});

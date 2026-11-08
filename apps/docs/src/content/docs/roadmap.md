@@ -86,9 +86,9 @@ description: Where grada has been and what comes next — completed phases and t
   - [x] Lifecycle fixes: asleep-`apply` gate, idempotent `wake`, eject markers, `rollback` diagnostics, `add` upserts, `--strict` sleep/wake (see `specs/state-transition-audit-fixes.md`).
   - [x] Cross-command seams: `destroy` data-loss gate, `apply` target-switch gates, wake-first eject, atomic writes (see `specs/state-transition-audit-fixes-2.md`).
   - [x] Collision-resistant naming: entropy suffix, state adoption gate, backend recovery (see `specs/resource-naming-entropy.md`).
-- [x] **Two-Tier E2E Harness & Automation Bypasses:** Black-box Tier 0 (every PR) and Tier 1 (nightly live lifecycle) suites, plus `--auto-approve`/`--yes`/`--headless` bypasses for `apply`, `destroy`, and `eject`.
+- [x] **Three-Tier E2E Harness & Automation Bypasses:** Black-box Tier 0 (every PR), Tier 1 (nightly live lifecycle), and Tier 2 (nightly live-service acceptance) suites, plus `--auto-approve`/`--yes`/`--headless` bypasses for `apply`, `destroy`, and `eject`.
 - [x] **Deterministic Suite & Flaky Test Elimination:** Isolate network/loopback and SDK mocks in the Vitest suite and eliminate timing-dependent failures.
-- [ ] **Live Service Acceptance (Tier 2 E2E):** Provision each add-on capability on real AWS (nightly) and verify runtime behavior — SQS send/receive + DLQ, DynamoDB put/get, Redis connectivity, S3 presigned-URL flow, SES send, Bedrock invoke, cron scheduling — with per-service setup/assert/teardown and spend caps.
+- [x] **Live Service Acceptance (Tier 2 E2E):** Nightly run proving addon wiring and task IAM/VPC access on real AWS (see testing-strategy).
 - [x] **Multi-Stage Dockerfile Hardening:** Multi-stage Alpine builds stripping package managers from the final runtime image. Distroless runners were evaluated and rejected (no shell breaks ECS Exec debugging) — see ADR-0012.
 - [x] **Test Suite Deduplication & Hygiene:** Centralize the `@clack/prompts` and `telemetry` mocks in `tests/helpers/`, registered suite-wide via `tests/setup.js`.
 - [x] **Golden Signals Live Telemetry:** `grada status` (and `--watch`) surfaces real-time CloudWatch Golden Signals at $0 extra AWS cost. Lambda signals deferred.

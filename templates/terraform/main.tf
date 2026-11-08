@@ -337,6 +337,11 @@ output "ecr_repository_url" {
   value       = local.ecr_url
 }
 
+output "ecs_task_role_arn" {
+  description = "ARN of the ECS task IAM role (used by Tier 2 live-service assertions)"
+  value       = aws_iam_role.task_role.arn
+}
+
 # --- CloudWatch Alarms ---
 # State-only alarm: visible in the console, notifies nobody. There is no
 # notification destination at scaffold time; `grada alerts` provisions

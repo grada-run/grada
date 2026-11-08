@@ -146,7 +146,7 @@ describe('S13 mechanics: lifecycle wrapper (R6)', () => {
 
 describe('R22: outputs contract per-target keys', () => {
     it('pins the expected keys per target', () => {
-        expect(EXPECTED_OUTPUT_KEYS.ecs).toEqual(['alb_direct_url', 'ecr_repository_url']);
+        expect(EXPECTED_OUTPUT_KEYS.ecs).toEqual(['alb_direct_url', 'ecr_repository_url', 'ecs_task_role_arn']);
         expect(EXPECTED_OUTPUT_KEYS.lambda).toEqual(['api_gateway_url', 'ecr_repository_url']);
         expect(EXPECTED_OUTPUT_KEYS.static).toEqual(['site_url']);
     });
@@ -162,12 +162,12 @@ describe('R22: outputs contract per-target keys', () => {
     it('flags missing keys on non-empty maps', () => {
         const check = checkOutputsContract({ cloudfront_url: { value: 'https://x' } }, 'ecs');
         expect(check.empty).toBe(false);
-        expect(check.missing).toEqual(['alb_direct_url', 'ecr_repository_url']);
+        expect(check.missing).toEqual(['alb_direct_url', 'ecr_repository_url', 'ecs_task_role_arn']);
     });
 
     it('passes healthy maps and vacuous unknown targets', () => {
         const check = checkOutputsContract(
-            { alb_direct_url: { value: 'a' }, ecr_repository_url: { value: 'b' } },
+            { alb_direct_url: { value: 'a' }, ecr_repository_url: { value: 'b' }, ecs_task_role_arn: { value: 'c' } },
             'ecs'
         );
         expect(check.empty).toBe(false);
