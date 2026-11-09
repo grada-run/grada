@@ -3,9 +3,9 @@ import path from 'path';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import color from 'picocolors';
 import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, DescribeDBSnapshotsCommand, DescribeDBClusterSnapshotsCommand, StartDBInstanceCommand, StartDBClusterCommand, CreateDBSnapshotCommand, CreateDBClusterSnapshotCommand, ModifyDBInstanceCommand, ModifyDBClusterCommand } from '@aws-sdk/client-rds';
-import { S3Client } from '@aws-sdk/client-s3';
+import { S3Client, ListObjectVersionsCommand } from '@aws-sdk/client-s3';
 import { teardownStateBucket, drainBucketObjects, resolveClient } from '../utils/aws.js';
-import { checkDependency, pollUntil } from '../utils/system.js';
+import { checkDependency, pollUntil, sleep } from '../utils/system.js';
 import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { failCommand, shouldAutoApprove, refuseIfNonInteractive, refuseUnknownFlags, isProgrammaticCall } from '../utils/command.js';
 import { runTerraformCommand, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, getTerraformStateBuckets, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS, PROGRESS_MODES } from '../utils/terraform.js';
@@ -17,6 +17,9 @@ import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 
 export const DEFAULT_DESTROY_DB_TIMEOUT_MS = 600000;
+export const DEFAULT_DESTROY_DRAIN_SETTLE_TIMEOUT_MS = 120000;
+export const DEFAULT_DESTROY_DRAIN_SETTLE_INTERVAL_MS = 5000;
+export const DEFAULT_DESTROY_NOTEMPTY_RETRY_SETTLE_MS = 10000;
 export const DEFAULT_DESTROY_DB_SETTLE_TIMEOUT_MS = 1800000;
 export const DEFAULT_DESTROY_DB_POLL_INTERVAL_MS = 5000;
 export const DEFAULT_DESTROY_SNAPSHOT_TIMEOUT_MS = 1800000;
@@ -118,6 +121,21 @@ export async function handleDestroyTerraformError({ options, tfDirPath, attemptD
             if (confirmed === true) return unlockAndRetry('interactive');
         }
         return namedFail('STATE_LOCK_HELD');
+    }
+
+    // BUG-210: a drained bucket can still report versions when terraform
+    // runs (S3 empty-visibility race). Settle briefly, then retry the
+    // destroy exactly once — a second BucketNotEmpty is terminal.
+    if (code === 'BUCKET_NOT_EMPTY') {
+        trackEvent('bucket_not_empty_retry', { projectName: actualProjectName, command: 'destroy' });
+        const sleepFn = typeof options.sleepFn === 'function' ? options.sleepFn : sleep;
+        await sleepFn(DEFAULT_DESTROY_NOTEMPTY_RETRY_SETTLE_MS);
+        try {
+            await attemptDestroy();
+        } catch (retryError) {
+            return namedFail('BUCKET_NOT_EMPTY');
+        }
+        return { retried: true };
     }
 
     if (code === 'BACKEND_RECONFIGURE_REQUIRED' || code === 'DESTROY_DEPENDENCY_VIOLATION'
@@ -555,7 +573,7 @@ async function destroyStackMain(input = {}) {
         const drainTargets = (await getTerraformStateBuckets(tfDirPath)).filter((name) => name !== bucketName);
         if (drainTargets.length > 0) {
             s.start(`Draining ${drainTargets.length} S3 bucket(s) before destroy...`);
-            const drainClient = new S3Client({ region });
+            const drainClient = resolveClient(options.s3Client, S3Client, { region });
             let drainedObjects = 0;
             const drainFailures = [];
             for (const target of drainTargets) {
@@ -594,6 +612,42 @@ async function destroyStackMain(input = {}) {
                     reason: 'bucket-drain-failed',
                     resultExtra: { region },
                 });
+            }
+            // BUG-210: versioned deletes can lag S3's empty-reads, so
+            // verify each drained bucket reads empty before terraform
+            // destroy runs — otherwise destroy flakes on BucketNotEmpty.
+            // A bucket deleted out-of-band counts as empty.
+            const settleTimeoutMs = options.drainSettleTimeoutMs ?? DEFAULT_DESTROY_DRAIN_SETTLE_TIMEOUT_MS;
+            const settleIntervalMs = options.drainSettleIntervalMs ?? DEFAULT_DESTROY_DRAIN_SETTLE_INTERVAL_MS;
+            for (const target of drainTargets) {
+                const settled = await pollUntil({
+                    timeoutMs: settleTimeoutMs,
+                    intervalMs: settleIntervalMs,
+                    onTick: async () => {
+                        let listed;
+                        try {
+                            listed = await drainClient.send(new ListObjectVersionsCommand({ Bucket: target, MaxKeys: 1 }));
+                        } catch (error) {
+                            if (error?.name === 'NoSuchBucket') return { done: true };
+                            throw error;
+                        }
+                        const remaining = (listed.Versions || []).length + (listed.DeleteMarkers || []).length;
+                        return remaining === 0 ? { done: true } : null;
+                    },
+                });
+                if (!settled.done) {
+                    s.stop(color.red('❌ S3 bucket drain failed.'));
+                    return failCommand({
+                        message: `\n✖ S3 bucket ${target} still reports object versions after draining.`,
+                        hint: '  Re-run destroy (drained buckets usually read empty within a minute), or empty the bucket by hand in the AWS Console.\n',
+                        useErrorStream: true,
+                        event: 'infrastructure_destroyed',
+                        telemetry: { projectName: projectNameForTelemetry },
+                        errorCode: 'BUCKET_DRAIN_UNSETTLED',
+                        reason: 'bucket-drain-unsettled',
+                        resultExtra: { bucket: target, region },
+                    });
+                }
             }
             s.stop(`Drained ${drainedObjects} object(s) from ${drainTargets.length} bucket(s).`);
             trackEvent('bucket_drain_completed', {

@@ -148,6 +148,40 @@ describe('Shift-left: local test:iac matches blocking CI scans', () => {
     });
 });
 
+describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
+    it('denies CI-role mutation on the preview role (scoped to the CI roles)', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        expect(guardrails).toContain('DenyCIRoleMutation');
+        for (const action of ['iam:DeleteRole', 'iam:UpdateAssumeRolePolicy', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy']) {
+            expect(guardrails).toContain(action);
+        }
+        // Scoped to the CI role ARNs (not *): preview stacks legitimately
+        // manage their own pr-suffixed IAM roles.
+        expect(guardrails).toContain('aws_iam_role.github_actions_deploy[0].arn');
+        expect(guardrails).toContain('aws_iam_role.github_actions_preview[0].arn');
+    });
+
+    it('covers the worker service and drops the invalid cluster-less ARN', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        expect(tf).toContain('service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service');
+        expect(tf).not.toContain('service/${local.prod_prefix}-service"');
+    });
+
+    it('denies prod snapshot, secrets, and log-group deletion', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        expect(guardrails).toContain('rds:DeleteDBSnapshot');
+        expect(guardrails).toContain('rds:DeleteDBClusterSnapshot');
+        expect(guardrails).toContain('snapshot:${local.prod_prefix}-db-*');
+        expect(guardrails).toContain('cluster-snapshot:${local.prod_prefix}-db-cluster-*');
+        expect(guardrails).toContain('secretsmanager:DeleteSecret');
+        expect(guardrails).toContain('secret:${local.prod_prefix}-secrets-*');
+        expect(guardrails).toContain('logs:DeleteLogGroup');
+        expect(guardrails).toContain('log-group:/ecs/${local.prod_prefix}');
+    });
+});
+
 describe('Tier 2 live-service job in e2e.yml', () => {
     it('runs tier2 on schedule/manual dispatch with a 90-minute timeout', () => {
         const yml = readRepo('.github/workflows/e2e.yml');

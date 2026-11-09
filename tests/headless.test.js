@@ -11,7 +11,7 @@ import { parseCliArgs } from '../src/core/parser.js';
 import { getProjectConfig, getTargetDirectory, sanitizeProjectName } from '../src/utils/prompts.js';
 import { trackEvent } from '../src/core/telemetry.js';
 import { provisionStateBucket } from '../src/utils/aws.js';
-import { mainStack, resolveOidcTrust, renderOidcSubClaim, renderOidcRoleSubs, buildDeployRoleName, buildPreviewRoleName, immutableCompanion } from '../src/commands/init.js';
+import { mainStack, resolveOidcTrust, renderOidcSubClaim, renderOidcRoleSubs, resolveDefaultBranch, buildDeployRoleName, buildPreviewRoleName, immutableCompanion } from '../src/commands/init.js';
 
 // Deep-mock the interactive prompt library. The CLI only uses
 // `@clack/prompts` for interactive mode (verified: no `inquirer` or
@@ -1784,6 +1784,33 @@ describe('resolveOidcTrust', () => {
         expect(logged.join('\n')).toContain('repo:*');
     });
 
+    it('resolves our own canonical dual-branch trust back to both branches (BUG-209)', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: {
+                kind: 'list',
+                entries: [
+                    'repo:acme/widgets:ref:refs/heads/develop',
+                    'repo:acme/widgets:ref:refs/heads/main',
+                    'repo:acme@*/widgets@*:ref:refs/heads/develop',
+                    'repo:acme@*/widgets@*:ref:refs/heads/main',
+                ],
+            },
+        });
+        expect(result).toEqual({ sub: 'repo:acme/widgets:ref:refs/heads/develop', source: 'tree', treeBranches: ['develop', 'main'] });
+        expect(logged).toEqual([]);
+    });
+
+    it('a non-canonical 4-entry list stays complex', async () => {
+        const result = await resolveOidcTrust({
+            ...base,
+            treeClaim: { kind: 'list', entries: ['repo:acme/a:*', 'repo:acme/b:*', 'repo:acme/c:*', 'repo:acme/d:*'] },
+            readRemote: () => 'acme/e',
+        });
+        expect(result).toEqual({ sub: 'repo:acme/e:*', source: 'remote' });
+        expect(logged.join('\n')).toContain('4-entry list');
+    });
+
     it('derives from the remote, warning when replacing a complex claim', async () => {
         const result = await resolveOidcTrust({
             ...base,
@@ -1919,6 +1946,31 @@ describe('resolveOidcTrust', () => {
         });
     });
 
+    it('renderOidcRoleSubs trusts both branches when they differ (BUG-209)', () => {
+        // Same branch: byte-identical to the two-arg form (zero churn).
+        expect(renderOidcRoleSubs('repo:acme/widgets:*', 'main', 'main')).toEqual(
+            renderOidcRoleSubs('repo:acme/widgets:*', 'main')
+        );
+        // Divergent: scheduled drift runs on the default branch, so the
+        // deploy role must trust it alongside the deploy branch.
+        expect(renderOidcRoleSubs('repo:acme/widgets:*', 'develop', 'main')).toEqual({
+            deploySub: '["repo:acme/widgets:ref:refs/heads/develop", "repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/develop", "repo:acme@*/widgets@*:ref:refs/heads/main"]',
+            previewSub: '["repo:acme/widgets:pull_request", "repo:acme@*/widgets@*:pull_request"]',
+        });
+        // Hand-customized and open trusts are never widened.
+        expect(renderOidcRoleSubs('repo:acme/widgets:environment:prod', 'develop', 'main').deploySub)
+            .toBe(renderOidcRoleSubs('repo:acme/widgets:environment:prod', 'main').deploySub);
+        expect(renderOidcRoleSubs('repo:*', 'develop', 'main')).toEqual(renderOidcRoleSubs('repo:*', 'main'));
+    });
+
+    it('resolveDefaultBranch parses origin/HEAD with deploy-branch fallback (BUG-209)', () => {
+        const run = (stdout) => resolveDefaultBranch('/tmp/x', 'develop', () => Buffer.from(stdout));
+        expect(run('origin/main\n')).toBe('main');
+        expect(run('origin/feature/foo\n')).toBe('feature/foo');
+        expect(resolveDefaultBranch('/tmp/x', 'develop', () => { throw new Error('no git'); })).toBe('develop');
+        expect(run('\n')).toBe('develop');
+    });
+
     it('role-name builders keep short names intact', () => {
         expect(buildDeployRoleName('myapp', '-abc123')).toBe('myapp-abc123-github-actions-deploy-role');
         expect(buildPreviewRoleName('myapp', '-abc123')).toBe('myapp-abc123-github-actions-preview-role');
@@ -1933,5 +1985,37 @@ describe('resolveOidcTrust', () => {
         expect(preview.length).toBeLessThanOrEqual(64);
         expect(deploy).toBe('test-app-lambda-aurora-addons-e46ae8-github-actions-deploy-role');
         expect(preview).toBe('test-app-lambda-aurora-addons-e46ae8-github-actions-preview-role');
+    });
+});
+
+describe('Headless: undetectable-framework default (BUG-211)', () => {
+    let tmpDir;
+
+    beforeEach(async () => {
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-headless-fw-'));
+    });
+
+    afterEach(async () => {
+        if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('defaults to node when package.json exists but no framework is detected', async () => {
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { pg: '^8.0.0' } }));
+        const config = await getProjectConfig(true, {}, tmpDir, null);
+        expect(config.framework).toBe('node');
+        expectNoInteractivePrompts();
+    });
+
+    it('keeps the static default when no package.json exists', async () => {
+        const config = await getProjectConfig(true, {}, tmpDir, null);
+        expect(config.framework).toBe('static');
+        expectNoInteractivePrompts();
+    });
+
+    it('explicit --framework still wins over the package.json default', async () => {
+        await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { pg: '^8.0.0' } }));
+        const config = await getProjectConfig(true, { framework: 'python' }, tmpDir, null);
+        expect(config.framework).toBe('python');
+        expectNoInteractivePrompts();
     });
 });

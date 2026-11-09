@@ -11,6 +11,7 @@ describe('R1: terraform error taxonomy', () => {
             'DELETION_PROTECTION_ACTIVE',
             'RECREATE_COLLISION',
             'OIDC_PROVIDER_CONFLICT',
+            'BUCKET_NOT_EMPTY',
         ]) {
             expect(ERROR_CODES).toContain(code);
         }
@@ -34,6 +35,7 @@ describe('R1: terraform error taxonomy', () => {
         ['elb duplicate without recovery', 'Error: creating ELB listener: DuplicateListenerException: A listener already exists', {}, 'RECREATE_COLLISION', undefined],
         ['iam collision without recovery', 'Error: creating IAM Role: EntityAlreadyExists: The role already exists', {}, 'RECREATE_COLLISION', undefined],
         ['cloudfront in progress', 'Error: deleting CloudFront Distribution (E1): PreconditionFailed: distribution is in progress', {}, 'CLOUDFRONT_IN_PROGRESS', undefined],
+        ['bucket not empty', 'Error: deleting S3 Bucket (myapp-storage-123): BucketNotEmpty: The bucket you tried to delete is not empty. You must delete all versions in the bucket.', {}, 'BUCKET_NOT_EMPTY', undefined],
     ])('classifies %s', (_name, stderr, ctx, code, lockId) => {
         expect(classifyTerraformError(stderr, ctx)).toMatchObject({ code, lockId: lockId ?? null });
     });

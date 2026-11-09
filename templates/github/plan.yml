@@ -122,6 +122,7 @@ jobs:
             const body = `${marker}\n${heading}\n\n**${summary}** ([workflow run](${runUrl})).\n\n<details><summary>Show Plan</summary>\n\n\`\`\`diff\n${plan}\n\`\`\`\n\n</details>`;
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
+              per_page: 100,
               owner: context.repo.owner,
               repo: context.repo.repo,
             });

@@ -158,10 +158,15 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
             fs.writeFileSync(path.join(dir, 'index.js'), FIXTURE_INDEX_JS);
             fs.writeFileSync(path.join(dir, 'verify-vpc.js'), FIXTURE_VERIFY_VPC_JS);
 
-            const init = runCli(['init', '--target', 'ecs', '--headless', '--needsDatabase', '--db-engine', 'postgres',
+            // Explicit --framework: the fixture carries no framework marker
+            // (pg/ioredis are not detected), so detection must not decide.
+            const init = runCli(['init', '--target', 'ecs', '--headless', '--framework', 'node', '--needsDatabase', '--db-engine', 'postgres',
                 '--with', 'db:redis,queue:sqs,storage:s3,email:ses,ai:bedrock,db:dynamodb',
                 '--domain', E2E_DOMAIN, '--project-name', PROJECT_NAME, '--model', PINNED_MODEL], { cwd: dir, env });
             expect(init.status).toBe(0);
+            // Read the region before any other assertion: an early failure
+            // must not poison later steps with an undefined region.
+            region = readBackendRegion(dir);
             expect(fs.existsSync(path.join(dir, 'terraform', 'main.tf'))).toBe(true);
             expect(fs.readFileSync(path.join(dir, 'Dockerfile'), 'utf-8'))
                 .toContain('CMD ["node", "index.js"]');
@@ -170,8 +175,6 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
             // with Tier 1), so adopt it instead of creating one — AWS
             // allows a single provider per account.
             adoptSharedOidcProvider(dir);
-
-            region = readBackendRegion(dir);
         });
     });
 
@@ -285,27 +288,24 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
 
             await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: payload }));
 
-            // Cycle Receive/ChangeVisibility(0) up to maxReceiveCount (3) so
-            // the message redrives immediately instead of after the full
-            // visibility timeout. The final visibility call races the async
-            // redrive and may throw on a stale receipt handle — tolerated.
-            for (let attempt = 1; attempt <= SQS_MAX_RECEIVES; attempt++) {
+            // Drain the source queue so the message redrives immediately
+            // instead of after the full visibility timeout. The loop reads
+            // until empty (bounded past maxReceiveCount) rather than
+            // counting receives: AWS moves the message once receives pass
+            // the threshold, and any visibility reset may race the async
+            // redrive and throw on a stale receipt handle — tolerated.
+            for (let attempt = 1; attempt <= SQS_MAX_RECEIVES + 2; attempt++) {
                 const received = await sqs.send(new ReceiveMessageCommand({
                     QueueUrl: queueUrl,
                     WaitTimeSeconds: SQS_RECEIVE_WAIT_SECONDS,
                 }));
                 const handle = received.Messages?.[0]?.ReceiptHandle;
                 if (!handle) break;
-                const reset = () => sqs.send(new ChangeMessageVisibilityCommand({
+                await sqs.send(new ChangeMessageVisibilityCommand({
                     QueueUrl: queueUrl,
                     ReceiptHandle: handle,
                     VisibilityTimeout: 0,
-                }));
-                if (attempt === SQS_MAX_RECEIVES) {
-                    await reset().catch(() => {});
-                } else {
-                    await reset();
-                }
+                })).catch(() => {});
             }
 
             const found = await pollUntil({
@@ -324,6 +324,9 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
 
     it('grada run reaches RDS and Redis', async () => {
         await step(async () => {
+            // Fail here (not inside AWS): spawnSync coerces an undefined
+            // task-def ARN to the literal "--task-def undefined".
+            expect(taskDefArn).toBeTruthy();
             // --cmd stays last: it greedily consumes the next token even
             // when it looks like a flag.
             const result = runCli(['run', '--headless', '--task-def', taskDefArn, '--cmd', 'node verify-vpc.js'], { cwd: dir, env });
@@ -348,7 +351,7 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
                     ContextKeyType: 'string',
                 }],
             }));
-            expect(verdict.EvaluationResults?.[0]?.EvalDecision).toBe('Allowed');
+            expect(verdict.EvaluationResults?.[0]?.EvalDecision).toBe('allowed');
         });
     });
 
@@ -365,7 +368,7 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
                 ActionNames: ['bedrock:InvokeModel'],
                 ResourceArns: [`arn:aws:bedrock:${region}::foundation-model/${PINNED_MODEL}`],
             }));
-            expect(verdict.EvaluationResults?.[0]?.EvalDecision).toBe('Allowed');
+            expect(verdict.EvaluationResults?.[0]?.EvalDecision).toBe('allowed');
         });
     });
 

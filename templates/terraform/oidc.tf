@@ -179,6 +179,22 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Resource = "*"
       },
       {
+        # BUG-207: the preview role carries IAMFullAccess, so without this
+        # statement it can delete its own guardrails, delete the deploy
+        # role, or widen trust in one call. Scoped to the CI role ARNs
+        # (not *): preview stacks legitimately manage their own
+        # pr-suffixed IAM roles. The deploy role keeps full IAM power on
+        # purpose — it runs on the trusted branch and needs it for the
+        # re-init trust migration.
+        Sid    = "DenyCIRoleMutation"
+        Effect = "Deny"
+        Action = ["iam:DeleteRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy"]
+        Resource = [
+          aws_iam_role.github_actions_deploy[0].arn,
+          aws_iam_role.github_actions_preview[0].arn,
+        ]
+      },
+      {
         Sid      = "DenySnapshotSharing"
         Effect   = "Deny"
         Action   = ["rds:ModifyDBSnapshotAttribute"]
@@ -200,7 +216,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Resource = [
           "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
           "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-service",
+          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
         ]
       },
       {
@@ -251,6 +267,40 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Action = ["dynamodb:DeleteTable"]
         Resource = [
           "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table",
+        ]
+      },
+      {
+        # BUG-208: manual snapshots (grada names them
+        # <db-identifier>-manual-<stamp>) are directly deletable;
+        # automated snapshots can only go away via retention changes or
+        # instance deletion, both already denied above.
+        Sid    = "DenyProdSnapshotDeletion"
+        Effect = "Deny"
+        Action = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
+        Resource = [
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
+        ]
+      },
+      {
+        # The vault ARN carries a random suffix and static trees have no
+        # vault at all (no secrets.tf), so match the tight name prefix —
+        # on static it simply matches nothing.
+        Sid    = "DenyProdSecretsDeletion"
+        Effect = "Deny"
+        Action = ["secretsmanager:DeleteSecret"]
+        Resource = [
+          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
+        ]
+      },
+      {
+        # Web and worker containers share one log group; deleting it
+        # wipes the audit trail for both.
+        Sid    = "DenyProdLogDeletion"
+        Effect = "Deny"
+        Action = ["logs:DeleteLogGroup"]
+        Resource = [
+          "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.prod_prefix}",
         ]
       },
     ]

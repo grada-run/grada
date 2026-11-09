@@ -12,6 +12,7 @@ export const ERROR_CODES = [
     'RECREATE_COLLISION',
     'OIDC_PROVIDER_CONFLICT',
     'CLOUDFRONT_IN_PROGRESS',
+    'BUCKET_NOT_EMPTY',
 ];
 
 // AWS AlreadyExists family: every create-path "reality has what state
@@ -63,6 +64,9 @@ export function classifyTerraformError(stderr, ctx = {}) {
     if (/cloudfront/i.test(text) && /in.?progress|in use|precondition/i.test(text)) {
         return { code: 'CLOUDFRONT_IN_PROGRESS', lockId: null };
     }
+    if (/BucketNotEmpty/i.test(text)) {
+        return { code: 'BUCKET_NOT_EMPTY', lockId: null };
+    }
     return null;
 }
 
@@ -106,6 +110,11 @@ const RUNBOOKS = {
         message: 'CloudFront is still converging a previous change.',
         headless: 'Wait 5–15 minutes for the distribution to settle, then re-run the same command.',
         interactive: 'Wait 5–15 minutes for the distribution to settle, then re-run the same command.',
+    },
+    BUCKET_NOT_EMPTY: {
+        message: 'S3 buckets still report object versions after draining.',
+        headless: 'Re-run destroy — drained buckets usually read empty within a minute; if it persists, empty the bucket by hand in the AWS Console.',
+        interactive: 'Re-run destroy — drained buckets usually read empty within a minute; if it persists, empty the bucket by hand in the AWS Console.',
     },
 };
 

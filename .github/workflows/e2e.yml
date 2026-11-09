@@ -113,13 +113,17 @@ jobs:
       # suffix from the cwd's terraform/ tree, so both commands must run
       # inside each surviving workspace (a repo-root gc would scan the
       # wrong project). Successful suites remove their workspace, so the
-      # loop no-ops on green runs.
+      # loop no-ops on green runs. The block runs under bash -e, so a
+      # failing destroy is tolerated explicitly — gc must always run
+      # (a missing state bucket means destroy has nothing left to do).
       - name: Guaranteed teardown (destroy then gc)
         if: always()
+        env:
+          DO_NOT_TRACK: '1'
         run: |
           for d in tests/e2e/.tmp/tier2-live-*/; do
             [ -d "$d" ] || continue
-            (cd "$d" && node "${{ github.workspace }}/bin/cli.js" destroy --headless --yes --allow-data-loss)
+            (cd "$d" && node "${{ github.workspace }}/bin/cli.js" destroy --headless --yes --allow-data-loss) || echo "fallback destroy failed for $d (continuing to gc)"
             (cd "$d" && node "${{ github.workspace }}/bin/cli.js" gc --headless --yes)
           done
 

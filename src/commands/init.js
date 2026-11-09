@@ -1,5 +1,6 @@
 import fsSync from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { intro, outro, spinner, log, confirm, multiselect, select, cancel, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 
@@ -114,20 +115,52 @@ export function renderOidcSubClaim(sub) {
     return `["${sub}", "${companion}"]`;
 }
 
+// Renders a list of classic subs as an HCL fragment with each entry's
+// immutable-claim companion, deduplicated. A single entry renders
+// byte-identical to renderOidcSubClaim.
+function renderOidcSubList(subs) {
+    const companions = [];
+    for (const sub of subs) {
+        const companion = immutableCompanion(sub);
+        if (companion !== null) companions.push(companion);
+    }
+    return `[${[...new Set([...subs, ...companions])].map((entry) => `"${entry}"`).join(', ')}]`;
+}
+
+// Detects the repo's default branch (where scheduled workflows run) from
+// origin/HEAD, falling back to the deploy branch when git is absent,
+// has no origin, or never set HEAD. execSyncImpl is injectable for tests.
+export function resolveDefaultBranch(targetDir, deployBranch, execSyncImpl = execSync) {
+    try {
+        const head = execSyncImpl('git symbolic-ref --short refs/remotes/origin/HEAD', { cwd: targetDir, stdio: 'pipe' }).toString().trim();
+        const branch = head.startsWith('origin/') ? head.slice('origin/'.length) : '';
+        if (branch !== '') return branch;
+    } catch {
+        // Fall through to the deploy branch.
+    }
+    return deployBranch;
+}
+
 // Renders both CI roles' trust claims as HCL fragments from the resolved
 // repo trust: the deploy role binds to the effective deploy branch (the
 // same value rendered into the deploy trigger, so the two stay in sync),
-// the preview role binds to pull request events. The open trust and
-// hand-customized claims render verbatim — never silently widened.
-export function renderOidcRoleSubs(resolvedSub, deployBranch) {
+// the preview role binds to pull request events. BUG-209: scheduled drift
+// runs on the default branch, so when it differs from the deploy branch
+// the deploy role trusts both refs. The open trust and hand-customized
+// claims render verbatim — never silently widened.
+export function renderOidcRoleSubs(resolvedSub, deployBranch, defaultBranch = deployBranch) {
     const match = typeof resolvedSub === 'string' && resolvedSub.match(/^repo:([^:]+\/[^:]+)(?::(.*))?$/);
     if (!match) return { deploySub: renderOidcSubClaim(resolvedSub), previewSub: renderOidcSubClaim(resolvedSub) };
     const [, slug, rest] = match;
     const preview = `repo:${slug}:pull_request`;
-    const deploy = rest === undefined || rest === '*' || rest.startsWith('ref:refs/heads/')
-        ? `repo:${slug}:ref:refs/heads/${deployBranch}`
-        : resolvedSub;
-    return { deploySub: renderOidcSubClaim(deploy), previewSub: renderOidcSubClaim(preview) };
+    if (rest === undefined || rest === '*' || rest.startsWith('ref:refs/heads/')) {
+        const refs = [`repo:${slug}:ref:refs/heads/${deployBranch}`];
+        if (typeof defaultBranch === 'string' && defaultBranch !== '' && defaultBranch !== deployBranch) {
+            refs.push(`repo:${slug}:ref:refs/heads/${defaultBranch}`);
+        }
+        return { deploySub: renderOidcSubList(refs), previewSub: renderOidcSubClaim(preview) };
+    }
+    return { deploySub: renderOidcSubClaim(resolvedSub), previewSub: renderOidcSubClaim(preview) };
 }
 
 // Centralized CI role-name construction (R1): the deploy/preview role
@@ -160,6 +193,22 @@ export function buildRoleArn(accountId, roleName) {
 // dual-format pair resolves back to its classic entry so re-init stays
 // stable; anything richer is described for warnings and guarded against
 // silent widening.
+// Recognizes our own canonical dual-branch trust (BUG-209): two classic
+// branch refs for one slug plus each entry's immutable companion, in
+// render order. Returns { deploySub, branches } or null.
+function parseCanonicalDualTrust(entries) {
+    const [first, second, third, fourth] = entries;
+    if (immutableCompanion(first) !== third || immutableCompanion(second) !== fourth) return null;
+    const branchOf = (entry) => {
+        const match = typeof entry === 'string' && entry.match(/^repo:([^:]+):ref:refs\/heads\/(.+)$/);
+        return match ? { slug: match[1], branch: match[2] } : null;
+    };
+    const a = branchOf(first);
+    const b = branchOf(second);
+    if (!a || !b || a.slug !== b.slug || a.branch === b.branch) return null;
+    return { deploySub: first, branches: [a.branch, b.branch] };
+}
+
 function classifyTreeTrust(claim) {
     if (!claim) return { trust: null, complex: null };
     if (claim.kind === 'string') return { trust: claim.value, complex: null };
@@ -169,6 +218,10 @@ function classifyTreeTrust(claim) {
     if (claim.kind === 'list' && claim.entries.length === 2
         && immutableCompanion(claim.entries[0]) === claim.entries[1]) {
         return { trust: claim.entries[0], complex: null };
+    }
+    if (claim.kind === 'list' && claim.entries.length === 4) {
+        const dual = parseCanonicalDualTrust(claim.entries);
+        if (dual) return { trust: dual.deploySub, complex: null, branches: dual.branches };
     }
     if (claim.kind === 'list') {
         const entries = claim.entries.length > 0 ? ` (${claim.entries.join(', ')})` : '';
@@ -197,7 +250,7 @@ export async function resolveOidcTrust({
         const answer = await confirm({ message, initialValue: false });
         return answer === true && !isCancel(answer);
     });
-    const { trust: treeTrust, complex: complexClaim } = classifyTreeTrust(treeClaim);
+    const { trust: treeTrust, complex: complexClaim, branches: treeBranches } = classifyTreeTrust(treeClaim);
     if (explicitSlug) {
         if (complexClaim) {
             log(color.yellow(`⚠️  --github-repo replaces this tree's ${complexClaim} — the next apply trusts ${explicitSlug} only.`));
@@ -210,7 +263,7 @@ export async function resolveOidcTrust({
         if (treeTrust === 'repo:*') {
             log(color.yellow('⚠️  Keeping this tree\'s open CI trust (repo:*): any GitHub repo\'s Actions can assume the deploy role. Re-scope with --github-repo owner/name before going live.'));
         }
-        return { sub: treeTrust, source: 'tree' };
+        return { sub: treeTrust, source: 'tree', ...(treeBranches ? { treeBranches } : {}) };
     }
     const remoteSlug = readRemote(targetDir);
     if (remoteSlug) {
@@ -909,7 +962,18 @@ async function mainStackMain(input = {}) {
 
     // 7. Synthesize Templates
     s.message('Synthesizing Terraform templates...');
-    const { deploySub, previewSub } = renderOidcRoleSubs(oidcTrustSub, config.branch);
+    // BUG-209: live origin/HEAD wins when it names a real branch; when
+    // detection falls back, a re-init keeps the tree's own default branch
+    // so dual trust never narrows silently.
+    const treeDefaultBranch = oidcResolution.treeBranches?.[1] ?? null;
+    const detectedDefaultBranch = resolveDefaultBranch(dirConfig.targetDir, config.branch);
+    const defaultBranch = detectedDefaultBranch !== config.branch
+        ? detectedDefaultBranch
+        : (treeDefaultBranch ?? config.branch);
+    if (defaultBranch !== config.branch && treeDefaultBranch === null) {
+        log(color.yellow(`⚠️  Trusting default branch "${defaultBranch}" alongside deploy branch "${config.branch}" so scheduled drift can assume the deploy role.`));
+    }
+    const { deploySub, previewSub } = renderOidcRoleSubs(oidcTrustSub, config.branch, defaultBranch);
     const renderConfig = {
         PROJECT_NAME: dirConfig.actualProjectName,
         RESOURCE_SUFFIX: resourceSuffix,

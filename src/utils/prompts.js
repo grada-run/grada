@@ -1,4 +1,5 @@
 import path from 'path';
+import fsSync from 'fs';
 import { text, select, multiselect, confirm, group, cancel } from '@clack/prompts';
 import color from 'picocolors';
 import { execSync } from 'child_process';
@@ -89,8 +90,20 @@ export async function getProjectConfig(isHeadless, headlessOptions, targetDir, d
     const skipsContainerSizing = hints && typeof hints === 'object'
         && (hints.target === 'lambda' || hints.target === 'static');
     if (isHeadless) {
+        // BUG-211: an undetectable framework with a package.json present is
+        // a plain-Node project, not a static site — defaulting to 'static'
+        // renders an nginx Dockerfile that can neither build scriptless
+        // projects nor run node payloads. No package.json keeps 'static'.
+        let headlessFramework = headlessOptions.framework || (detectedFramework ? detectedFramework.id : null);
+        if (!headlessFramework) {
+            try {
+                headlessFramework = fsSync.existsSync(path.join(targetDir, 'package.json')) ? 'node' : 'static';
+            } catch {
+                headlessFramework = 'static';
+            }
+        }
         return {
-            framework: headlessOptions.framework || (detectedFramework ? detectedFramework.id : 'static'),
+            framework: headlessFramework,
             region: headlessOptions.region || 'us-east-2',
             port: headlessOptions.port || (headlessOptions.framework === 'static' ? '8080' : '3000'),
             size: headlessOptions.size || 'micro',

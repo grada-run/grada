@@ -3,8 +3,12 @@ title: "GitHub OIDC Authentication, No Stored AWS Keys"
 description: "Authenticate CI/CD with short-lived OIDC tokens instead of long-lived AWS keys."
 ---
 
-* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles — see below)
+* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust — see below)
 * **Date:** 2026-09-24 (Retroactive)
+
+## Amendment (v0.49.1): Self-Protecting Guardrails + Dual-Branch Trust
+
+Two hardening fixes. First, the preview role's `IAMFullAccess` let PR-run Terraform delete its own guardrails (or the deploy role, or widen trust) in one call — the preview guardrails now deny role/policy/trust mutation on both CI role ARNs, and the coverage gaps are closed (worker service, RDS snapshot deletion, prod secrets and log groups). The deploy role keeps full IAM power: it runs on the trusted branch and needs it for the re-init trust migration. Second, deploy trust now binds the deploy branch *and* the repo default branch (auto-detected from `origin/HEAD` at scaffold), because scheduled drift runs on the default branch and was denied whenever the two differed. Existing trees pick both up by re-running setup.
 
 ## Amendment (v0.48.0): Least-Privilege Role Split
 

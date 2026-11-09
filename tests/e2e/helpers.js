@@ -99,6 +99,9 @@ export function adoptSharedOidcProvider(projectDir) {
 // from the latter). Shared by the live suites; throws with the tool output
 // attached when any step fails.
 export function buildAndPushImage({ dir, env, region }) {
+    if (typeof region !== 'string' || region.trim() === '') {
+        throw new Error('buildAndPushImage requires a region (read it from the backend before calling).');
+    }
     const ecrUrl = readTerraformOutput(dir, 'ecr_repository_url', env);
     const image = `${ecrUrl}:latest`;
     const registry = ecrUrl.split('/')[0];

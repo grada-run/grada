@@ -35,6 +35,20 @@ describe('scaffoldPlanWorkflow', () => {
     });
 });
 
+describe('comment pagination (BUG-206)', () => {
+    it('every listComments call in plan/preview requests a full page', () => {
+        // The default first page (30) misses the marker on busy PRs, so
+        // each run posts a NEW comment and stale bodies mislead reviewers.
+        for (const rel of ['templates/github/plan.yml', 'templates/github/preview.yml']) {
+            const content = fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+            const calls = content.match(/listComments\(\{/g) || [];
+            expect(calls.length).toBeGreaterThan(0);
+            const paged = content.match(/per_page:\s*100/g) || [];
+            expect(paged.length).toBe(calls.length);
+        }
+    });
+});
+
 describe('renderCiWorkflow', () => {
     it('substitutes placeholders and writes through the shared core', () => {
         const dir = makeTmp();

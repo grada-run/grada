@@ -48,6 +48,9 @@ vi.mock('../src/utils/aws.js', () => ({
       if (name === 'DescribeDBClustersCommand') {
         throw Object.assign(new Error('DBClusterNotFoundFault'), { name: 'DBClusterNotFoundFault' });
       }
+      if (name === 'ListObjectVersionsCommand') {
+        return { Versions: [], DeleteMarkers: [] };
+      }
       throw new Error(`unexpected command ${name}`);
     },
   },
@@ -975,6 +978,79 @@ describe('Command: destroy (mocked terraform spawn)', () => {
 
       expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
       expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('polls drained buckets to empty before running terraform destroy (BUG-210)', async () => {
+      writeBackend('myapp-tfstate-123', 'us-east-2');
+      confirmAndSucceed(SHOW_JSON);
+      drainBucketObjects.mockResolvedValue({ deleted: 5, failed: [] });
+      const seen = [];
+      const s3Client = {
+        send: async (command) => {
+          expect(command.constructor.name).toBe('ListObjectVersionsCommand');
+          seen.push(command.input.Bucket);
+          // First read still shows a version (S3 visibility race), then empty.
+          return seen.length === 1
+            ? { Versions: [{ Key: 'a', VersionId: 'v1' }], DeleteMarkers: [] }
+            : { Versions: [], DeleteMarkers: [] };
+        },
+      };
+
+      await destroyStack({ isHeadless: false, s3Client, drainSettleIntervalMs: 0 });
+
+      expect(seen).toEqual(['myapp-storage-123', 'myapp-storage-123']);
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(true);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when a drained bucket never reads empty (BUG-210)', async () => {
+      writeBackend('myapp-tfstate-123', 'us-east-2');
+      confirmAndSucceed(SHOW_JSON);
+      drainBucketObjects.mockResolvedValue({ deleted: 5, failed: [] });
+      const s3Client = {
+        send: async () => ({ Versions: [{ Key: 'a', VersionId: 'v1' }], DeleteMarkers: [] }),
+      };
+
+      await expect(destroyStack({ isHeadless: false, s3Client, drainSettleTimeoutMs: 0 })).rejects.toMatchObject({ exitCode: 1 });
+      expect(mockSpawn.mock.calls.some(([, args]) => args[0] === 'destroy')).toBe(false);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ success: false, error_code: 'BUCKET_DRAIN_UNSETTLED' })
+      );
+    });
+  });
+
+  describe('BucketNotEmpty retry (BUG-210)', () => {
+    it('settles and retries destroy once, then reports success', async () => {
+      const attemptDestroy = vi.fn().mockResolvedValueOnce(undefined);
+      const sleepFn = vi.fn().mockResolvedValue(undefined);
+      const handled = await handleDestroyTerraformError({
+        options: { json: true, sleepFn },
+        tfDirPath: path.join(tmpDir, 'terraform'),
+        attemptDestroy,
+        error: new Error('Error: deleting S3 Bucket (x): BucketNotEmpty: The bucket you tried to delete is not empty.'),
+      });
+      expect(sleepFn).toHaveBeenCalledTimes(1);
+      expect(attemptDestroy).toHaveBeenCalledTimes(1);
+      expect(handled).toEqual({ retried: true });
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails terminally when the retry hits BucketNotEmpty again (no loops)', async () => {
+      const attemptDestroy = vi.fn().mockRejectedValue(new Error('BucketNotEmpty: still not empty'));
+      const handled = await handleDestroyTerraformError({
+        options: { json: true, sleepFn: vi.fn().mockResolvedValue(undefined) },
+        tfDirPath: path.join(tmpDir, 'terraform'),
+        attemptDestroy,
+        error: new Error('BucketNotEmpty: The bucket you tried to delete is not empty.'),
+      });
+      expect(handled.retried).toBe(false);
+      await expect(handled.result).rejects.toMatchObject({ exitCode: 1 });
+      expect(attemptDestroy).toHaveBeenCalledTimes(1);
+      expect(trackEvent).toHaveBeenCalledWith(
+        'infrastructure_destroyed',
+        expect.objectContaining({ error_code: 'BUCKET_NOT_EMPTY' })
+      );
     });
   });
 });
