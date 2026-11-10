@@ -10,6 +10,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /main .
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 WORKDIR /app
 
+# Ship a CA bundle: without it the static binary cannot verify any TLS
+# egress (RDS, AWS APIs, webhooks).
+RUN apk add --no-cache ca-certificates
+
 # Create unprivileged user
 RUN addgroup -g 1001 -S appgroup && \
     adduser -S appuser -u 1001 -G appgroup

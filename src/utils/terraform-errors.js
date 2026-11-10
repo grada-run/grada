@@ -112,7 +112,7 @@ const RUNBOOKS = {
         interactive: 'Wait 5–15 minutes for the distribution to settle, then re-run the same command.',
     },
     BUCKET_NOT_EMPTY: {
-        message: 'S3 buckets still report object versions after draining.',
+        message: 'Terraform destroy failed twice: an S3 bucket still holds object versions.',
         headless: 'Re-run destroy — drained buckets usually read empty within a minute; if it persists, empty the bucket by hand in the AWS Console.',
         interactive: 'Re-run destroy — drained buckets usually read empty within a minute; if it persists, empty the bucket by hand in the AWS Console.',
     },

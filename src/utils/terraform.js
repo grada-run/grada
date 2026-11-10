@@ -218,9 +218,13 @@ export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}
             if (timer && typeof timer.unref === 'function') timer.unref();
         }
 
-        child.stdout.on('data', (data) => {
-            if (isDone) return;
-            const lines = data.toString().split('\n').filter(line => line.trim() !== '');
+        // BUG-213: pipe chunks split lines at arbitrary byte offsets, so
+        // each chunk's trailing fragment is carried over and only
+        // newline-terminated lines are delivered. Splitting per chunk
+        // injects newlines into giant single-line JSON (show -json),
+        // which breaks parsing downstream.
+        let pendingFragment = '';
+        const handleLines = (lines) => {
             if (typeof onStdoutLine === 'function') {
                 for (const line of lines) onStdoutLine(line);
             }
@@ -237,6 +241,21 @@ export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}
                 const latestLine = lines[lines.length - 1].trim();
                 emit(`${loadingPrefix} - ${color.dim(truncateSpinnerText(latestLine, { fixedOverhead: lineOverhead }))}`);
             }
+        };
+        const flushFragment = () => {
+            if (pendingFragment.trim() === '') {
+                pendingFragment = '';
+                return;
+            }
+            const trailing = pendingFragment;
+            pendingFragment = '';
+            handleLines([trailing]);
+        };
+        child.stdout.on('data', (data) => {
+            if (isDone) return;
+            const parts = (pendingFragment + data.toString()).split('\n');
+            pendingFragment = parts.pop() ?? '';
+            handleLines(parts.filter(line => line.trim() !== ''));
         });
 
         child.stderr.on('data', (data) => {
@@ -247,6 +266,7 @@ export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}
             if (isDone) return;
             isDone = true;
             cleanup();
+            flushFragment();
             if (code === 0) {
                 settleMarker('completed', { exitCode: code });
                 resolve();

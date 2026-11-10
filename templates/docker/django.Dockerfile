@@ -34,9 +34,10 @@ WORKDIR /app
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
-# Runtime libraries only (native wheels arrive inside the venv)
+# Runtime libraries only (native wheels arrive inside the venv), plus a
+# CA bundle: without it no verified TLS egress works (RDS, AWS APIs).
 RUN apk update && apk upgrade --no-cache && \
-    apk add --no-cache libpq
+    apk add --no-cache libpq ca-certificates
 
 # Strip the base image's system pip (the venv already ships without one)
 RUN /usr/local/bin/python -m pip uninstall -y setuptools wheel pip && \

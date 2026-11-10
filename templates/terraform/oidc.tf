@@ -36,6 +36,11 @@ locals {
   # (not local.app_name): app_name carries the workspace suffix in preview
   # workspaces, while these denies must always name production.
   prod_prefix = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}"
+  # Boundary ARN resolving in every workspace: created in default, read
+  # everywhere else (mirrors the secrets-vault pattern). Consumed by the
+  # task/execution/cron roles, which static trees lack.
+  # tflint-ignore: terraform_unused_declarations
+  preview_boundary_arn = terraform.workspace == "default" ? aws_iam_policy.preview_boundary[0].arn : data.aws_iam_policy.preview_boundary[0].arn
 }
 
 # Deploy role FIRST: readTerraformOidcTrust anchors on this block so re-init
@@ -303,6 +308,191 @@ resource "aws_iam_role_policy" "preview_guardrails" {
           "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.prod_prefix}",
         ]
       },
+      {
+        # BUG-212: every role preview credentials create must carry the
+        # boundary — a missing key fails StringNotEquals, so unbounded
+        # creation is denied and born-capped roles cannot escalate.
+        Sid      = "DenyRoleWithoutBoundary"
+        Effect   = "Deny"
+        Action   = ["iam:CreateRole"]
+        Resource = "*"
+        Condition = {
+          StringNotEquals = {
+            "iam:PermissionsBoundary" = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${local.prod_prefix}-preview-boundary"
+          }
+        }
+      },
+      {
+        # The boundary cannot be swapped or removed after creation:
+        # legitimate Terraform never touches it (stable ARN, and
+        # deleting a role needs no boundary call).
+        Sid      = "DenyBoundarySwap"
+        Effect   = "Deny"
+        Action   = ["iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary"]
+        Resource = "*"
+      },
+      {
+        # The boundary policy itself cannot be neutered (preview
+        # Terraform never manages it: this file is
+        # default-workspace-only).
+        Sid    = "DenyBoundaryMutation"
+        Effect = "Deny"
+        Action = ["iam:*"]
+        Resource = [
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${local.prod_prefix}-preview-boundary",
+        ]
+      },
     ]
   })
+}
+
+# BUG-212: permissions boundary capping every role preview credentials
+# can create. The guardrail above denies CreateRole unless the request
+# carries this boundary, so a backdoor role is born capped: its
+# effective permissions are its own policies intersected with this one.
+# Deny-list shape (default-allow) on purpose: a missing entry weakens
+# security instead of breaking prod tasks. Keep the data denies in sync
+# with preview_guardrails above.
+resource "aws_iam_policy" "preview_boundary" {
+  count       = terraform.workspace == "default" ? 1 : 0
+  name        = "${local.prod_prefix}-preview-boundary"
+  description = "Permissions boundary capping roles created by preview CI runs"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "BoundaryBaseAllow"
+        Effect   = "Allow"
+        Action   = "*"
+        Resource = "*"
+      },
+      {
+        Sid      = "BoundaryDenyIAM"
+        Effect   = "Deny"
+        Action   = ["iam:*"]
+        Resource = "*"
+      },
+      {
+        Sid      = "BoundaryDenyAuditBilling"
+        Effect   = "Deny"
+        Action   = ["cloudtrail:*", "organizations:*", "aws-portal:*", "billing:*"]
+        Resource = "*"
+      },
+      {
+        Sid      = "BoundaryDenyComputeAbuse"
+        Effect   = "Deny"
+        Action   = ["ec2:RunInstances"]
+        Resource = "*"
+      },
+      {
+        Sid      = "BoundaryDenySnapshotSharing"
+        Effect   = "Deny"
+        Action   = ["rds:ModifyDBSnapshotAttribute"]
+        Resource = "*"
+      },
+      {
+        Sid    = "BoundaryDenyStateDestruction"
+        Effect = "Deny"
+        Action = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
+        Resource = [
+          "arn:aws:s3:::{{STATE_BUCKET}}",
+          "arn:aws:s3:::{{STATE_BUCKET}}/*",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyECSShutdown"
+        Effect = "Deny"
+        Action = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
+        Resource = [
+          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
+          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
+          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyImageDeletion"
+        Effect = "Deny"
+        Action = ["ecr:BatchDeleteImage"]
+        Resource = [
+          "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${local.prod_prefix}-repo",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyLambdaRewrite"
+        Effect = "Deny"
+        Action = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
+        Resource = [
+          "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${local.prod_prefix}-fn",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyQueueDestruction"
+        Effect = "Deny"
+        Action = ["sqs:PurgeQueue", "sqs:DeleteQueue"]
+        Resource = [
+          "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-queue",
+          "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-dlq",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyDatabaseDestruction"
+        Effect = "Deny"
+        Action = ["rds:DeleteDBInstance", "rds:ModifyDBInstance"]
+        Resource = [
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db",
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db-instance-1",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyAuroraDestruction"
+        Effect = "Deny"
+        Action = ["rds:DeleteDBCluster", "rds:ModifyDBCluster"]
+        Resource = [
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyTableDeletion"
+        Effect = "Deny"
+        Action = ["dynamodb:DeleteTable"]
+        Resource = [
+          "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenySnapshotDeletion"
+        Effect = "Deny"
+        Action = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
+        Resource = [
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
+          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenySecretsDeletion"
+        Effect = "Deny"
+        Action = ["secretsmanager:DeleteSecret"]
+        Resource = [
+          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
+        ]
+      },
+      {
+        Sid    = "BoundaryDenyLogDeletion"
+        Effect = "Deny"
+        Action = ["logs:DeleteLogGroup"]
+        Resource = [
+          "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.prod_prefix}",
+        ]
+      },
+    ]
+  })
+}
+
+# Preview workspaces create pr-suffixed roles through the same templates,
+# so they read the default workspace's boundary instead of creating one
+# (IAM names are account-global).
+data "aws_iam_policy" "preview_boundary" {
+  count = terraform.workspace == "default" ? 0 : 1
+  name  = "${local.prod_prefix}-preview-boundary"
 }

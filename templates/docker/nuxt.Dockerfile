@@ -26,6 +26,7 @@ ENV NITRO_HOST="0.0.0.0"
 # 1. Upgrade Alpine OS packages to clear OpenSSL/crypto CVEs
 # 2. Vaporize Node package managers (npm, yarn, corepack) to clear ghost CVEs
 RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates && \
     rm -rf /usr/local/lib/node_modules \
     /usr/local/bin/npm \
     /usr/local/bin/npx \

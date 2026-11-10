@@ -9,8 +9,10 @@ RUN npm ci --omit=dev && npm cache clean --force && mkdir -p node_modules
 # --- Stage 2: Production runner (no package managers) ---
 FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 
-# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities
-RUN apk update && apk upgrade --no-cache
+# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities, and ship a
+#    CA bundle: without it no verified TLS egress works (RDS, AWS APIs,
+#    webhooks) from runtimes using the system store.
+RUN apk update && apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # 2. Set production environment (optimizes Node and prevents dev dependencies)
 ENV NODE_ENV=production

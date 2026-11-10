@@ -276,6 +276,39 @@ describe('getTerraformOutputs', () => {
     });
 });
 
+function makeChunkedChild(chunks, code = 0) {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    process.nextTick(() => {
+        for (const chunk of chunks) child.stdout.emit('data', Buffer.from(chunk));
+        child.emit('close', code);
+    });
+    return child;
+}
+
+describe('runTerraformCommand chunk reassembly (BUG-213)', () => {
+    it('reassembles lines split across stdout chunks', async () => {
+        const seen = [];
+        mockSpawn.mockReturnValueOnce(makeChunkedChild(['{"bucket-na', 'me": "myapp-stor', 'age-123"}']));
+        await runTerraformCommand(['show', '-json'], '/tmp', null, 'Reading', {
+            isTTY: false,
+            onStdoutLine: (line) => seen.push(line),
+        });
+        expect(seen).toEqual(['{"bucket-name": "myapp-storage-123"}']);
+    });
+
+    it('keeps complete lines intact around a split', async () => {
+        const seen = [];
+        mockSpawn.mockReturnValueOnce(makeChunkedChild(['line-one\nline-tw', 'o\nline-three\n']));
+        await runTerraformCommand(['show', '-json'], '/tmp', null, 'Reading', {
+            isTTY: false,
+            onStdoutLine: (line) => seen.push(line),
+        });
+        expect(seen).toEqual(['line-one', 'line-two', 'line-three']);
+    });
+});
+
 describe('getTerraformStateBuckets', () => {
     function showJson(modules) {
         return JSON.stringify({ values: { root_module: modules } });
@@ -319,5 +352,15 @@ describe('getTerraformStateBuckets', () => {
 
         mockSpawn.mockReturnValueOnce(makeChild({ error: new Error('ENOENT') }));
         await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([]);
+    });
+
+    it('parses show JSON split mid-string across stdout chunks (BUG-213)', async () => {
+        // terraform show -json emits one giant line; ~64KB pipe chunks
+        // split it mid-string. A naive per-chunk split injects newlines
+        // into the JSON and parsing fails (destroy then skips the drain).
+        const full = showJson({ resources: [{ type: 'aws_s3_bucket', values: { bucket: 'myapp-storage-123' } }] });
+        const chunks = [full.slice(0, 40), full.slice(40, 90), full.slice(90)];
+        mockSpawn.mockReturnValueOnce(makeChunkedChild(chunks));
+        await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual(['myapp-storage-123']);
     });
 });

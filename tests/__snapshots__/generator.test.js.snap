@@ -12,8 +12,10 @@ RUN npm ci --omit=dev && npm cache clean --force && mkdir -p node_modules
 # --- Stage 2: Production runner (no package managers) ---
 FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 
-# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities
-RUN apk update && apk upgrade --no-cache
+# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities, and ship a
+#    CA bundle: without it no verified TLS egress works (RDS, AWS APIs,
+#    webhooks) from runtimes using the system store.
+RUN apk update && apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # 2. Set production environment (optimizes Node and prevents dev dependencies)
 ENV NODE_ENV=production
@@ -524,8 +526,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -536,8 +539,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -1287,9 +1291,10 @@ WORKDIR /app
 RUN addgroup -g 1001 appgroup && \\
     adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
-# Runtime libraries only (native wheels arrive inside the venv)
+# Runtime libraries only (native wheels arrive inside the venv), plus a
+# CA bundle: without it no verified TLS egress works (RDS, AWS APIs).
 RUN apk update && apk upgrade --no-cache && \\
-    apk add --no-cache libpq
+    apk add --no-cache libpq ca-certificates
 
 # Strip the base image's system pip (the venv already ships without one)
 RUN /usr/local/bin/python -m pip uninstall -y setuptools wheel pip && \\
@@ -1776,8 +1781,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -1788,8 +1794,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -2513,8 +2520,10 @@ RUN npm ci --omit=dev && npm cache clean --force && mkdir -p node_modules
 # --- Stage 2: Production runner (no package managers) ---
 FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 
-# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities
-RUN apk update && apk upgrade --no-cache
+# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities, and ship a
+#    CA bundle: without it no verified TLS egress works (RDS, AWS APIs,
+#    webhooks) from runtimes using the system store.
+RUN apk update && apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # 2. Set production environment (optimizes Node and prevents dev dependencies)
 ENV NODE_ENV=production
@@ -2922,8 +2931,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -2934,8 +2944,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -3696,9 +3707,10 @@ WORKDIR /app
 RUN addgroup -S appgroup && \\
     adduser -S appuser -G appgroup -D -s /bin/sh
 
-# Runtime libraries only (native wheels arrive inside the venv)
+# Runtime libraries only (native wheels arrive inside the venv), plus a
+# CA bundle: without it no verified TLS egress works (RDS, AWS APIs).
 RUN apk update && apk upgrade --no-cache && \\
-    apk add --no-cache libpq
+    apk add --no-cache libpq ca-certificates
 
 # Strip the base image's system pip (the venv already ships without one)
 RUN /usr/local/bin/python -m pip uninstall -y setuptools wheel pip && \\
@@ -4102,8 +4114,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -4114,8 +4127,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -4836,6 +4850,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /main .
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 WORKDIR /app
 
+# Ship a CA bundle: without it the static binary cannot verify any TLS
+# egress (RDS, AWS APIs, webhooks).
+RUN apk add --no-cache ca-certificates
+
 # Create unprivileged user
 RUN addgroup -g 1001 -S appgroup && \\
     adduser -S appuser -u 1001 -G appgroup
@@ -5231,8 +5249,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -5243,8 +5262,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -5989,9 +6009,10 @@ WORKDIR /app
 RUN addgroup -g 1001 appgroup && \\
     adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
-# Runtime libraries only (native wheels arrive inside the venv)
+# Runtime libraries only (native wheels arrive inside the venv), plus a
+# CA bundle: without it no verified TLS egress works (RDS, AWS APIs).
 RUN apk update && apk upgrade --no-cache && \\
-    apk add --no-cache libpq
+    apk add --no-cache libpq ca-certificates
 
 # Strip the base image's system pip (the venv already ships without one)
 RUN /usr/local/bin/python -m pip uninstall -y setuptools wheel pip && \\
@@ -6478,8 +6499,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -6490,8 +6512,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -7299,8 +7322,10 @@ RUN npm ci --omit=dev && npm cache clean --force && mkdir -p node_modules
 # --- Stage 2: Production runner (no package managers) ---
 FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runner
 
-# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities
-RUN apk update && apk upgrade --no-cache
+# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities, and ship a
+#    CA bundle: without it no verified TLS egress works (RDS, AWS APIs,
+#    webhooks) from runtimes using the system store.
+RUN apk update && apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # 2. Set production environment (optimizes Node and prevents dev dependencies)
 ENV NODE_ENV=production
@@ -7793,8 +7818,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -7805,8 +7831,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -8546,6 +8573,7 @@ WORKDIR /app
 # FIX 2: Upgrade Alpine packages and absolutely destroy npm, yarn, and corepack
 # to eliminate all remaining Critical/High container vulnerabilities.
 RUN apk upgrade --no-cache && \\
+    apk add --no-cache ca-certificates && \\
     rm -rf /usr/local/lib/node_modules/npm \\
     /usr/local/bin/npm \\
     /usr/local/bin/npx \\
@@ -8959,8 +8987,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -8971,8 +9000,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -9709,6 +9739,7 @@ ENV NITRO_HOST="0.0.0.0"
 # 1. Upgrade Alpine OS packages to clear OpenSSL/crypto CVEs
 # 2. Vaporize Node package managers (npm, yarn, corepack) to clear ghost CVEs
 RUN apk update && apk upgrade --no-cache && \\
+    apk add --no-cache ca-certificates && \\
     rm -rf /usr/local/lib/node_modules \\
     /usr/local/bin/npm \\
     /usr/local/bin/npx \\
@@ -10112,8 +10143,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -10124,8 +10156,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -10869,7 +10902,7 @@ ENV RAILS_ENV=production \\
 # Upgrade Alpine OS to patch system CVEs and install runtime libs
 # Explicitly patch Ruby's default gems and remove their legacy gemspecs so Trivy ignores them
 RUN apk update && apk upgrade --no-cache && \\
-    apk add --no-cache postgresql-libs tzdata && \\
+    apk add --no-cache postgresql-libs tzdata ca-certificates && \\
     apk add --no-cache --virtual .build-deps build-base zlib-dev && \\
     gem install erb net-imap resolv rexml uri zlib && \\
     rm -f /usr/local/lib/ruby/gems/*/specifications/default/erb-*.gemspec \\
@@ -11361,8 +11394,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -11373,8 +11407,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -12116,8 +12151,10 @@ RUN GRADA_BYPASS=true npm run build
 # ==========================================
 FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
 
-# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities
-RUN apk update && apk upgrade --no-cache
+# 1. DevSecOps: Patch underlying Alpine OS vulnerabilities, and ship a
+#    CA bundle: without it no verified TLS egress works (RDS, AWS APIs,
+#    webhooks) from runtimes using the system store.
+RUN apk update && apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # 2. Set production environment
 ENV NODE_ENV=production
@@ -12524,8 +12561,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -12536,8 +12574,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -13272,6 +13311,7 @@ WORKDIR /app
 # FIX 2: Upgrade Alpine packages and absolutely destroy npm, yarn, and corepack
 # to eliminate all remaining Critical/High container vulnerabilities.
 RUN apk upgrade --no-cache && \\
+    apk add --no-cache ca-certificates && \\
     rm -rf /usr/local/lib/node_modules/npm \\
     /usr/local/bin/npm \\
     /usr/local/bin/npx \\
@@ -13685,8 +13725,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -13697,8 +13738,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
@@ -14826,8 +14868,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "\${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -14838,8 +14881,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "\${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "\${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---

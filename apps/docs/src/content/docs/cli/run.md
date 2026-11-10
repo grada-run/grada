@@ -9,7 +9,7 @@ Run any command inside your production environment — data backfills, database 
 
 - Spins up an ephemeral Fargate task from your deployed image and environment variables, runs `--cmd`, streams `stdout`/`stderr` live to your terminal, then tears the task down.
 - Exits with the task's own exit code, so CI pipelines fail correctly when the command fails.
-- Database-aware: when your container carries discrete `DB_*` credentials, the task gets a synthesized `DATABASE_URL` automatically, so seeders and backfills connect with no extra flags.
+- Database-aware: when your container carries discrete `DB_*` credentials, the task gets a synthesized `DATABASE_URL` automatically, so seeders and backfills connect with no extra flags. Postgres tasks also default to `PGSSLMODE=require` (RDS enforces TLS) — correct for `libpq`/`psql`/Prisma, which encrypt without verifying. Node-postgres-based tools (`pg`, Drizzle, Knex) *verify* under `require` and fail against RDS private PKI; prefix those commands with `PGSSLMODE=no-verify` (still encrypted, chain not verified).
 - Applies the same stripped-runner guard as `db migrate`: `npm`/`npx` commands are refused headless when your Dockerfile strips those binaries — use a compiled `node ...` path instead.
 - ECS only: Lambda and static projects get a clean unsupported-target message instead of a cryptic AWS error.
 

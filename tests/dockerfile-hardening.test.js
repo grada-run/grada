@@ -46,6 +46,22 @@ describe('Dockerfile hardening (node, python, django)', () => {
     }
 });
 
+describe('Runner TLS trust (ca-certificates)', () => {
+    // Every runtime that can initiate TLS must ship a CA bundle: without
+    // it no verified egress works (RDS, AWS APIs, webhooks). The install
+    // must run as root, so it precedes the USER switch. nginx serves
+    // only and is exempt.
+    for (const framework of ['node', 'nestjs', 'nextjs', 'nuxt', 'svelte', 'python', 'django', 'rails', 'go']) {
+        it(`${framework}.Dockerfile runner installs ca-certificates as root`, () => {
+            const runner = runnerStage(readTemplate(framework));
+            expect(runner).toMatch(/apk add --no-cache[^\n]*ca-certificates/);
+            const userIdx = runner.search(/^\s*USER\s+\S+/im);
+            expect(userIdx).toBeGreaterThan(-1);
+            expect(runner.indexOf('ca-certificates')).toBeLessThan(userIdx);
+        });
+    }
+});
+
 describe('Nuxt template host/port binding (Nitro)', () => {
     it('nuxt.Dockerfile injects NITRO_HOST=0.0.0.0 and PORT so the ALB can reach the server', () => {
         const content = readTemplate('nuxt');

@@ -24,6 +24,7 @@ WORKDIR /app
 # FIX 2: Upgrade Alpine packages and absolutely destroy npm, yarn, and corepack
 # to eliminate all remaining Critical/High container vulnerabilities.
 RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates && \
     rm -rf /usr/local/lib/node_modules/npm \
     /usr/local/bin/npm \
     /usr/local/bin/npx \

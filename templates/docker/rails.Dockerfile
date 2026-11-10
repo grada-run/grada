@@ -33,7 +33,7 @@ ENV RAILS_ENV=production \
 # Upgrade Alpine OS to patch system CVEs and install runtime libs
 # Explicitly patch Ruby's default gems and remove their legacy gemspecs so Trivy ignores them
 RUN apk update && apk upgrade --no-cache && \
-    apk add --no-cache postgresql-libs tzdata && \
+    apk add --no-cache postgresql-libs tzdata ca-certificates && \
     apk add --no-cache --virtual .build-deps build-base zlib-dev && \
     gem install erb net-imap resolv rexml uri zlib && \
     rm -f /usr/local/lib/ruby/gems/*/specifications/default/erb-*.gemspec \

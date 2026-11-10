@@ -3,8 +3,12 @@ title: "GitHub OIDC Authentication, No Stored AWS Keys"
 description: "Authenticate CI/CD with short-lived OIDC tokens instead of long-lived AWS keys."
 ---
 
-* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust — see below)
+* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust; amended v0.49.2: permissions boundary on created roles — see below)
 * **Date:** 2026-09-24 (Retroactive)
+
+## Amendment (v0.49.2): Permissions Boundary on Created Roles
+
+The ARN-scoped role-mutation deny stopped the preview role from touching the CI roles — but it could still mint a *new* admin role (attacker trust, admin policy) that the deny-list never names. The fix is a permissions boundary: `CreateRole` without it is denied, the boundary cannot be swapped, removed, or neutered, and every template-managed role carries it (preview workspaces read the default workspace's copy). The boundary is a deny-list mirror of the guardrails (default-allow) so a missing entry weakens security instead of breaking prod tasks; name-scoping was rejected because attackers mint matching names and `CreateRole` takes no resource constraint. Existing trees pick it up by re-running setup.
 
 ## Amendment (v0.49.1): Self-Protecting Guardrails + Dual-Branch Trust
 

@@ -7,7 +7,8 @@
 
 # --- IAM Role assumed by EventBridge Scheduler ---
 resource "aws_iam_role" "scheduler_cron_role" {
-  name = "${local.app_name}-cron-scheduler-role"
+  name                 = "${local.app_name}-cron-scheduler-role"
+  permissions_boundary = local.preview_boundary_arn
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [

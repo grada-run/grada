@@ -94,8 +94,9 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name               = "${local.app_name}-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "${local.app_name}-execution-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "execution_role_policy" {
@@ -106,8 +107,9 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name               = "${local.app_name}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
+  name                 = "${local.app_name}-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
+  permissions_boundary = local.preview_boundary_arn
 }
 
 # --- IAM: ECS Exec (SSM) permissions for the task role ---

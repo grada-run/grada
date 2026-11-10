@@ -182,6 +182,55 @@ describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
     });
 });
 
+describe('Preview permissions boundary (BUG-212)', () => {
+    it('forces every created role to carry the boundary', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        expect(guardrails).toContain('DenyRoleWithoutBoundary');
+        expect(guardrails).toContain('iam:CreateRole');
+        expect(guardrails).toContain('iam:PermissionsBoundary');
+        expect(guardrails).toContain(`${'${local.prod_prefix}'}-preview-boundary`);
+    });
+
+    it('lets neither preview nor backdoor creds touch the boundary', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        expect(guardrails).toContain('iam:PutRolePermissionsBoundary');
+        expect(guardrails).toContain('iam:DeleteRolePermissionsBoundary');
+        expect(guardrails).toContain('DenyBoundaryMutation');
+        const boundary = tf.slice(tf.indexOf('resource "aws_iam_policy" "preview_boundary"'));
+        expect(boundary).toContain('"iam:*"');
+    });
+
+    it('caps backdoor roles at the task data-plane (deny-list mirror)', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        const boundary = tf.slice(tf.indexOf('resource "aws_iam_policy" "preview_boundary"'));
+        // Base allow with guardrail-mirroring denies: default-allow so a
+        // missing entry weakens security instead of breaking prod tasks.
+        expect(boundary).toContain('BoundaryBaseAllow');
+        for (const action of ['cloudtrail:*', 'organizations:*', 'ec2:RunInstances', 'rds:DeleteDBInstance', 's3:DeleteBucket', 'dynamodb:DeleteTable', 'sqs:DeleteQueue', 'ecs:DeleteCluster', 'ecr:BatchDeleteImage', 'secretsmanager:DeleteSecret', 'logs:DeleteLogGroup']) {
+            expect(boundary).toContain(action);
+        }
+    });
+
+    it('resolves the boundary ARN in every workspace', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        expect(tf).toContain('resource "aws_iam_policy" "preview_boundary"');
+        expect(tf).toContain('data "aws_iam_policy" "preview_boundary"');
+        expect(tf).toContain('preview_boundary_arn');
+    });
+
+    it('every managed role is born bounded', () => {
+        for (const rel of ['templates/terraform/main.tf', 'templates/terraform/main-lambda.tf', 'templates/terraform/addons/cron.tf', 'templates/terraform/addons/cron-lambda.tf']) {
+            const content = readRepo(rel);
+            const roles = content.match(/resource "aws_iam_role" "[^"]+"/g) || [];
+            expect(roles.length).toBeGreaterThan(0);
+            const bounded = content.match(/permissions_boundary\s*=\s*local\.preview_boundary_arn/g) || [];
+            expect(bounded.length).toBe(roles.length);
+        }
+    });
+});
+
 describe('Tier 2 live-service job in e2e.yml', () => {
     it('runs tier2 on schedule/manual dispatch with a 90-minute timeout', () => {
         const yml = readRepo('.github/workflows/e2e.yml');

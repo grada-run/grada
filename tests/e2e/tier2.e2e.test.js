@@ -64,11 +64,14 @@ console.log('Tier 2 fixture image built.');
 const FIXTURE_VERIFY_VPC_JS = `// Tier 2 VPC probe: executed by \`grada run\` inside the task network.
 // DATABASE_URL is guaranteed by the runner (synthesized from DB_* when the
 // task definition lacks it); REDIS_URL comes from the db:redis addon.
+// Chain verification is off on purpose: RDS uses private PKI outside
+// Node's bundled store, and this probe asserts VPC reachability — TLS
+// is still negotiated (PGSSLMODE=require), just not verified.
 const { Client } = require('pg');
 const Redis = require('ioredis');
 
 (async () => {
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
+    const pg = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
     await pg.connect();
     const result = await pg.query('SELECT 1 AS ok');
     if (result.rows[0].ok !== 1) throw new Error('RDS SELECT 1 mismatch');
@@ -330,7 +333,19 @@ describe.skipIf(!process.env.AWS_ACCESS_KEY_ID)('Tier 2: live service acceptance
             // --cmd stays last: it greedily consumes the next token even
             // when it looks like a flag.
             const result = runCli(['run', '--headless', '--task-def', taskDefArn, '--cmd', 'node verify-vpc.js'], { cwd: dir, env });
-            expect(result.status).toBe(0);
+            try {
+                expect(result.status).toBe(0);
+            } catch (runError) {
+                // CI visibility: dump the container and service
+                // diagnostics before failing (mirrors Tier 1's status
+                // check). Both commands are synchronous and never throw
+                // on non-zero exit, so the original assertion error is
+                // always the one that fails the test.
+                console.log('Tier 2 run check failed: dumping CloudWatch logs and ECS diagnostics...');
+                runCli(['logs', '--tail', '100'], { cwd: dir, env });
+                runCli(['diagnose'], { cwd: dir, env });
+                throw runError;
+            }
         });
     });
 
