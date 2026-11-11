@@ -8,6 +8,44 @@ function readRepo(rel) {
     return fs.readFileSync(path.join(process.cwd(), rel), 'utf-8');
 }
 
+// Slices one policy block out of a template: bounded on both sides so a
+// guardrail assertion can never pass on boundary text (or vice versa).
+function slicePolicy(tf, startMarker, endMarker = null) {
+    const start = tf.indexOf(startMarker);
+    if (start === -1) return '';
+    const end = endMarker === null ? tf.length : tf.indexOf(endMarker, start);
+    return tf.slice(start, end === -1 ? tf.length : end);
+}
+
+// Parses a sliced policy into Sid -> { action, resource } with normalized
+// source text, so twin assertions compare exactly what ships.
+function statementsBySid(slice) {
+    const map = new Map();
+    const parts = slice.split(/Sid\s*=\s*"/);
+    for (let i = 1; i < parts.length; i++) {
+        const chunk = parts[i];
+        const sid = chunk.slice(0, chunk.indexOf('"'));
+        const action = chunk.match(/(?<!Not)Action\s*=\s*\[[^\]]*\]/s)?.[0].replace(/\s+/g, ' ') ?? null;
+        const resource = chunk.match(/(?<!Not)Resource\s*=\s*(\[[^\]]*\]|local\.\w+|"[^"]*")/s)?.[0].replace(/\s+/g, ' ') ?? null;
+        map.set(sid, { action, resource });
+    }
+    return map;
+}
+
+function sidChunk(slice, sid) {
+    const parts = slice.split(/Sid\s*=\s*"/);
+    for (let i = 1; i < parts.length; i++) {
+        if (parts[i].startsWith(`${sid}"`)) return parts[i];
+    }
+    return '';
+}
+
+// Twin naming drops the guardrail-side Prod infix: DenyProdX (and
+// DenyX) <-> BoundaryDenyX.
+function twinSid(sid) {
+    return `BoundaryDeny${sid.replace(/^Deny(Prod)?/, '')}`;
+}
+
 function finalStage(content) {
     const lines = content.split('\n');
     let lastFromIdx = -1;
@@ -142,6 +180,15 @@ describe('Shift-left: local test:iac matches blocking CI scans', () => {
         expect(script).toContain('process.exit(0)');
     });
 
+    it('scripts/test-iac.js wires the ECS gate with an explicit node command (mirrors CI)', () => {
+        // Bare --setup-ci-migrate trips the stripped-runner refusal on
+        // the seeded prisma script — CI passes an explicit command, so
+        // the local script must too. Lambda keeps bare (it skips the ECS
+        // gate with a warning).
+        const script = readRepo('scripts/test-iac.js');
+        expect(script).toContain("'--setup-ci-migrate=node ./dist/migrate.cjs'");
+    });
+
     it('iac-validation.yml runs the same blocking Trivy config command', () => {
         const yml = readRepo('.github/workflows/iac-validation.yml');
         expect(yml).toContain('aquasec/trivy config --exit-code 1 --severity HIGH,CRITICAL');
@@ -150,8 +197,7 @@ describe('Shift-left: local test:iac matches blocking CI scans', () => {
 
 describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
     it('denies CI-role mutation on the preview role (scoped to the CI roles)', () => {
-        const tf = readRepo('templates/terraform/oidc.tf');
-        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        const { guardrails } = twinSlices();
         expect(guardrails).toContain('DenyCIRoleMutation');
         for (const action of ['iam:DeleteRole', 'iam:UpdateAssumeRolePolicy', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy']) {
             expect(guardrails).toContain(action);
@@ -169,23 +215,26 @@ describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
     });
 
     it('denies prod snapshot, secrets, and log-group deletion', () => {
-        const tf = readRepo('templates/terraform/oidc.tf');
-        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        const { tf, guardrails } = twinSlices();
         expect(guardrails).toContain('rds:DeleteDBSnapshot');
         expect(guardrails).toContain('rds:DeleteDBClusterSnapshot');
-        expect(guardrails).toContain('snapshot:${local.prod_prefix}-db-*');
-        expect(guardrails).toContain('cluster-snapshot:${local.prod_prefix}-db-cluster-*');
         expect(guardrails).toContain('secretsmanager:DeleteSecret');
-        expect(guardrails).toContain('secret:${local.prod_prefix}-secrets-*');
         expect(guardrails).toContain('logs:DeleteLogGroup');
-        expect(guardrails).toContain('log-group:/ecs/${local.prod_prefix}');
+        // Resource lists live in the shared locals both twins consume.
+        for (const arn of [
+            'snapshot:${local.prod_prefix}-db-*',
+            'cluster-snapshot:${local.prod_prefix}-db-cluster-*',
+            'secret:${local.prod_prefix}-secrets-*',
+            'log-group:/ecs/${local.prod_prefix}',
+        ]) {
+            expect(tf).toContain(arn);
+        }
     });
 });
 
 describe('Preview permissions boundary (BUG-212)', () => {
     it('forces every created role to carry the boundary', () => {
-        const tf = readRepo('templates/terraform/oidc.tf');
-        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        const { guardrails } = twinSlices();
         expect(guardrails).toContain('DenyRoleWithoutBoundary');
         expect(guardrails).toContain('iam:CreateRole');
         expect(guardrails).toContain('iam:PermissionsBoundary');
@@ -193,18 +242,17 @@ describe('Preview permissions boundary (BUG-212)', () => {
     });
 
     it('lets neither preview nor backdoor creds touch the boundary', () => {
-        const tf = readRepo('templates/terraform/oidc.tf');
-        const guardrails = tf.slice(tf.indexOf('resource "aws_iam_role_policy" "preview_guardrails"'));
+        const { guardrails, boundary } = twinSlices();
         expect(guardrails).toContain('iam:PutRolePermissionsBoundary');
         expect(guardrails).toContain('iam:DeleteRolePermissionsBoundary');
         expect(guardrails).toContain('DenyBoundaryMutation');
-        const boundary = tf.slice(tf.indexOf('resource "aws_iam_policy" "preview_boundary"'));
-        expect(boundary).toContain('"iam:*"');
+        // BUG-214 carved PassRole out of the IAM veto; everything else
+        // stays denied (see the carve-out assertions below).
+        expect(sidChunk(boundary, 'BoundaryDenyIAM')).toContain('NotAction');
     });
 
     it('caps backdoor roles at the task data-plane (deny-list mirror)', () => {
-        const tf = readRepo('templates/terraform/oidc.tf');
-        const boundary = tf.slice(tf.indexOf('resource "aws_iam_policy" "preview_boundary"'));
+        const { boundary } = twinSlices();
         // Base allow with guardrail-mirroring denies: default-allow so a
         // missing entry weakens security instead of breaking prod tasks.
         expect(boundary).toContain('BoundaryBaseAllow');
@@ -255,5 +303,200 @@ describe('Tier 2 live-service job in e2e.yml', () => {
         expect(destroyIdx).toBeGreaterThan(-1);
         expect(gcIdx).toBeGreaterThan(destroyIdx);
         expect(tier2).toContain('e2e-tier2-workspace');
+    });
+});
+
+const GUARDRAIL_MARKER = 'resource "aws_iam_role_policy" "preview_guardrails"';
+const BOUNDARY_MARKER = 'resource "aws_iam_policy" "preview_boundary"';
+const BOUNDARY_DATA_MARKER = 'data "aws_iam_policy" "preview_boundary"';
+
+function twinSlices() {
+    const tf = readRepo('templates/terraform/oidc.tf');
+    return {
+        tf,
+        guardrails: slicePolicy(tf, GUARDRAIL_MARKER, BOUNDARY_MARKER),
+        boundary: slicePolicy(tf, BOUNDARY_MARKER, BOUNDARY_DATA_MARKER),
+    };
+}
+
+describe('Permissions boundary PassRole carve-out (BUG-214)', () => {
+    it('carves PassRole out of the IAM deny instead of blocking the scheduler', () => {
+        const { boundary } = twinSlices();
+        const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
+        expect(chunk).toContain('NotAction');
+        expect(chunk).toContain('"iam:PassRole"');
+        expect(chunk).not.toContain('Action   = ["iam:*"]');
+    });
+
+    it('gates carved PassRole on the ECS tasks service', () => {
+        const { boundary } = twinSlices();
+        const chunk = sidChunk(boundary, 'BoundaryDenyPassRoleOffService');
+        expect(chunk).toContain('"iam:PassRole"');
+        expect(chunk).toContain('StringNotEquals');
+        expect(chunk).toContain('iam:PassedToService');
+        expect(chunk).toContain('ecs-tasks.amazonaws.com');
+    });
+
+    it('gates carved PassRole on task roles (preview patterns plus the prod pair)', () => {
+        const { boundary } = twinSlices();
+        const chunk = sidChunk(boundary, 'BoundaryDenyPassRoleOffTarget');
+        expect(chunk).toContain('"iam:PassRole"');
+        expect(chunk).toContain('NotResource');
+        expect(chunk).toContain('role/{{PROJECT_NAME}}-pr-*-task-role');
+        expect(chunk).toContain('role/{{PROJECT_NAME}}-pr-*-execution-role');
+        // The prod pair rides the shared local, so renames flow instead
+        // of silently re-narrowing the exception.
+        expect(chunk).toContain('local.guardrail_app_role_resources');
+    });
+
+    it('lets only the prod scheduler pass prod roles', () => {
+        const { boundary } = twinSlices();
+        const chunk = sidChunk(boundary, 'BoundaryDenyProdPassRoleOffScheduler');
+        expect(chunk).toContain('"iam:PassRole"');
+        expect(chunk).toContain('local.guardrail_app_role_resources');
+        expect(chunk).toContain('StringNotEquals');
+        expect(chunk).toContain('aws:PrincipalArn');
+        expect(chunk).toContain('role/${local.prod_prefix}-cron-scheduler-role');
+    });
+});
+
+describe('Preview task-role confinement (BUG-215)', () => {
+    it('denies prod task execution on exact ARNs (guardrail side)', () => {
+        const { tf, guardrails } = twinSlices();
+        const chunk = sidChunk(guardrails, 'DenyProdTaskExecution');
+        for (const action of ['ecs:RunTask', 'ecs:StopTask', 'ecs:ExecuteCommand', 'ecs:CreateService']) {
+            expect(chunk).toContain(action);
+        }
+        expect(chunk).toContain('local.guardrail_task_execution_resources');
+        const local = tf.slice(tf.indexOf('guardrail_task_execution_resources'));
+        for (const arn of [
+            'cluster/${local.prod_prefix}-cluster',
+            'service/${local.prod_prefix}-cluster/${local.prod_prefix}-service',
+            'service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service',
+            'task/${local.prod_prefix}-cluster/*',
+            'task-definition/${local.prod_prefix}-task:*',
+            'task-definition/${local.prod_prefix}-worker-task:*',
+        ]) {
+            expect(local).toContain(arn);
+        }
+        // No describes: plan.yml refreshes prod state with preview
+        // credentials, so describing prod is legitimate traffic.
+        expect(chunk).not.toContain('Describe');
+    });
+
+    it('denies prod task-definition registration and prod PassRole', () => {
+        const { tf, guardrails } = twinSlices();
+        const registration = sidChunk(guardrails, 'DenyProdTaskDefinitionRegistration');
+        expect(registration).toContain('ecs:RegisterTaskDefinition');
+        expect(registration).toContain('ecs:DeregisterTaskDefinition');
+        expect(registration).toContain('local.guardrail_task_definition_resources');
+        const taskDefLocal = tf.slice(tf.indexOf('guardrail_task_definition_resources'));
+        expect(taskDefLocal).toContain('task-definition/${local.prod_prefix}-task:*');
+        expect(taskDefLocal).toContain('task-definition/${local.prod_prefix}-worker-task:*');
+        const passRole = sidChunk(guardrails, 'DenyProdPassRole');
+        expect(passRole).toContain('"iam:PassRole"');
+        expect(passRole).toContain('local.guardrail_app_role_resources');
+    });
+
+    it('denies prod app-role mutation on string-built ARNs (no HCL refs)', () => {
+        const { tf, guardrails } = twinSlices();
+        const chunk = sidChunk(guardrails, 'DenyProdAppRoleMutation');
+        for (const action of ['iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:UpdateAssumeRolePolicy', 'iam:DeleteRole']) {
+            expect(chunk).toContain(action);
+        }
+        expect(chunk).toContain('local.guardrail_app_role_resources');
+        const local = tf.slice(tf.indexOf('guardrail_app_role_resources'));
+        expect(local).toContain('role/${local.prod_prefix}-task-role');
+        expect(local).toContain('role/${local.prod_prefix}-execution-role');
+        expect(local).toContain('role/${local.prod_prefix}-cron-scheduler-role');
+        // Static trees define no IAM roles: refs would dangle and fail
+        // validate, so the ARNs must be string-built.
+        expect(tf).not.toContain('aws_iam_role.task_role');
+        expect(tf).not.toContain('aws_iam_role.execution_role');
+        expect(tf).not.toContain('aws_iam_role.scheduler_cron_role');
+    });
+
+    it('closes the trust-edit bypass on all three app roles (both twins)', () => {
+        // Re-trusting the prod task role and assuming it directly would
+        // bypass every execution deny — so trust-policy writes and role
+        // deletion are denied on task, execution, and scheduler roles.
+        const { guardrails, boundary } = twinSlices();
+        for (const chunk of [sidChunk(guardrails, 'DenyProdAppRoleMutation'), sidChunk(boundary, 'BoundaryDenyAppRoleMutation')]) {
+            expect(chunk).toContain('iam:UpdateAssumeRolePolicy');
+            expect(chunk).toContain('iam:DeleteRole');
+            expect(chunk).toContain('local.guardrail_app_role_resources');
+        }
+    });
+
+    it('mirrors the four new statements into the boundary', () => {
+        const { boundary } = twinSlices();
+        for (const sid of ['BoundaryDenyTaskExecution', 'BoundaryDenyTaskDefinitionRegistration', 'BoundaryDenyPassRole', 'BoundaryDenyAppRoleMutation']) {
+            expect(sidChunk(boundary, sid), `${sid} missing`).not.toBe('');
+        }
+    });
+
+    it('matches no pr-* resource on the new statements', () => {
+        const { tf } = twinSlices();
+        for (const local of ['guardrail_task_execution_resources', 'guardrail_task_definition_resources', 'guardrail_app_role_resources']) {
+            const block = tf.slice(tf.indexOf(local), tf.indexOf(']', tf.indexOf(local)));
+            expect(block, local).not.toContain('pr-');
+        }
+    });
+
+    it('keeps every twinable guardrail Sid mirrored with identical Action/Resource', () => {
+        const { guardrails, boundary } = twinSlices();
+        const guardrailStmts = statementsBySid(guardrails);
+        const boundaryStmts = statementsBySid(boundary);
+        // Exact enumeration: 13 identical + 1 asymmetric + 4 no-twin by
+        // design + 4 new. A new Sid without a twin fails here.
+        const identicalTwins = [
+            'DenyComputeAbuse',
+            'DenySnapshotSharing',
+            'DenyProdStateDestruction',
+            'DenyProdECSShutdown',
+            'DenyProdImageDeletion',
+            'DenyProdLambdaRewrite',
+            'DenyProdQueueDestruction',
+            'DenyProdDatabaseDestruction',
+            'DenyProdAuroraDestruction',
+            'DenyProdTableDeletion',
+            'DenyProdSnapshotDeletion',
+            'DenyProdSecretsDeletion',
+            'DenyProdLogDeletion',
+            'DenyProdTaskExecution',
+            'DenyProdTaskDefinitionRegistration',
+            'DenyProdPassRole',
+            'DenyProdAppRoleMutation',
+        ];
+        const asymmetricTwin = new Map([['DenyIAMBackdoors', 'BoundaryDenyIAM']]);
+        const noTwinByDesign = new Set(['DenyCIRoleMutation', 'DenyRoleWithoutBoundary', 'DenyBoundarySwap', 'DenyBoundaryMutation']);
+        expect([...guardrailStmts.keys()].sort()).toEqual([...identicalTwins, ...asymmetricTwin.keys(), ...noTwinByDesign].sort());
+        for (const sid of identicalTwins) {
+            const twin = boundaryStmts.get(twinSid(sid));
+            expect(twin, `${sid} missing boundary twin`).toBeDefined();
+            expect(twin.action, `${sid} Action drift`).toBe(guardrailStmts.get(sid).action);
+            expect(twin.resource, `${sid} Resource drift`).toBe(guardrailStmts.get(sid).resource);
+        }
+        for (const [sid, twinSid] of asymmetricTwin) {
+            expect(boundaryStmts.has(twinSid), `${sid} asymmetric twin missing`).toBe(true);
+        }
+        // Boundary-only Sids stay pinned too: base allow, audit/billing,
+        // the asymmetric IAM deny, and the PassRole carve-out gates.
+        expect([...boundaryStmts.keys()].sort()).toEqual(
+            [...identicalTwins.map(twinSid), 'BoundaryBaseAllow', 'BoundaryDenyAuditBilling', 'BoundaryDenyIAM', 'BoundaryDenyPassRoleOffService', 'BoundaryDenyPassRoleOffTarget', 'BoundaryDenyProdPassRoleOffScheduler'].sort()
+        );
+    });
+});
+
+describe('Snapshot guardrails cover pre-deploy names (BUG-205)', () => {
+    it('denies legacy bare pre-deploy snapshot deletion on both twins', () => {
+        const { tf, guardrails, boundary } = twinSlices();
+        expect(sidChunk(guardrails, 'DenyProdSnapshotDeletion')).toContain('local.guardrail_snapshot_deletion_resources');
+        expect(sidChunk(boundary, 'BoundaryDenySnapshotDeletion')).toContain('local.guardrail_snapshot_deletion_resources');
+        const local = tf.slice(tf.indexOf('guardrail_snapshot_deletion_resources'));
+        expect(local).toContain('snapshot:${local.prod_prefix}-db-*');
+        expect(local).toContain('cluster-snapshot:${local.prod_prefix}-db-cluster-*');
+        expect(local).toContain('snapshot:pre-deploy-*');
+        expect(local).toContain('cluster-snapshot:pre-deploy-*');
     });
 });

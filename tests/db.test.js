@@ -1598,6 +1598,32 @@ describe('db migrate: --setup-ci and gate injection', () => {
         expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true, workflowFile }));
     });
 
+    it('--setup-ci scopes the gate snapshot id to the database (BUG-205)', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        const workflowFile = writeWorkflow(dir);
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, isHeadless: true,
+            cmd: 'node ./dist/migrate.cjs',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true }));
+        expect(fs.readFileSync(workflowFile, 'utf8')).toContain('db backup --id "myapp-db-pre-deploy-${{ github.sha }}" --headless');
+    });
+
+    it('--setup-ci uses the cluster prefix on aurora trees (BUG-205)', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
+        const workflowFile = writeWorkflow(dir);
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'database-aurora-postgresql.tf'), '# aurora');
+        const result = await runDbMigrate(migrateOptions({
+            cwd: dir, setupCi: true, isHeadless: true,
+            cmd: 'node ./dist/migrate.cjs',
+            ecsClient: mockEcsMigrateClient(), logsClient: mockLogsClient(),
+        }));
+        expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true }));
+        expect(fs.readFileSync(workflowFile, 'utf8')).toContain('db backup --id "myapp-db-cluster-pre-deploy-${{ github.sha }}" --headless');
+    });
+
     it('--setup-ci also wires the preview workflow when present', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
         writeWorkflow(dir);
@@ -1641,28 +1667,33 @@ describe('db migrate: --setup-ci and gate injection', () => {
 
 describe('db migrate: gate helpers', () => {
     it('injectMigrationGate places the block before the Force step', () => {
-        const updated = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate' });
+        const updated = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate', dbIdentifier: 'myapp-db' });
         expect(updated).toContain(`--cmd 'npm run migrate'`);
         expect(updated).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4');
         expect(updated.indexOf('# grada:db-migrate-end')).toBeLessThan(updated.indexOf('- name: Force ECS deployment'));
     });
 
     it('injectMigrationGate returns null without an anchor', () => {
-        expect(injectMigrationGate('steps: []', { cmd: 'x' })).toBeNull();
+        expect(injectMigrationGate('steps: []', { cmd: 'x', dbIdentifier: 'myapp-db' })).toBeNull();
     });
 
     it('injectMigrationGate snapshots the database before migrating', () => {
-        const updated = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.44.0' });
+        const updated = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.44.0', dbIdentifier: 'myapp-db' });
         expect(updated).toContain('- name: Take pre-migration database snapshot');
-        expect(updated).toContain('npx --yes @grada-run/grada@0.44.0 db backup --id "pre-deploy-${{ github.sha }}" --headless');
+        expect(updated).toContain('npx --yes @grada-run/grada@0.44.0 db backup --id "myapp-db-pre-deploy-${{ github.sha }}" --headless');
         expect(updated.indexOf('Take pre-migration database snapshot'))
             .toBeLessThan(updated.indexOf('- name: Pre-Deploy Database Migration'));
         // The backup step honors the credential gate like its sibling.
         const backupBlock = updated.split('Take pre-migration database snapshot')[1].split('- name: Pre-Deploy')[0];
         expect(backupBlock).toContain(`if: steps.aws-creds.outcome == 'success'`);
         // Refreshing replaces the whole block: still exactly one snapshot step.
-        const refreshed = injectMigrationGate(updated, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.44.0' });
+        const refreshed = injectMigrationGate(updated, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.44.0', dbIdentifier: 'myapp-db' });
         expect(refreshed.match(/Take pre-migration database snapshot/g)).toHaveLength(1);
+    });
+
+    it('injectMigrationGate requires the db identifier for the snapshot id (BUG-205)', () => {
+        expect(() => injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate' })).toThrow(/dbIdentifier/);
+        expect(() => injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate', dbIdentifier: '  ' })).toThrow(/dbIdentifier/);
     });
 
     it('injectPreviewMigrationGate stays snapshot-free (ephemeral preview DBs)', () => {
@@ -1696,11 +1727,11 @@ describe('db migrate: gate helpers', () => {
             '      - name: Comment PR',
             '        uses: actions/github-script@v7',
         ].join('\n');
-        const deployed = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.40.15' });
+        const deployed = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.40.15', dbIdentifier: 'myapp-db' });
         expect(deployed).toContain('npx --yes @grada-run/grada@0.40.15 db migrate');
         const previewed = injectPreviewMigrationGate(preview, { cmd: 'node ./dist/migrate.cjs', cliVersion: '0.40.15' });
         expect(previewed).toContain('npx --yes @grada-run/grada@0.40.15 db migrate');
-        const unpinned = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs' });
+        const unpinned = injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'node ./dist/migrate.cjs', dbIdentifier: 'myapp-db' });
         expect(unpinned).toContain('npx --yes grada-run db migrate');
         expect(unpinned).not.toContain('@grada-run/grada@');
     });
@@ -1712,7 +1743,7 @@ describe('db migrate: gate helpers', () => {
         );
         expect(findGateBlock(legacy)).not.toBeNull();
         expect(findGateBlock('steps: []')).toBeNull();
-        const updated = injectMigrationGate(legacy, { cmd: 'npm run migrate' });
+        const updated = injectMigrationGate(legacy, { cmd: 'npm run migrate', dbIdentifier: 'myapp-db' });
         expect(updated).not.toContain('deploy-stack:db-migrate-start');
         expect(updated).not.toContain('deploy-stack:db-migrate-end');
         expect(updated.match(/# grada:db-migrate-start/g)).toHaveLength(1);
@@ -2705,8 +2736,8 @@ describe('Command: db backup (mocked AWS)', () => {
     it('polls until the snapshot is available', async () => {
         const rdsClient = mockRdsBackupClient({
             snapshotScript: [
-                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating' }] },
-                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating', DBInstanceIdentifier: 'myapp-db' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available', DBInstanceIdentifier: 'myapp-db' }] },
             ],
         });
         const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient }));
@@ -2724,7 +2755,7 @@ describe('Command: db backup (mocked AWS)', () => {
         const rdsClient = mockRdsBackupClient({
             snapshotScript: [
                 { error: notFound },
-                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available', DBInstanceIdentifier: 'myapp-db' }] },
             ],
         });
         const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient }));
@@ -2734,8 +2765,8 @@ describe('Command: db backup (mocked AWS)', () => {
     it('fails fast when the snapshot reaches a terminal failure state', async () => {
         const rdsClient = mockRdsBackupClient({
             snapshotScript: [
-                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating' }] },
-                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'failed' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating', DBInstanceIdentifier: 'myapp-db' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'failed', DBInstanceIdentifier: 'myapp-db' }] },
             ],
         });
         const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient, timeoutMs: 50 }));
@@ -2749,7 +2780,7 @@ describe('Command: db backup (mocked AWS)', () => {
 
     it('fails on timeout while creation continues in the background', async () => {
         const rdsClient = mockRdsBackupClient({
-            snapshotScript: Array.from({ length: 50 }, () => ({ snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating' }] })),
+            snapshotScript: Array.from({ length: 50 }, () => ({ snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating', DBInstanceIdentifier: 'myapp-db' }] })),
         });
         const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient, timeoutMs: 20 }));
         expect(result.reason).toBe('snapshot-timeout');
@@ -2774,7 +2805,7 @@ describe('Command: db backup (mocked AWS)', () => {
         const rdsClient = mockRdsBackupClient({
             createError: exists,
             snapshotScript: [
-                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available' }] },
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available', DBInstanceIdentifier: 'myapp-db' }] },
             ],
         });
         const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient }));
@@ -2784,13 +2815,93 @@ describe('Command: db backup (mocked AWS)', () => {
         }));
     });
 
+    it('refuses to adopt a foreign snapshot id (BUG-204)', async () => {
+        const exists = new Error('snapshot already exists');
+        exists.name = 'DBSnapshotAlreadyExists';
+        const rdsClient = mockRdsBackupClient({
+            createError: exists,
+            snapshotScript: [
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available', DBInstanceIdentifier: 'other-db' }] },
+            ],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient }));
+        expect(result.reason).toBe('snapshot-mismatch');
+        expect(result.snapshotId).toBe('s1');
+        expect(stripVTControlCharacters(output.join('\n'))).toContain('other-db');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_backup_run', expect.objectContaining({
+            success: false, error_code: 'SNAPSHOT_MISMATCH',
+        }));
+    });
+
+    it('refuses to adopt a foreign cluster snapshot id (BUG-204)', async () => {
+        const exists = new Error('snapshot already exists');
+        exists.name = 'DBClusterSnapshotAlreadyExists';
+        const rdsClient = mockRdsBackupClient({
+            instance: null,
+            cluster: healthyDbCluster(),
+            createError: exists,
+            clusterSnapshotScript: [
+                { snapshots: [{ DBClusterSnapshotIdentifier: 'c1', Status: 'available', DBClusterIdentifier: 'other-db-cluster' }] },
+            ],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 'c1', rdsClient }));
+        expect(result.reason).toBe('snapshot-mismatch');
+        expect(result.snapshotId).toBe('c1');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_backup_run', expect.objectContaining({
+            success: false, error_code: 'SNAPSHOT_MISMATCH',
+        }));
+    });
+
+    it('fails fast on a foreign snapshot even before it is available (BUG-204)', async () => {
+        const exists = new Error('snapshot already exists');
+        exists.name = 'DBSnapshotAlreadyExists';
+        const rdsClient = mockRdsBackupClient({
+            createError: exists,
+            snapshotScript: [
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'creating', DBInstanceIdentifier: 'other-db' }] },
+            ],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 's1', rdsClient, timeoutMs: 50 }));
+        expect(result.reason).toBe('snapshot-mismatch');
+        expect(rdsClient.described.length).toBe(1);
+    });
+
+    it('verifies ownership on no-wait reuse (BUG-204)', async () => {
+        const exists = new Error('snapshot already exists');
+        exists.name = 'DBSnapshotAlreadyExists';
+        const rdsClient = mockRdsBackupClient({
+            createError: exists,
+            snapshotScript: [
+                { snapshots: [{ DBSnapshotIdentifier: 's1', Status: 'available', DBInstanceIdentifier: 'other-db' }] },
+            ],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 's1', noWait: true, rdsClient }));
+        expect(result.reason).toBe('snapshot-mismatch');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_backup_run', expect.objectContaining({
+            success: false, error_code: 'SNAPSHOT_MISMATCH',
+        }));
+    });
+
+    it('tolerates a not-yet-visible snapshot on no-wait reuse (BUG-204)', async () => {
+        const exists = new Error('snapshot already exists');
+        exists.name = 'DBSnapshotAlreadyExists';
+        const notFound = new Error('not yet visible');
+        notFound.name = 'DBSnapshotNotFound';
+        const rdsClient = mockRdsBackupClient({
+            createError: exists,
+            snapshotScript: [{ error: notFound }],
+        });
+        const result = await runDbBackup(backupOptions({ snapshotId: 's1', noWait: true, rdsClient }));
+        expect(result).toEqual({ ok: true, snapshotId: 's1', status: 'creating' });
+    });
+
     it('backs up an Aurora cluster with cluster snapshot commands', async () => {
         const rdsClient = mockRdsBackupClient({
             instance: null,
             cluster: healthyDbCluster(),
             clusterSnapshotScript: [
-                { snapshots: [{ DBClusterSnapshotIdentifier: 'c1', Status: 'creating' }] },
-                { snapshots: [{ DBClusterSnapshotIdentifier: 'c1', Status: 'available' }] },
+                { snapshots: [{ DBClusterSnapshotIdentifier: 'c1', Status: 'creating', DBClusterIdentifier: 'myapp-db-cluster' }] },
+                { snapshots: [{ DBClusterSnapshotIdentifier: 'c1', Status: 'available', DBClusterIdentifier: 'myapp-db-cluster' }] },
             ],
         });
         const result = await runDbBackup(backupOptions({ snapshotId: 'c1', rdsClient }));

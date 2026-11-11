@@ -3,8 +3,12 @@ title: "GitHub OIDC Authentication, No Stored AWS Keys"
 description: "Authenticate CI/CD with short-lived OIDC tokens instead of long-lived AWS keys."
 ---
 
-* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust; amended v0.49.2: permissions boundary on created roles — see below)
+* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust; amended v0.49.2: permissions boundary on created roles; amended v0.49.3: preview task-role confinement + boundary PassRole carve-out — see below)
 * **Date:** 2026-09-24 (Retroactive)
+
+## Amendment (v0.49.3): Preview Task-Role Confinement + Boundary PassRole Carve-Out
+
+Preview credentials kept `RunTask`, `RegisterTaskDefinition`, `ExecuteCommand`, and `PassRole` with no production scoping, and the boundary caps created roles, not the preview role's own calls — so PR-run Terraform could execute production task roles or attach admin policies to them. The guardrails now deny task execution, task-definition registration, `PassRole`, and role-policy, trust-policy, and deletion writes on the exact production ARNs — task, execution, and scheduler roles (string-built, so static trees validate; `pr-*` untouched, describes deliberately allowed so `plan` keeps refreshing) — mirrored into the boundary. Twin pairs now share one resource list each, with a parity test failing the build on one-sided edits. Companion fix: the boundary's IAM veto also blocked the scheduler roles from passing task roles at invocation time, silently breaking cron in every workspace — `PassRole` is carved out and re-gated: preview task roles passable to the ECS tasks service, production task roles passable only by the production scheduler role. Existing trees pick both up by re-running setup.
 
 ## Amendment (v0.49.2): Permissions Boundary on Created Roles
 

@@ -25,6 +25,31 @@ const SNAPSHOT_ALREADY_EXISTS_NAMES = new Set([
 // wastes the timeout and misreports.
 const TERMINAL_SNAPSHOT_STATUSES = new Set(['failed', 'deleted', 'deleting']);
 
+// Source database of a described snapshot, by kind. Missing attributes
+// read as undefined (never equal to the target): ownership callers fail
+// closed on unattributed snapshots.
+function snapshotSourceDb(snapshot, isCluster) {
+    if (!snapshot) return undefined;
+    return isCluster ? snapshot.DBClusterIdentifier : snapshot.DBInstanceIdentifier;
+}
+
+// BUG-204 failure: the reused id names another database's snapshot.
+// Shared by the wait and no-wait paths (they differ only in `waited`).
+function failSnapshotMismatch({ spinnerHandle, snapshotId, foreignDb, targetId, projectName, waited, dbIdentifier, region }) {
+    spinnerHandle.stop(color.red('❌ Snapshot belongs to another database.'));
+    return failCommand({
+        print: () => {
+            console.log(color.red(`\n✖ Snapshot ${snapshotId} belongs to ${foreignDb ?? 'an unknown database'}, not ${targetId} — refusing to adopt it.`));
+            console.log('  Pass a different --id, or delete the foreign snapshot first.\n');
+        },
+        event: 'db_backup_run',
+        telemetry: { projectName, waited },
+        errorCode: 'SNAPSHOT_MISMATCH',
+        reason: 'snapshot-mismatch',
+        resultExtra: { dbIdentifier, region, snapshotId },
+    });
+}
+
 export function parseDbBackupArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'db') args.shift();
@@ -177,6 +202,31 @@ async function runDbBackupMain(input = {}) {
 
         if (noWait) {
             if (reusedExisting) {
+                // BUG-204: verify ownership even when not waiting — one
+                // describe, fail closed on a foreign snapshot. A
+                // not-found here is transient (eventual consistency),
+                // so only proceed past it.
+                let ownedSnapshot = null;
+                try {
+                    if (isCluster) {
+                        const resp = await rdsClient.send(
+                            new DescribeDBClusterSnapshotsCommand({ DBClusterSnapshotIdentifier: snapshotId })
+                        );
+                        ownedSnapshot = resp.DBClusterSnapshots?.[0] ?? null;
+                    } else {
+                        const resp = await rdsClient.send(
+                            new DescribeDBSnapshotsCommand({ DBSnapshotIdentifier: snapshotId })
+                        );
+                        ownedSnapshot = resp.DBSnapshots?.[0] ?? null;
+                    }
+                } catch (error) {
+                    const notFoundNames = isCluster ? CLUSTER_SNAPSHOT_NOT_FOUND_NAMES : SNAPSHOT_NOT_FOUND_NAMES;
+                    if (!(error && notFoundNames.has(error.name))) throw error;
+                }
+                const foreignDb = snapshotSourceDb(ownedSnapshot, isCluster);
+                if (ownedSnapshot && foreignDb !== target.id) {
+                    return failSnapshotMismatch({ spinnerHandle: s, snapshotId, foreignDb, targetId: target.id, projectName, waited: false, dbIdentifier, region });
+                }
                 s.stop(color.green('Snapshot already exists.'));
                 console.log(`\n  Snapshot ${color.cyan(snapshotId)} already exists — reusing it.`);
             } else {
@@ -218,6 +268,16 @@ async function runDbBackupMain(input = {}) {
                     throw error;
                 }
                 const snapshot = snapshots[0] || null;
+                // BUG-204: an explicit --id can name another database's
+                // snapshot (AlreadyExists proves existence, not
+                // ownership) — fail closed instead of adopting a
+                // foreign snapshot as our safety backup. Checked
+                // before status handling so a foreign snapshot fails
+                // fast instead of burning the timeout.
+                const foreignDb = snapshotSourceDb(snapshot, isCluster);
+                if (snapshot && foreignDb !== target.id) {
+                    return { done: true, value: { sourceMismatch: true, sourceDb: foreignDb } };
+                }
                 if (snapshot && snapshot.Status === 'available') {
                     return { done: true, value: snapshot };
                 }
@@ -231,6 +291,10 @@ async function runDbBackupMain(input = {}) {
                 return { done: false };
             },
         });
+
+        if (outcome.value?.sourceMismatch) {
+            return failSnapshotMismatch({ spinnerHandle: s, snapshotId, foreignDb: outcome.value.sourceDb, targetId: target.id, projectName, waited: true, dbIdentifier, region });
+        }
 
         if (outcome.value?.terminalFailure) {
             const failedStatus = outcome.value.status;

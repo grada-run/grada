@@ -33,7 +33,7 @@ import { trackEvent, flushTelemetry, getCliVersion, setActiveCommandName, resetA
 import { failCommand } from '../utils/command.js';
 import { getFrameworkWarning } from '../utils/warnings.js';
 import { provisionStateBucket, formatStateBucketName, isAuthError, printAwsAuthGuidance } from '../utils/aws.js';
-import { generateTemplates } from '../utils/generator.js';
+import { generateTemplates, resolveDbEngineRefs } from '../utils/generator.js';
 import { planExistingFiles, executeBackup, preserveManagedFiles, restoreManagedFiles, refusalResultForPlan, writeInitManifest } from '../utils/backup.js';
 import { checkStateAdoption } from '../utils/state-adoption.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
@@ -1025,7 +1025,11 @@ async function mainStackMain(input = {}) {
     if (migrationGateEnabled && migrationCmd) {
         const deployYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'deploy.yml');
         const workflowContent = readFileSafe(deployYmlPath);
-        const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION }) : null;
+        // BUG-205: scope the gate's snapshot id to the database (aurora
+        // takes the cluster prefix) so guardrails and gc can name it.
+        const gateDbRefs = resolveDbEngineRefs(config.dbEngine);
+        const gateDbIdentifier = `${dirConfig.actualProjectName}${resourceSuffix}-db${gateDbRefs.isCluster ? '-cluster' : ''}`;
+        const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION, dbIdentifier: gateDbIdentifier }) : null;
         if (gated) {
             atomicWriteFileSync(deployYmlPath, gated);
             console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml (snapshot first, then migrate)'));

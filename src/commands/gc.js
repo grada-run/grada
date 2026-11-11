@@ -273,7 +273,8 @@ async function discoverUnattachedEips({ ec2Client, projectName }) {
 
 // Standard target discovery: pre-destroy manual snapshots older than
 // the age threshold. Scoped by the exact `<db>-manual-<stamp>` naming
-// pattern destroy writes (instance AND cluster snapshots) — foreign,
+// pattern destroy writes plus the `<db>-pre-deploy-<sha>` pattern the
+// migration gate writes (instance AND cluster snapshots) — foreign,
 // automated, non-available, and young snapshots are never proposed.
 // Tolerant of missing clients/identifiers (programmatic callers without
 // RDS context discover nothing instead of throwing).
@@ -281,22 +282,37 @@ async function discoverOldManualSnapshots({ rdsClient, dbIdentifier, dbClusterId
     if (!rdsClient || (!dbIdentifier && !dbClusterIdentifier)) return [];
     const maxAgeDays = Number(snapshotMaxAgeDays ?? DEFAULT_SNAPSHOT_MAX_AGE_DAYS);
     const cutoffMs = Date.now() - (Number.isFinite(maxAgeDays) ? maxAgeDays : DEFAULT_SNAPSHOT_MAX_AGE_DAYS) * 86400000;
-    const patterns = [dbIdentifier, dbClusterIdentifier]
+    const dbIds = [dbIdentifier, dbClusterIdentifier]
         .filter((id) => typeof id === 'string' && id.trim())
-        .map((id) => new RegExp(`^${escapeRegExp(id.trim().toLowerCase())}-manual-\\d{8}-\\d{6}$`));
+        .map((id) => id.trim().toLowerCase());
+    const patterns = dbIds
+        .map((id) => new RegExp(`^${escapeRegExp(id)}-manual-\\d{8}-\\d{6}$`));
+    // BUG-205: the gate's pre-deploy snapshots are per-commit, so without
+    // a discovery rule they accumulate into the region snapshot quota.
+    const predeployPatterns = dbIds
+        .map((id) => new RegExp(`^${escapeRegExp(id)}-pre-deploy-[0-9a-f]{7,40}$`));
+    // Legacy bare pre-deploy-<sha> ids carry no db scope: retire them
+    // only with a matching source-db attribute, never by name alone.
+    const legacyPredeployPattern = /^pre-deploy-[0-9a-f]{7,40}$/;
+    const knownSourceDbs = new Set(dbIds);
     if (patterns.length === 0) return [];
-    const isRetirable = (snapshotId, status, type, createTime) => {
+    const isRetirable = (snapshotId, status, type, createTime, sourceDb) => {
         if (status !== 'available' || type !== 'manual') return false;
         const createdMs = createTime ? new Date(createTime).getTime() : NaN;
         if (!Number.isFinite(createdMs) || createdMs > cutoffMs) return false;
-        return patterns.some((pattern) => pattern.test(String(snapshotId).toLowerCase()));
+        const name = String(snapshotId).toLowerCase();
+        if (patterns.some((pattern) => pattern.test(name))) return true;
+        if (predeployPatterns.some((pattern) => pattern.test(name))) return true;
+        return legacyPredeployPattern.test(name)
+            && typeof sourceDb === 'string'
+            && knownSourceDbs.has(sourceDb.toLowerCase());
     };
     const snapshots = [];
     let marker;
     do {
         const resp = await rdsClient.send(new DescribeDBSnapshotsCommand({ Marker: marker, MaxRecords: 100 }));
         for (const snap of resp.DBSnapshots || []) {
-            if (isRetirable(snap.DBSnapshotIdentifier, snap.Status, snap.SnapshotType, snap.SnapshotCreateTime)) {
+            if (isRetirable(snap.DBSnapshotIdentifier, snap.Status, snap.SnapshotType, snap.SnapshotCreateTime, snap.DBInstanceIdentifier)) {
                 snapshots.push({ id: snap.DBSnapshotIdentifier, kind: 'instance', createTime: snap.SnapshotCreateTime });
             }
         }
@@ -306,7 +322,7 @@ async function discoverOldManualSnapshots({ rdsClient, dbIdentifier, dbClusterId
     do {
         const resp = await rdsClient.send(new DescribeDBClusterSnapshotsCommand({ Marker: marker, MaxRecords: 100 }));
         for (const snap of resp.DBClusterSnapshots || []) {
-            if (isRetirable(snap.DBClusterSnapshotIdentifier, snap.Status, snap.SnapshotType, snap.SnapshotCreateTime)) {
+            if (isRetirable(snap.DBClusterSnapshotIdentifier, snap.Status, snap.SnapshotType, snap.SnapshotCreateTime, snap.DBClusterIdentifier)) {
                 snapshots.push({ id: snap.DBClusterSnapshotIdentifier, kind: 'cluster', createTime: snap.SnapshotCreateTime });
             }
         }

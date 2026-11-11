@@ -482,7 +482,7 @@ describe('github workflow templates', () => {
 
     it('deploy.yml still parses after migration-gate injection', () => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
-        const injected = injectMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs' });
+        const injected = injectMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs', dbIdentifier: 'dummy-db' });
         expect(injected).toContain('# grada:db-migrate-start');
         const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
         const steps = doc.jobs.deploy.steps;

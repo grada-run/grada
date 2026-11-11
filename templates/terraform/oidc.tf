@@ -41,6 +41,76 @@ locals {
   # task/execution/cron roles, which static trees lack.
   # tflint-ignore: terraform_unused_declarations
   preview_boundary_arn = terraform.workspace == "default" ? aws_iam_policy.preview_boundary[0].arn : data.aws_iam_policy.preview_boundary[0].arn
+  # Shared twin resource lists: every Deny*/BoundaryDeny* pair consumes
+  # one list, so a one-sided resource edit is impossible. New pairs add
+  # their list here and reference it from both sides.
+  guardrail_compute_abuse_resources    = ["*"]
+  guardrail_snapshot_sharing_resources = ["*"]
+  guardrail_state_destruction_resources = [
+    "arn:aws:s3:::{{STATE_BUCKET}}",
+    "arn:aws:s3:::{{STATE_BUCKET}}/*",
+  ]
+  guardrail_ecs_shutdown_resources = [
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
+  ]
+  guardrail_image_deletion_resources = [
+    "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${local.prod_prefix}-repo",
+  ]
+  guardrail_lambda_rewrite_resources = [
+    "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${local.prod_prefix}-fn",
+  ]
+  guardrail_queue_destruction_resources = [
+    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-queue",
+    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-dlq",
+  ]
+  guardrail_database_destruction_resources = [
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db-instance-1",
+  ]
+  guardrail_aurora_destruction_resources = [
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
+  ]
+  guardrail_table_deletion_resources = [
+    "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table",
+  ]
+  guardrail_snapshot_deletion_resources = [
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
+    # BUG-205: legacy bare pre-deploy-<sha> ids carry no db prefix, so
+    # they match no prod pattern above — deny them outright. gc never
+    # runs under preview credentials, so nothing legitimate needs them.
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:pre-deploy-*",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:pre-deploy-*",
+  ]
+  guardrail_secrets_deletion_resources = [
+    "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
+  ]
+  guardrail_log_deletion_resources = [
+    "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.prod_prefix}",
+  ]
+  guardrail_task_execution_resources = [
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task/${local.prod_prefix}-cluster/*",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-task:*",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-worker-task:*",
+  ]
+  guardrail_task_definition_resources = [
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-task:*",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-worker-task:*",
+  ]
+  # String-built (not HCL refs): static trees define no IAM roles, so
+  # refs would dangle and fail validate. ECS and Lambda use identical
+  # physical role names, so one pattern covers both and matches
+  # nothing on static.
+  guardrail_app_role_resources = [
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-execution-role",
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-cron-scheduler-role",
+  ]
 }
 
 # Deploy role FIRST: readTerraformOidcTrust anchors on this block so re-init
@@ -175,7 +245,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Sid      = "DenyComputeAbuse"
         Effect   = "Deny"
         Action   = ["ec2:RunInstances"]
-        Resource = "*"
+        Resource = local.guardrail_compute_abuse_resources
       },
       {
         Sid      = "DenyIAMBackdoors"
@@ -203,110 +273,83 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Sid      = "DenySnapshotSharing"
         Effect   = "Deny"
         Action   = ["rds:ModifyDBSnapshotAttribute"]
-        Resource = "*"
+        Resource = local.guardrail_snapshot_sharing_resources
       },
       {
-        Sid    = "DenyProdStateDestruction"
-        Effect = "Deny"
-        Action = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
-        Resource = [
-          "arn:aws:s3:::{{STATE_BUCKET}}",
-          "arn:aws:s3:::{{STATE_BUCKET}}/*",
-        ]
+        Sid      = "DenyProdStateDestruction"
+        Effect   = "Deny"
+        Action   = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
+        Resource = local.guardrail_state_destruction_resources
       },
       {
-        Sid    = "DenyProdECSShutdown"
-        Effect = "Deny"
-        Action = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
-        Resource = [
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
-        ]
+        Sid      = "DenyProdECSShutdown"
+        Effect   = "Deny"
+        Action   = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
+        Resource = local.guardrail_ecs_shutdown_resources
       },
       {
-        Sid    = "DenyProdImageDeletion"
-        Effect = "Deny"
-        Action = ["ecr:BatchDeleteImage"]
-        Resource = [
-          "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${local.prod_prefix}-repo",
-        ]
+        Sid      = "DenyProdImageDeletion"
+        Effect   = "Deny"
+        Action   = ["ecr:BatchDeleteImage"]
+        Resource = local.guardrail_image_deletion_resources
       },
       {
-        Sid    = "DenyProdLambdaRewrite"
-        Effect = "Deny"
-        Action = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
-        Resource = [
-          "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${local.prod_prefix}-fn",
-        ]
+        Sid      = "DenyProdLambdaRewrite"
+        Effect   = "Deny"
+        Action   = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
+        Resource = local.guardrail_lambda_rewrite_resources
       },
       {
-        Sid    = "DenyProdQueueDestruction"
-        Effect = "Deny"
-        Action = ["sqs:PurgeQueue", "sqs:DeleteQueue"]
-        Resource = [
-          "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-queue",
-          "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-dlq",
-        ]
+        Sid      = "DenyProdQueueDestruction"
+        Effect   = "Deny"
+        Action   = ["sqs:PurgeQueue", "sqs:DeleteQueue"]
+        Resource = local.guardrail_queue_destruction_resources
       },
       {
-        Sid    = "DenyProdDatabaseDestruction"
-        Effect = "Deny"
-        Action = ["rds:DeleteDBInstance", "rds:ModifyDBInstance"]
-        Resource = [
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db",
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db-instance-1",
-        ]
+        Sid      = "DenyProdDatabaseDestruction"
+        Effect   = "Deny"
+        Action   = ["rds:DeleteDBInstance", "rds:ModifyDBInstance"]
+        Resource = local.guardrail_database_destruction_resources
       },
       {
-        Sid    = "DenyProdAuroraDestruction"
-        Effect = "Deny"
-        Action = ["rds:DeleteDBCluster", "rds:ModifyDBCluster"]
-        Resource = [
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
-        ]
+        Sid      = "DenyProdAuroraDestruction"
+        Effect   = "Deny"
+        Action   = ["rds:DeleteDBCluster", "rds:ModifyDBCluster"]
+        Resource = local.guardrail_aurora_destruction_resources
       },
       {
-        Sid    = "DenyProdTableDeletion"
-        Effect = "Deny"
-        Action = ["dynamodb:DeleteTable"]
-        Resource = [
-          "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table",
-        ]
+        Sid      = "DenyProdTableDeletion"
+        Effect   = "Deny"
+        Action   = ["dynamodb:DeleteTable"]
+        Resource = local.guardrail_table_deletion_resources
       },
       {
         # BUG-208: manual snapshots (grada names them
-        # <db-identifier>-manual-<stamp>) are directly deletable;
+        # <db-identifier>-manual-<stamp> and
+        # <db-identifier>-pre-deploy-<sha>) are directly deletable;
         # automated snapshots can only go away via retention changes or
         # instance deletion, both already denied above.
-        Sid    = "DenyProdSnapshotDeletion"
-        Effect = "Deny"
-        Action = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
-        Resource = [
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
-        ]
+        Sid      = "DenyProdSnapshotDeletion"
+        Effect   = "Deny"
+        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
+        Resource = local.guardrail_snapshot_deletion_resources
       },
       {
         # The vault ARN carries a random suffix and static trees have no
         # vault at all (no secrets.tf), so match the tight name prefix —
         # on static it simply matches nothing.
-        Sid    = "DenyProdSecretsDeletion"
-        Effect = "Deny"
-        Action = ["secretsmanager:DeleteSecret"]
-        Resource = [
-          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
-        ]
+        Sid      = "DenyProdSecretsDeletion"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:DeleteSecret"]
+        Resource = local.guardrail_secrets_deletion_resources
       },
       {
         # Web and worker containers share one log group; deleting it
         # wipes the audit trail for both.
-        Sid    = "DenyProdLogDeletion"
-        Effect = "Deny"
-        Action = ["logs:DeleteLogGroup"]
-        Resource = [
-          "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.prod_prefix}",
-        ]
+        Sid      = "DenyProdLogDeletion"
+        Effect   = "Deny"
+        Action   = ["logs:DeleteLogGroup"]
+        Resource = local.guardrail_log_deletion_resources
       },
       {
         # BUG-212: every role preview credentials create must carry the
@@ -342,6 +385,41 @@ resource "aws_iam_role_policy" "preview_guardrails" {
           "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${local.prod_prefix}-preview-boundary",
         ]
       },
+      {
+        # BUG-215: close by target — deny the execution APIs on exact
+        # prod ARNs while pr-* stays allowed. No describes: plan.yml
+        # refreshes prod state with preview credentials, so describing
+        # prod is legitimate traffic.
+        Sid      = "DenyProdTaskExecution"
+        Effect   = "Deny"
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService"]
+        Resource = local.guardrail_task_execution_resources
+      },
+      {
+        # RegisterTaskDefinition is likely resource-*-only (void half);
+        # the cluster-scoped RunTask deny above is the real choke.
+        Sid      = "DenyProdTaskDefinitionRegistration"
+        Effect   = "Deny"
+        Action   = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"]
+        Resource = local.guardrail_task_definition_resources
+      },
+      {
+        Sid      = "DenyProdPassRole"
+        Effect   = "Deny"
+        Action   = ["iam:PassRole"]
+        Resource = local.guardrail_app_role_resources
+      },
+      {
+        # Trust writes close the assume-it-directly bypass (re-trusting
+        # the prod task role would defeat every execution deny);
+        # DeleteRole guards the roles themselves. UpdateRole and
+        # tagging stay allowed (cosmetic — description, session
+        # duration within AWS bounds, tags).
+        Sid      = "DenyProdAppRoleMutation"
+        Effect   = "Deny"
+        Action   = ["iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:DeleteRole"]
+        Resource = local.guardrail_app_role_resources
+      },
     ]
   })
 }
@@ -351,8 +429,8 @@ resource "aws_iam_role_policy" "preview_guardrails" {
 # carries this boundary, so a backdoor role is born capped: its
 # effective permissions are its own policies intersected with this one.
 # Deny-list shape (default-allow) on purpose: a missing entry weakens
-# security instead of breaking prod tasks. Keep the data denies in sync
-# with preview_guardrails above.
+# security instead of breaking prod tasks. Twin pairs share their
+# resource lists via the locals above, so one-sided edits fail loudly.
 resource "aws_iam_policy" "preview_boundary" {
   count       = terraform.workspace == "default" ? 1 : 0
   name        = "${local.prod_prefix}-preview-boundary"
@@ -368,10 +446,13 @@ resource "aws_iam_policy" "preview_boundary" {
         Resource = "*"
       },
       {
-        Sid      = "BoundaryDenyIAM"
-        Effect   = "Deny"
-        Action   = ["iam:*"]
-        Resource = "*"
+        # BUG-214: capped roles must pass their task roles to ECS (the
+        # scheduler role passes at invocation time), so PassRole is
+        # carved out here and re-gated on service + target below.
+        Sid       = "BoundaryDenyIAM"
+        Effect    = "Deny"
+        NotAction = ["iam:PassRole"]
+        Resource  = "*"
       },
       {
         Sid      = "BoundaryDenyAuditBilling"
@@ -383,107 +464,147 @@ resource "aws_iam_policy" "preview_boundary" {
         Sid      = "BoundaryDenyComputeAbuse"
         Effect   = "Deny"
         Action   = ["ec2:RunInstances"]
-        Resource = "*"
+        Resource = local.guardrail_compute_abuse_resources
       },
       {
         Sid      = "BoundaryDenySnapshotSharing"
         Effect   = "Deny"
         Action   = ["rds:ModifyDBSnapshotAttribute"]
+        Resource = local.guardrail_snapshot_sharing_resources
+      },
+      {
+        Sid      = "BoundaryDenyStateDestruction"
+        Effect   = "Deny"
+        Action   = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
+        Resource = local.guardrail_state_destruction_resources
+      },
+      {
+        Sid      = "BoundaryDenyECSShutdown"
+        Effect   = "Deny"
+        Action   = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
+        Resource = local.guardrail_ecs_shutdown_resources
+      },
+      {
+        Sid      = "BoundaryDenyImageDeletion"
+        Effect   = "Deny"
+        Action   = ["ecr:BatchDeleteImage"]
+        Resource = local.guardrail_image_deletion_resources
+      },
+      {
+        Sid      = "BoundaryDenyLambdaRewrite"
+        Effect   = "Deny"
+        Action   = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
+        Resource = local.guardrail_lambda_rewrite_resources
+      },
+      {
+        Sid      = "BoundaryDenyQueueDestruction"
+        Effect   = "Deny"
+        Action   = ["sqs:PurgeQueue", "sqs:DeleteQueue"]
+        Resource = local.guardrail_queue_destruction_resources
+      },
+      {
+        Sid      = "BoundaryDenyDatabaseDestruction"
+        Effect   = "Deny"
+        Action   = ["rds:DeleteDBInstance", "rds:ModifyDBInstance"]
+        Resource = local.guardrail_database_destruction_resources
+      },
+      {
+        Sid      = "BoundaryDenyAuroraDestruction"
+        Effect   = "Deny"
+        Action   = ["rds:DeleteDBCluster", "rds:ModifyDBCluster"]
+        Resource = local.guardrail_aurora_destruction_resources
+      },
+      {
+        Sid      = "BoundaryDenyTableDeletion"
+        Effect   = "Deny"
+        Action   = ["dynamodb:DeleteTable"]
+        Resource = local.guardrail_table_deletion_resources
+      },
+      {
+        Sid      = "BoundaryDenySnapshotDeletion"
+        Effect   = "Deny"
+        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
+        Resource = local.guardrail_snapshot_deletion_resources
+      },
+      {
+        Sid      = "BoundaryDenySecretsDeletion"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:DeleteSecret"]
+        Resource = local.guardrail_secrets_deletion_resources
+      },
+      {
+        Sid      = "BoundaryDenyLogDeletion"
+        Effect   = "Deny"
+        Action   = ["logs:DeleteLogGroup"]
+        Resource = local.guardrail_log_deletion_resources
+      },
+      {
+        Sid      = "BoundaryDenyTaskExecution"
+        Effect   = "Deny"
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService"]
+        Resource = local.guardrail_task_execution_resources
+      },
+      {
+        Sid      = "BoundaryDenyTaskDefinitionRegistration"
+        Effect   = "Deny"
+        Action   = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"]
+        Resource = local.guardrail_task_definition_resources
+      },
+      {
+        Sid      = "BoundaryDenyPassRole"
+        Effect   = "Deny"
+        Action   = ["iam:PassRole"]
+        Resource = local.guardrail_app_role_resources
+      },
+      {
+        Sid      = "BoundaryDenyAppRoleMutation"
+        Effect   = "Deny"
+        Action   = ["iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:DeleteRole"]
+        Resource = local.guardrail_app_role_resources
+      },
+      {
+        # BUG-214: carved PassRole may only pass to the ECS tasks
+        # service (mirrors the scheduler policy's own condition).
+        Sid      = "BoundaryDenyPassRoleOffService"
+        Effect   = "Deny"
+        Action   = ["iam:PassRole"]
         Resource = "*"
+        Condition = {
+          StringNotEquals = {
+            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
       },
       {
-        Sid    = "BoundaryDenyStateDestruction"
+        # ... and only task roles: preview patterns plus the prod pair
+        # (shared local, so renames flow). Preview app names put the
+        # workspace between the project and the collision suffix
+        # (<project>-pr-<n>-<suffix>), so the preview patterns key off
+        # {{PROJECT_NAME}}, not prod_prefix. Prod roles stay
+        # scheduler-only via the statement below.
+        Sid    = "BoundaryDenyPassRoleOffTarget"
         Effect = "Deny"
-        Action = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
-        Resource = [
-          "arn:aws:s3:::{{STATE_BUCKET}}",
-          "arn:aws:s3:::{{STATE_BUCKET}}/*",
-        ]
+        Action = ["iam:PassRole"]
+        NotResource = concat([
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/{{PROJECT_NAME}}-pr-*-task-role",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/{{PROJECT_NAME}}-pr-*-execution-role",
+        ], local.guardrail_app_role_resources)
       },
       {
-        Sid    = "BoundaryDenyECSShutdown"
-        Effect = "Deny"
-        Action = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
-        Resource = [
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
-          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyImageDeletion"
-        Effect = "Deny"
-        Action = ["ecr:BatchDeleteImage"]
-        Resource = [
-          "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${local.prod_prefix}-repo",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyLambdaRewrite"
-        Effect = "Deny"
-        Action = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
-        Resource = [
-          "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${local.prod_prefix}-fn",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyQueueDestruction"
-        Effect = "Deny"
-        Action = ["sqs:PurgeQueue", "sqs:DeleteQueue"]
-        Resource = [
-          "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-queue",
-          "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-dlq",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyDatabaseDestruction"
-        Effect = "Deny"
-        Action = ["rds:DeleteDBInstance", "rds:ModifyDBInstance"]
-        Resource = [
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db",
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db-instance-1",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyAuroraDestruction"
-        Effect = "Deny"
-        Action = ["rds:DeleteDBCluster", "rds:ModifyDBCluster"]
-        Resource = [
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyTableDeletion"
-        Effect = "Deny"
-        Action = ["dynamodb:DeleteTable"]
-        Resource = [
-          "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenySnapshotDeletion"
-        Effect = "Deny"
-        Action = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
-        Resource = [
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
-          "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenySecretsDeletion"
-        Effect = "Deny"
-        Action = ["secretsmanager:DeleteSecret"]
-        Resource = [
-          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
-        ]
-      },
-      {
-        Sid    = "BoundaryDenyLogDeletion"
-        Effect = "Deny"
-        Action = ["logs:DeleteLogGroup"]
-        Resource = [
-          "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.prod_prefix}",
-        ]
+        # Prod task roles pass only by the prod scheduler role, which
+        # passes them at invocation time (its own policy allows only
+        # those two roles, so the boundary stays a backstop). Every
+        # other capped caller stays denied, and the scheduler itself
+        # cannot pass anything outside the four roles above.
+        Sid      = "BoundaryDenyProdPassRoleOffScheduler"
+        Effect   = "Deny"
+        Action   = ["iam:PassRole"]
+        Resource = local.guardrail_app_role_resources
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalArn" = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-cron-scheduler-role"
+          }
+        }
       },
     ]
   })

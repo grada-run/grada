@@ -591,6 +591,62 @@ describe('gc: manual snapshot retirement', () => {
         expect(result.totalCount).toBe(2 + result.untaggedImages.length + result.orphanedLogGroups.length + result.unattachedEips.length);
     });
 
+    it('proposes db-scoped pre-deploy snapshots past the age threshold (BUG-205)', async () => {
+        const rdsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeDBSnapshotsCommand) {
+                return {
+                    DBSnapshots: [
+                        { DBSnapshotIdentifier: `${PROJECT}-db-pre-deploy-0123456789abcdef0123456789abcdef01234567`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                        { DBSnapshotIdentifier: `${PROJECT}-db-pre-deploy-89abcdef0123456789abcdef0123456789abcdef`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: new Date(Date.now() - 2 * 86400000) },
+                    ],
+                };
+            }
+            if (cmd instanceof MockDescribeDBClusterSnapshotsCommand) {
+                return {
+                    DBClusterSnapshots: [
+                        { DBClusterSnapshotIdentifier: `${PROJECT}-db-cluster-pre-deploy-0123456789abcdef0123456789abcdef01234567`, Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                    ],
+                };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources(snapshotCtx(rdsSend));
+        const ids = result.oldManualSnapshots.map((s) => s.id).sort();
+        expect(ids).toEqual([
+            `${PROJECT}-db-cluster-pre-deploy-0123456789abcdef0123456789abcdef01234567`,
+            `${PROJECT}-db-pre-deploy-0123456789abcdef0123456789abcdef01234567`,
+        ]);
+    });
+
+    it('adopts legacy bare pre-deploy snapshots only with matching source db (BUG-205)', async () => {
+        const rdsSend = vi.fn(async (cmd) => {
+            if (cmd instanceof MockDescribeDBSnapshotsCommand) {
+                return {
+                    DBSnapshots: [
+                        { DBSnapshotIdentifier: 'pre-deploy-0123456789abcdef0123456789abcdef01234567', Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD, DBInstanceIdentifier: `${PROJECT}-db` },
+                        { DBSnapshotIdentifier: 'pre-deploy-89abcdef0123456789abcdef0123456789abcdef', Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD, DBInstanceIdentifier: 'other-db' },
+                        { DBSnapshotIdentifier: 'pre-deploy-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD },
+                    ],
+                };
+            }
+            if (cmd instanceof MockDescribeDBClusterSnapshotsCommand) {
+                return {
+                    DBClusterSnapshots: [
+                        { DBClusterSnapshotIdentifier: 'pre-deploy-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD, DBClusterIdentifier: `${PROJECT}-db-cluster` },
+                        { DBClusterSnapshotIdentifier: 'pre-deploy-cccccccccccccccccccccccccccccccccccccccc', Status: 'available', SnapshotType: 'manual', SnapshotCreateTime: OLD, DBClusterIdentifier: 'other-db-cluster' },
+                    ],
+                };
+            }
+            throw new Error('unexpected');
+        });
+        const result = await discoverOrphanedResources(snapshotCtx(rdsSend));
+        const ids = result.oldManualSnapshots.map((s) => s.id).sort();
+        expect(ids).toEqual([
+            'pre-deploy-0123456789abcdef0123456789abcdef01234567',
+            'pre-deploy-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        ]);
+    });
+
     it('honors --snapshot-max-age-days', async () => {
         expect(parseGcArgs(['gc', '--snapshot-max-age-days', '7'])).toMatchObject({ snapshotMaxAgeDays: '7' });
         const tenDaysAgo = new Date(Date.now() - 10 * 86400000);

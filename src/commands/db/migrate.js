@@ -16,7 +16,9 @@ import {
     resolveHeadless,
     resolveCwd,
     readTerraformComputeTarget,
+    readTerraformDbKind,
 } from '../../utils/resolvers.js';
+import { resolveDbIdentifier, resolveDbClusterIdentifier } from '../../utils/rds.js';
 import { detectMigrationCommand } from '../../utils/detector.js';
 import { resolveContainer } from '../../utils/ecs.js';
 import { runEphemeralEcsTask, buildRunnerCommand, parseRunnerTimeout, guardNpmStrippedRunner, reportRunnerOutcome } from '../../utils/ecs-runner.js';
@@ -144,15 +146,20 @@ function injectGateBlock(content, { steps, anchor }) {
 
 // Idempotently injects (or refreshes) the migration gate block into a
 // deploy.yml document. Returns the updated content, or null when neither
-// anchor step is present. Pure and unit-tested.
-export function injectMigrationGate(workflowContent, { cmd, cliVersion } = {}) {
+// anchor step is present. Pure and unit-tested. The snapshot id embeds
+// the database identifier (BUG-205): bare pre-deploy-<sha> ids match no
+// guardrail or gc name pattern, so they were never protected or retired.
+export function injectMigrationGate(workflowContent, { cmd, cliVersion, dbIdentifier } = {}) {
+    if (typeof dbIdentifier !== 'string' || dbIdentifier.trim() === '') {
+        throw new Error('injectMigrationGate requires dbIdentifier for the snapshot id');
+    }
     const taskDefRef = '${{ steps.register-task-def.outputs.task-arn }}';
     const runner = buildRunnerInvocation(cliVersion);
     return injectGateBlock(workflowContent, {
         steps: [
             {
                 stepName: 'Take pre-migration database snapshot',
-                runLine: `${runner} db backup --id "pre-deploy-\${{ github.sha }}" --headless`,
+                runLine: `${runner} db backup --id "${dbIdentifier.trim()}-pre-deploy-\${{ github.sha }}" --headless`,
             },
             {
                 stepName: 'Pre-Deploy Database Migration',
@@ -321,7 +328,14 @@ async function runDbMigrateMain(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
-        const updated = injectMigrationGate(workflowContent, { cmd: resolvedCmd, cliVersion: getCliVersion() });
+        // BUG-205: the gate always targets production (deploy.yml), so
+        // resolve the prod db id even with a preview workspace checked
+        // out locally. Aurora needs the cluster prefix: cluster
+        // snapshots named with the instance prefix would miss the
+        // cluster-snapshot guardrail pattern.
+        const setupDbResolver = readTerraformDbKind(cwd) === 'cluster' ? resolveDbClusterIdentifier : resolveDbIdentifier;
+        const setupDbIdentifier = setupDbResolver({ projectName, workspace: 'default' }, cwd);
+        const updated = injectMigrationGate(workflowContent, { cmd: resolvedCmd, cliVersion: getCliVersion(), dbIdentifier: setupDbIdentifier });
         if (updated === null) {
             return failCommand({
                 message: '\n✖ Could not find the task-definition registration or ECS deployment step in .github/workflows/deploy.yml to anchor the migration gate.\n',

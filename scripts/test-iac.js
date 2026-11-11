@@ -241,7 +241,7 @@ const projects = [
         steps() {
             return [
                 ['seed', () => seedAddonsProject(this.dir)],
-                ['scaffold', () => run('node', [CLI, 'init', '--headless', '--framework=node', '--needsDatabase', '--with', ADDONS, '--domain', 'example.com', '--zone-id', 'Z1234567890ABC', '--setup-ci-migrate'], { cwd: this.dir, env: baseEnv })],
+                ['scaffold', () => run('node', [CLI, 'init', '--headless', '--framework=node', '--needsDatabase', '--with', ADDONS, '--domain', 'example.com', '--zone-id', 'Z1234567890ABC', '--setup-ci-migrate=node ./dist/migrate.cjs'], { cwd: this.dir, env: baseEnv })],
                 ['domain add', () => run('node', [CLI, 'domain', 'add', 'example.com', '--zone-id', 'Z1234567890ABC'], { cwd: this.dir, env: baseEnv })],
                 ['assert files', () => assertAddonsFiles(this.dir)],
                 ['terraform', () => checkTerraform(path.join(this.dir, 'terraform'))],

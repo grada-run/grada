@@ -45,6 +45,21 @@ export function readTerraformComputeTarget(cwd = process.cwd()) {
     return detectComputeTargetFromMainTf(readFileSafe(path.join(base, 'terraform', 'main.tf')));
 }
 
+// Offline database-kind detection for `--setup-ci` (no AWS calls): the
+// generator copies exactly one database template, so the aurora file's
+// presence means cluster snapshots. Unknown/absent means instance — the
+// runtime backup resolves the live kind anyway; the id prefix only
+// name-scopes the snapshot for guardrails + gc.
+export function readTerraformDbKind(cwd = process.cwd()) {
+    const base = resolveCwd({}, cwd);
+    try {
+        if (fsSync.existsSync(path.join(base, 'terraform', 'database-aurora-postgresql.tf'))) return 'cluster';
+    } catch {
+        // Fall through to the instance default
+    }
+    return 'instance';
+}
+
 // Predicate form of the target check for commands that adapt (rather
 // than refuse) per target: `isComputeTarget(cwd, 'lambda')`.
 export function isComputeTarget(cwd = process.cwd(), ...targets) {

@@ -94,7 +94,7 @@ npx grada-run db migrate --cmd "node ./dist/migrate.cjs" --setup-ci
 
 The step is re-installed cleanly on every run, so re-running the command updates the wired migration command in place. On ECS trees with PR previews enabled, the same run also wires the preview gate into `preview.yml`, which migrates the preview database post-apply — Lambda previews skip the gate. The installed step pins the CLI to the installing version (`npx --yes @grada-run/grada@<version>`), so pipelines stay reproducible across releases.
 
-On `deploy.yml` the gate is two steps: a **snapshot step** runs first (`db backup --id pre-deploy-<commit-sha>`, waiting until the snapshot is ready), and the migration step only runs when the snapshot step succeeds — a failed snapshot halts the release before any schema change. The snapshot id is derived from the commit SHA, so re-running the same deploy reuses the existing snapshot instead of failing. Preview gates stay snapshot-free by design: preview databases are ephemeral, so only production deploys pay for a snapshot per push. Each deploy mints one manual snapshot; `grada gc` retires snapshots older than 30 days, inside the 100-manual-snapshot region limit.
+On `deploy.yml` the gate is two steps: a **snapshot step** runs first (`db backup --id <db>-pre-deploy-<commit-sha>`, waiting until the snapshot is ready), and the migration step only runs when the snapshot step succeeds — a failed snapshot halts the release before any schema change. The snapshot id embeds the database identifier and the commit SHA, so re-running the same deploy reuses the existing snapshot instead of failing. Preview gates stay snapshot-free by design: preview databases are ephemeral, so only production deploys pay for a snapshot per push. Each deploy mints one manual snapshot; `grada gc` retires snapshots older than 30 days, inside the 100-manual-snapshot region limit.
 
 ## db backup
 
@@ -112,7 +112,7 @@ npx grada-run db backup --no-wait          # return immediately
 | `--timeout <seconds>` | Give up waiting after this long (default `900`). Creation continues in the background. |
 | `--no-wait` | Return immediately without waiting for the snapshot to become available. |
 
-Snapshots that reach a terminal state (`failed`, `deleted`) fail fast with `SNAPSHOT_FAILED` naming the actual state — only genuine timeouts report "still creating". Passing an `--id` that already exists is success, not an error: the command waits on the existing snapshot and reports its state, so retries and CI re-runs are safe.
+Snapshots that reach a terminal state (`failed`, `deleted`) fail fast with `SNAPSHOT_FAILED` naming the actual state — only genuine timeouts report "still creating". Passing an `--id` that already exists is success, not an error: the command waits on the existing snapshot and reports its state, so retries and CI re-runs are safe. Reuse verifies ownership first — an id naming another database's snapshot fails closed with `SNAPSHOT_MISMATCH` instead of adopting a foreign checkpoint.
 | `--project-name <name>` | Explicit project name override. |
 | `--workspace <name>` | Target a PR-preview environment. |
 | `--db-identifier <id>` | Explicit RDS identifier override (instance or Aurora cluster). |

@@ -397,6 +397,9 @@ describe('Headless contract (automation-safe)', () => {
             const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
             expect(deployYml).toContain('# grada:db-migrate-start');
             expect(deployYml).toContain('alembic upgrade head');
+            // BUG-205: the gate snapshot id is db-scoped, never bare.
+            expect(deployYml).toMatch(/db backup --id "[a-z0-9-]+-db-pre-deploy-\$\{\{ github\.sha \}\}" --headless/);
+            expect(deployYml).not.toContain('--id "pre-deploy-');
             expect(trackEvent).toHaveBeenCalledWith(
                 'project_provisioned',
                 expect.objectContaining({ selected_addons: ['email:ses'], migration_gate_enabled: true })
