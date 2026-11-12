@@ -43,17 +43,21 @@ locals {
   preview_boundary_arn = terraform.workspace == "default" ? aws_iam_policy.preview_boundary[0].arn : data.aws_iam_policy.preview_boundary[0].arn
   # Shared twin resource lists: every Deny*/BoundaryDeny* pair consumes
   # one list, so a one-sided resource edit is impossible. New pairs add
-  # their list here and reference it from both sides.
+  # their list here and reference it from both sides. Wildcards below
+  # anchor on prod_prefix (never on the bare project): preview names
+  # carry -pr-<n>- where prod carries the hex suffix, so a
+  # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
+  # the boundary under the 6144-char managed-policy quota that broke
+  # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
+  # several exact ARNs when adding entries.
   guardrail_compute_abuse_resources    = ["*"]
   guardrail_snapshot_sharing_resources = ["*"]
   guardrail_state_destruction_resources = [
-    "arn:aws:s3:::{{STATE_BUCKET}}",
-    "arn:aws:s3:::{{STATE_BUCKET}}/*",
+    "arn:aws:s3:::{{STATE_BUCKET}}*",
   ]
   guardrail_ecs_shutdown_resources = [
     "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/*",
   ]
   guardrail_image_deletion_resources = [
     "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${local.prod_prefix}-repo",
@@ -62,12 +66,10 @@ locals {
     "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${local.prod_prefix}-fn",
   ]
   guardrail_queue_destruction_resources = [
-    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-queue",
-    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-dlq",
+    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-*",
   ]
   guardrail_database_destruction_resources = [
-    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db",
-    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db-instance-1",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db*",
   ]
   guardrail_aurora_destruction_resources = [
     "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
@@ -92,24 +94,21 @@ locals {
   ]
   guardrail_task_execution_resources = [
     "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-service",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/*",
     "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task/${local.prod_prefix}-cluster/*",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-task:*",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-worker-task:*",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-*:*",
   ]
   guardrail_task_definition_resources = [
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-task:*",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-worker-task:*",
+    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${local.prod_prefix}-*:*",
   ]
   # String-built (not HCL refs): static trees define no IAM roles, so
   # refs would dangle and fail validate. ECS and Lambda use identical
   # physical role names, so one pattern covers both and matches
-  # nothing on static.
+  # nothing on static. The wildcard also covers the CI roles (same
+  # prefix, -github-actions-*-role): capped callers never legitimately
+  # pass or mutate those, so the overlap only tightens the boundary.
   guardrail_app_role_resources = [
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-execution-role",
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-cron-scheduler-role",
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-*-role",
   ]
 }
 
@@ -231,8 +230,10 @@ resource "aws_iam_role_policy" "deploy_boundary" {
 
 # Preview guardrails: PR-triggered runs (preview/teardown/plan) keep full
 # build power but cannot destroy production data, mint compute, or open
-# IAM backdoors. Every Resource below names an exact production ARN —
-# never a wildcard — so pr-suffixed preview resources keep working.
+# IAM backdoors. Every Resource below names production only — exact ARNs
+# or prod_prefix-anchored wildcards (preview names carry -pr-<n>- where
+# prod carries the hex suffix, so anchored patterns never match preview
+# resources and pr-suffixed workflows keep working).
 resource "aws_iam_role_policy" "preview_guardrails" {
   count = terraform.workspace == "default" ? 1 : 0
   name  = "${local.prod_prefix}-preview-guardrails"
@@ -386,8 +387,8 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         ]
       },
       {
-        # BUG-215: close by target — deny the execution APIs on exact
-        # prod ARNs while pr-* stays allowed. No describes: plan.yml
+        # BUG-215: close by target — deny the execution APIs on prod
+        # ARNs while pr-* stays allowed. No describes: plan.yml
         # refreshes prod state with preview credentials, so describing
         # prod is legitimate traffic.
         Sid      = "DenyProdTaskExecution"
@@ -449,10 +450,16 @@ resource "aws_iam_policy" "preview_boundary" {
         # BUG-214: capped roles must pass their task roles to ECS (the
         # scheduler role passes at invocation time), so PassRole is
         # carved out here and re-gated on service + target below.
-        Sid       = "BoundaryDenyIAM"
-        Effect    = "Deny"
-        NotAction = ["iam:PassRole"]
-        Resource  = "*"
+        # Explicit Action list on purpose: a Deny with NotAction would
+        # veto every AWS service, not just IAM (tier2 E2E proved it on
+        # secretsmanager:GetSecretValue, SES, and Bedrock). IAM reads
+        # and cosmetic writes (UpdateRole, tagging) stay allowed: they
+        # cannot escalate a backdoor role, and a missing entry must
+        # weaken security instead of breaking prod tasks.
+        Sid      = "BoundaryDenyIAM"
+        Effect   = "Deny"
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary", "iam:CreatePolicy", "iam:DeletePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:CreateUser", "iam:DeleteUser", "iam:CreateAccessKey", "iam:DeleteAccessKey"]
+        Resource = "*"
       },
       {
         Sid      = "BoundaryDenyAuditBilling"

@@ -210,7 +210,9 @@ describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
 
     it('covers the worker service and drops the invalid cluster-less ARN', () => {
         const tf = readRepo('templates/terraform/oidc.tf');
-        expect(tf).toContain('service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service');
+        // Cluster-scoped wildcard covers the web and worker services alike
+        // (exact per-service ARNs were folded into it for the 6144 quota).
+        expect(tf).toContain('service/${local.prod_prefix}-cluster/*');
         expect(tf).not.toContain('service/${local.prod_prefix}-service"');
     });
 
@@ -246,9 +248,13 @@ describe('Preview permissions boundary (BUG-212)', () => {
         expect(guardrails).toContain('iam:PutRolePermissionsBoundary');
         expect(guardrails).toContain('iam:DeleteRolePermissionsBoundary');
         expect(guardrails).toContain('DenyBoundaryMutation');
-        // BUG-214 carved PassRole out of the IAM veto; everything else
-        // stays denied (see the carve-out assertions below).
-        expect(sidChunk(boundary, 'BoundaryDenyIAM')).toContain('NotAction');
+        // BUG-214 carved PassRole out of the IAM veto; the veto itself is
+        // an explicit IAM-write list — never NotAction, which would deny
+        // every service (see the carve-out assertions below).
+        const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
+        expect(chunk).not.toContain('NotAction');
+        expect(chunk).toContain('iam:PutRolePermissionsBoundary');
+        expect(chunk).toContain('iam:DeleteRolePermissionsBoundary');
     });
 
     it('caps backdoor roles at the task data-plane (deny-list mirror)', () => {
@@ -323,9 +329,14 @@ describe('Permissions boundary PassRole carve-out (BUG-214)', () => {
     it('carves PassRole out of the IAM deny instead of blocking the scheduler', () => {
         const { boundary } = twinSlices();
         const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
-        expect(chunk).toContain('NotAction');
-        expect(chunk).toContain('"iam:PassRole"');
-        expect(chunk).not.toContain('Action   = ["iam:*"]');
+        // Explicit IAM-write list with PassRole absent (NotAction would
+        // veto non-IAM services too — tier2 E2E proved it).
+        expect(chunk).not.toContain('NotAction');
+        expect(chunk).not.toContain('iam:PassRole');
+        expect(chunk).not.toContain('"iam:*"');
+        for (const action of ['iam:CreateRole', 'iam:DeleteRole', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy']) {
+            expect(chunk).toContain(action);
+        }
     });
 
     it('gates carved PassRole on the ECS tasks service', () => {
@@ -361,7 +372,7 @@ describe('Permissions boundary PassRole carve-out (BUG-214)', () => {
 });
 
 describe('Preview task-role confinement (BUG-215)', () => {
-    it('denies prod task execution on exact ARNs (guardrail side)', () => {
+    it('denies prod task execution on anchored ARNs (guardrail side)', () => {
         const { tf, guardrails } = twinSlices();
         const chunk = sidChunk(guardrails, 'DenyProdTaskExecution');
         for (const action of ['ecs:RunTask', 'ecs:StopTask', 'ecs:ExecuteCommand', 'ecs:CreateService']) {
@@ -371,11 +382,9 @@ describe('Preview task-role confinement (BUG-215)', () => {
         const local = tf.slice(tf.indexOf('guardrail_task_execution_resources'));
         for (const arn of [
             'cluster/${local.prod_prefix}-cluster',
-            'service/${local.prod_prefix}-cluster/${local.prod_prefix}-service',
-            'service/${local.prod_prefix}-cluster/${local.prod_prefix}-worker-service',
+            'service/${local.prod_prefix}-cluster/*',
             'task/${local.prod_prefix}-cluster/*',
-            'task-definition/${local.prod_prefix}-task:*',
-            'task-definition/${local.prod_prefix}-worker-task:*',
+            'task-definition/${local.prod_prefix}-*:*',
         ]) {
             expect(local).toContain(arn);
         }
@@ -391,8 +400,7 @@ describe('Preview task-role confinement (BUG-215)', () => {
         expect(registration).toContain('ecs:DeregisterTaskDefinition');
         expect(registration).toContain('local.guardrail_task_definition_resources');
         const taskDefLocal = tf.slice(tf.indexOf('guardrail_task_definition_resources'));
-        expect(taskDefLocal).toContain('task-definition/${local.prod_prefix}-task:*');
-        expect(taskDefLocal).toContain('task-definition/${local.prod_prefix}-worker-task:*');
+        expect(taskDefLocal).toContain('task-definition/${local.prod_prefix}-*:*');
         const passRole = sidChunk(guardrails, 'DenyProdPassRole');
         expect(passRole).toContain('"iam:PassRole"');
         expect(passRole).toContain('local.guardrail_app_role_resources');
@@ -406,9 +414,7 @@ describe('Preview task-role confinement (BUG-215)', () => {
         }
         expect(chunk).toContain('local.guardrail_app_role_resources');
         const local = tf.slice(tf.indexOf('guardrail_app_role_resources'));
-        expect(local).toContain('role/${local.prod_prefix}-task-role');
-        expect(local).toContain('role/${local.prod_prefix}-execution-role');
-        expect(local).toContain('role/${local.prod_prefix}-cron-scheduler-role');
+        expect(local).toContain('role/${local.prod_prefix}-*-role');
         // Static trees define no IAM roles: refs would dangle and fail
         // validate, so the ARNs must be string-built.
         expect(tf).not.toContain('aws_iam_role.task_role');
@@ -498,5 +504,109 @@ describe('Snapshot guardrails cover pre-deploy names (BUG-205)', () => {
         expect(local).toContain('cluster-snapshot:${local.prod_prefix}-db-cluster-*');
         expect(local).toContain('snapshot:pre-deploy-*');
         expect(local).toContain('cluster-snapshot:pre-deploy-*');
+    });
+});
+
+// Renders the preview_boundary managed policy for a worst-case prod prefix
+// and returns its AWS-counted size (compact JSON, no whitespace): the
+// Statement array only, locals inlined, interpolations substituted — what
+// Terraform's jsonencode ships. Guards the 6144-char managed-policy quota
+// that broke tier1 E2E at a 24-char prefix.
+function boundaryPolicySize(prodPrefix) {
+    const tf = readRepo('templates/terraform/oidc.tf');
+    const project = prodPrefix.replace(/-[a-f0-9]{6}$/, '');
+    const region = 'us-east-2';
+    const account = '710596603276';
+    const bucket = `${prodPrefix}-tfstate-${account}`.slice(0, 63);
+    const stripComments = (src) => src.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+    const localList = (name) => {
+        const m = tf.match(new RegExp(`${name}\\s*=\\s*\\[`));
+        if (!m) throw new Error(`local ${name} not found`);
+        const open = tf.indexOf(m[0]) + m[0].length - 1;
+        let depth = 0;
+        let i = open;
+        for (; i < tf.length; i++) {
+            if (tf[i] === '[') depth++;
+            else if (tf[i] === ']') { depth--; if (depth === 0) break; }
+        }
+        return stripComments(tf.slice(open, i + 1));
+    };
+    const { boundary } = twinSlices();
+    const arrStart = boundary.indexOf('Statement = [') + 'Statement = ['.length;
+    const arrEnd = boundary.indexOf('\n    ]\n  })');
+    let slice = stripComments(boundary.slice(arrStart, arrEnd));
+    slice = slice.replace(/concat\(\[([\s\S]*?)\], (local\.\w+)\)/g, (_, items, ref) => {
+        const list = localList(ref.replace('local.', ''));
+        return `[${items.replace(/,\s*$/, '')}, ${list.slice(1, -1)}]`;
+    });
+    const subst = (s) => s
+        .split('${data.aws_region.current.name}').join(region)
+        .split('${data.aws_caller_identity.current.account_id}').join(account)
+        .split('${local.prod_prefix}').join(prodPrefix)
+        .split('{{STATE_BUCKET}}').join(bucket)
+        .split('{{PROJECT_NAME}}').join(project);
+    slice = subst(slice).replace(/local\.(\w+)/g, (_, name) => localList(name));
+    slice = subst(slice);
+    // HCL -> JSON: quote keys, comma-separate newline fields/items.
+    let json = slice
+        .replace(/([A-Za-z_][A-Za-z0-9_]*)\s*=/g, '"$1":')
+        .replace(/("[A-Za-z0-9_:.@/-]+")\s*=/g, '$1:');
+    const lines = json.split('\n');
+    for (let i = 0; i < lines.length - 1; i++) {
+        if (!/["\]}]\s*$/.test(lines[i]) || /,\s*$/.test(lines[i])) continue;
+        let j = i + 1;
+        while (j < lines.length && lines[j].trim() === '') j++;
+        if (j < lines.length && !/^\s*[\]}]/.test(lines[j])) lines[i] = `${lines[i]},`;
+    }
+    json = `[${lines.join('\n')}]`.replace(/,(\s*[\]}])/g, '$1');
+    return JSON.stringify({ Version: '2012-10-17', Statement: JSON.parse(json) }).length;
+}
+
+describe('Boundary IAM deny is scoped to IAM writes (tier2 E2E)', () => {
+    it('uses Action, never NotAction: a Deny with NotAction vetoes every service', () => {
+        const { boundary } = twinSlices();
+        const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
+        expect(chunk).not.toContain('NotAction');
+        expect(chunk).toMatch(/Action\s*=\s*\[/);
+    });
+
+    it('denies role/policy/user backdoors while carving out PassRole', () => {
+        const { boundary } = twinSlices();
+        const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
+        for (const action of ['iam:CreateRole', 'iam:DeleteRole', 'iam:UpdateAssumeRolePolicy', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:PutRolePermissionsBoundary', 'iam:DeleteRolePermissionsBoundary', 'iam:CreatePolicy', 'iam:DeletePolicy', 'iam:CreatePolicyVersion', 'iam:DeletePolicyVersion', 'iam:CreateUser', 'iam:DeleteUser', 'iam:CreateAccessKey', 'iam:DeleteAccessKey']) {
+            expect(chunk).toContain(action);
+        }
+        // PassRole stays carved out (re-gated on service + target below).
+        expect(chunk).not.toContain('iam:PassRole');
+    });
+});
+
+describe('Boundary policy fits the 6144-char managed-policy quota (tier1 E2E)', () => {
+    it('renders under quota for a 24-char prod prefix (tier1-live shape)', () => {
+        expect(boundaryPolicySize('tier1-live-p64qpk-c5228d')).toBeLessThan(6144);
+    });
+
+    it('renders under quota for a 32-char prod prefix', () => {
+        expect(boundaryPolicySize('abcdefghijklmnopqrstuvwxyz123456')).toBeLessThan(6144);
+    });
+
+    it('folds exact ARNs into prod_prefix-anchored wildcards', () => {
+        const tf = readRepo('templates/terraform/oidc.tf');
+        const block = (name) => {
+            const start = tf.indexOf(name);
+            return tf.slice(start, tf.indexOf(']', start));
+        };
+        // Single anchored patterns (exact per-resource ARNs were folded
+        // into these for the quota; preview-safe: preview names carry
+        // -pr-<n>- where prod carries the hex suffix).
+        expect(block('guardrail_state_destruction_resources')).toContain('arn:aws:s3:::{{STATE_BUCKET}}*');
+        expect(block('guardrail_queue_destruction_resources')).toContain('${local.prod_prefix}-*');
+        expect(block('guardrail_database_destruction_resources')).toContain('db:${local.prod_prefix}-db*');
+        expect(block('guardrail_app_role_resources')).toContain('role/${local.prod_prefix}-*-role');
+        expect(block('guardrail_task_definition_resources')).toContain('task-definition/${local.prod_prefix}-*:*');
+        // No unfolded exact siblings left behind.
+        for (const gone of ['-worker-service"', '-worker-task:*"', '/${local.prod_prefix}-service"', '${local.prod_prefix}-queue"', '${local.prod_prefix}-dlq"', '${local.prod_prefix}-db"', '{{STATE_BUCKET}}/*"']) {
+            expect(tf).not.toContain(gone);
+        }
     });
 });

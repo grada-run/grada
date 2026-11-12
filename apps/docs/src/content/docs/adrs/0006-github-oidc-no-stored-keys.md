@@ -3,8 +3,12 @@ title: "GitHub OIDC Authentication, No Stored AWS Keys"
 description: "Authenticate CI/CD with short-lived OIDC tokens instead of long-lived AWS keys."
 ---
 
-* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust; amended v0.49.2: permissions boundary on created roles; amended v0.49.3: preview task-role confinement + boundary PassRole carve-out — see below)
+* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust; amended v0.49.2: permissions boundary on created roles; amended v0.49.3: preview task-role confinement + boundary PassRole carve-out; amended v0.49.4: scoped IAM veto + anchored-wildcard resources — see below)
 * **Date:** 2026-09-24 (Retroactive)
+
+## Amendment (v0.49.4): Scoped IAM Veto + Anchored-Wildcard Resources
+
+Two boundary corrections. First, the IAM veto was expressed as a deny-everything-except-`PassRole` clause, which vetoed non-IAM services too — execution roles could not read Secrets Manager and task roles failed SES/Bedrock simulation. The veto is now an explicit list of role, policy, trust, boundary, and user-lifecycle writes (`PassRole` still carved out and re-gated on service + target); IAM reads and cosmetic writes stay allowed per the deny-list philosophy. Second, the shared resource lists outgrew the managed-policy size quota on long project names, breaking `apply`. Multi-entry lists are folded into production-prefix-anchored wildcards — preview names carry `-pr-<n>-` where production carries the hex suffix, so anchored patterns match production only — with a template test pinning the rendered boundary under quota. Existing trees pick both up by re-running setup.
 
 ## Amendment (v0.49.3): Preview Task-Role Confinement + Boundary PassRole Carve-Out
 
