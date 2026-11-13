@@ -3,28 +3,23 @@ title: "GitHub OIDC Authentication, No Stored AWS Keys"
 description: "Authenticate CI/CD with short-lived OIDC tokens instead of long-lived AWS keys."
 ---
 
-* **Status:** Accepted (amended v0.48.0: single admin role split into deploy + preview least-privilege roles; amended v0.49.1: self-protecting guardrails + dual-branch deploy trust; amended v0.49.2: permissions boundary on created roles; amended v0.49.3: preview task-role confinement + boundary PassRole carve-out; amended v0.49.4: scoped IAM veto + anchored-wildcard resources — see below)
+* **Status:** Accepted (current state as of v0.49.5 below; per-version history at the end)
 * **Date:** 2026-09-24 (Retroactive)
 
-## Amendment (v0.49.4): Scoped IAM Veto + Anchored-Wildcard Resources
+## Current State (as of v0.49.5)
 
-Two boundary corrections. First, the IAM veto was expressed as a deny-everything-except-`PassRole` clause, which vetoed non-IAM services too — execution roles could not read Secrets Manager and task roles failed SES/Bedrock simulation. The veto is now an explicit list of role, policy, trust, boundary, and user-lifecycle writes (`PassRole` still carved out and re-gated on service + target); IAM reads and cosmetic writes stay allowed per the deny-list philosophy. Second, the shared resource lists outgrew the managed-policy size quota on long project names, breaking `apply`. Multi-entry lists are folded into production-prefix-anchored wildcards — preview names carry `-pr-<n>-` where production carries the hex suffix, so anchored patterns match production only — with a template test pinning the rendered boundary under quota. Existing trees pick both up by re-running setup.
+CI authenticates via GitHub OIDC with no stored keys. Two least-privilege roles replace the original single admin role: a **deploy role** (mainline deploys + drift checks; trust bound to the deploy branch and the repo default branch, repo-scoped at scaffold) and a **preview role** (PR-triggered preview/teardown/plan workflows; trust bound to pull request events). Both start from `PowerUserAccess` + `IAMFullAccess` — no `AdministratorAccess` anywhere — with explicit deny guardrails on top. The deploy role cannot touch the audit/billing planes or delete the state bucket. The preview role cannot destroy production data (state, databases, snapshots, queues, tables, caches, images, services, secrets, log groups), mint EC2 compute, open IAM backdoors (no user or access-key creation), mutate the CI roles themselves (role/policy/trust changes on either CI role are denied, so PR-run Terraform cannot remove its own guardrails), or reach production compute (no task execution, task-definition registration, exec shells, service creation, `PassRole` on the app roles, or policy/trust/deletion writes on the task, execution, and scheduler roles). Guardrail resources name production only — exact ARNs or production-prefix-anchored wildcards (preview names carry `-pr-<n>-` where production carries the hex suffix, so anchored patterns never match preview resources); app-role ARNs are string-built so static trees validate, and describes stay allowed so `plan` keeps refreshing.
 
-## Amendment (v0.49.3): Preview Task-Role Confinement + Boundary PassRole Carve-Out
+Every role preview credentials create must carry the **permissions boundary** (`CreateRole` without it is denied; the boundary cannot be swapped, removed, or neutered; every template-managed role carries it, and preview workspaces read the default workspace's copy). The boundary is a deny-list mirror of the guardrails (default-allow, so a missing entry weakens security instead of breaking prod tasks). Its IAM veto is an explicit list of role, policy, trust, boundary, and user-lifecycle writes — reads and cosmetic writes stay allowed — with `PassRole` carved out and re-gated by trio: passable only to the ECS tasks service, only for task roles, and production task roles passable only by the production scheduler role (no flat PassRole twin: an unconditional one vetoed the scheduler's own passing). Both task-execution twins exempt the scheduler principal by condition, so EventBridge triggers keep firing. Twin pairs share one resource list each, with a parity test failing the build on one-sided edits. Existing trees pick up changes by re-running setup, which regenerates `terraform/oidc.tf`.
 
-Preview credentials kept `RunTask`, `RegisterTaskDefinition`, `ExecuteCommand`, and `PassRole` with no production scoping, and the boundary caps created roles, not the preview role's own calls — so PR-run Terraform could execute production task roles or attach admin policies to them. The guardrails now deny task execution, task-definition registration, `PassRole`, and role-policy, trust-policy, and deletion writes on the exact production ARNs — task, execution, and scheduler roles (string-built, so static trees validate; `pr-*` untouched, describes deliberately allowed so `plan` keeps refreshing) — mirrored into the boundary. Twin pairs now share one resource list each, with a parity test failing the build on one-sided edits. Companion fix: the boundary's IAM veto also blocked the scheduler roles from passing task roles at invocation time, silently breaking cron in every workspace — `PassRole` is carved out and re-gated: preview task roles passable to the ECS tasks service, production task roles passable only by the production scheduler role. Existing trees pick both up by re-running setup.
+## History
 
-## Amendment (v0.49.2): Permissions Boundary on Created Roles
-
-The ARN-scoped role-mutation deny stopped the preview role from touching the CI roles — but it could still mint a *new* admin role (attacker trust, admin policy) that the deny-list never names. The fix is a permissions boundary: `CreateRole` without it is denied, the boundary cannot be swapped, removed, or neutered, and every template-managed role carries it (preview workspaces read the default workspace's copy). The boundary is a deny-list mirror of the guardrails (default-allow) so a missing entry weakens security instead of breaking prod tasks; name-scoping was rejected because attackers mint matching names and `CreateRole` takes no resource constraint. Existing trees pick it up by re-running setup.
-
-## Amendment (v0.49.1): Self-Protecting Guardrails + Dual-Branch Trust
-
-Two hardening fixes. First, the preview role's `IAMFullAccess` let PR-run Terraform delete its own guardrails (or the deploy role, or widen trust) in one call — the preview guardrails now deny role/policy/trust mutation on both CI role ARNs, and the coverage gaps are closed (worker service, RDS snapshot deletion, prod secrets and log groups). The deploy role keeps full IAM power: it runs on the trusted branch and needs it for the re-init trust migration. Second, deploy trust now binds the deploy branch *and* the repo default branch (auto-detected from `origin/HEAD` at scaffold), because scheduled drift runs on the default branch and was denied whenever the two differed. Existing trees pick both up by re-running setup.
-
-## Amendment (v0.48.0): Least-Privilege Role Split
-
-The original decision created one `<project>-github-actions-role` with `AdministratorAccess`. That role is now split: a deploy role (mainline deploys + drift checks, branch-bound trust) and a preview role (PR-triggered preview/teardown/plan workflows, pull-request-bound trust), both on `PowerUserAccess` + `IAMFullAccess` with explicit deny guardrails (audit/billing planes and state-bucket deletion for deploy; production data destruction, EC2 compute, and IAM backdoors for preview). Existing trees migrate by re-running setup, which regenerates `terraform/oidc.tf` and the workflow role ARNs; the old admin role is destroyed on the next apply. The zero-secret federation mechanism itself is unchanged.
+* v0.48.0: split the single admin role into deploy + preview least-privilege roles.
+* v0.49.1: self-protecting guardrails (CI-role mutation deny, coverage gaps) + dual-branch deploy trust.
+* v0.49.2: permissions boundary capping every preview-created role.
+* v0.49.3: preview task-role confinement + boundary PassRole carve-out trio.
+* v0.49.4: explicit IAM-write veto (replacing the over-broad clause) + anchored-wildcard resources for the policy size quota.
+* v0.49.5: scheduler survives the boundary (flat PassRole twin removed, RunTask twins exempt the scheduler) + aurora setup-ci gate ids.
 
 ## Context and Problem Statement
 
@@ -46,7 +41,7 @@ We needed an authentication mechanism with no long-lived credential to store, ro
 
 ## Decision Outcome
 
-**Chosen Option:** GitHub OIDC federation by default. Generation creates the provider (unless one exists) and a `<project>-github-actions-role`; the workflow assumes it every run.
+**Chosen Option:** GitHub OIDC federation by default. Generation creates the provider (unless one exists) and the deploy + preview roles (see Current State); each workflow assumes its role every run.
 
 ### Positive Consequences
 * No AWS keys exist anywhere in CI: nothing to rotate, nothing durable to leak.

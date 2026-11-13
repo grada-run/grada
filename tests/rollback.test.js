@@ -320,7 +320,7 @@ describe('Command: rollback (mocked ECS)', () => {
         }
     });
 
-    // BUG-127: an explicit NEWER revision silently roll-forwards —
+    // An explicit NEWER revision silently roll-forwards —
     // rollback must only move to older revisions.
     it('refuses an explicit revision newer than deployed', async () => {
         let describeCount = 0;
@@ -342,7 +342,7 @@ describe('Command: rollback (mocked ECS)', () => {
         expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
-    // BUG-153: Case A must pair web+worker on the same image, not
+    // Case A must pair web+worker on the same image, not
     // newest-previous regardless of what web requested.
     it('pairs the worker target image with the requested web revision', async () => {
         const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollback-pair-'));

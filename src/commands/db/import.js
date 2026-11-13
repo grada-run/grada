@@ -159,7 +159,7 @@ function targetEnv(targetScheme, password) {
 }
 
 // Source-side dump env: the SOURCE is arbitrary user infra (often no
-// TLS), so prefer TLS instead of requiring it (BUG-148). MySQL sources
+// TLS), so prefer TLS instead of requiring it. MySQL sources
 // were never forced; the target side keeps `require`.
 function sourceEnv(scheme, password) {
     if (scheme === 'mysql') {
@@ -172,7 +172,7 @@ function waitForExit(child) {
     return new Promise((resolve) => {
         child.once('error', (error) => resolve({ code: 1, error }));
         // Node reports signal death as code null — resolve it as failure
-        // (with the signal), never `?? 0` success (BUG-149).
+        // (with the signal), never `?? 0` success.
         child.once('close', (code, signal) => resolve(signal ? { code: 1, signal } : { code: code ?? 0 }));
     });
 }

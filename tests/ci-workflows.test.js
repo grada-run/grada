@@ -35,7 +35,7 @@ describe('scaffoldPlanWorkflow', () => {
     });
 });
 
-describe('comment pagination (BUG-206)', () => {
+describe('comment pagination', () => {
     it('every listComments call in plan/preview requests a full page', () => {
         // The default first page (30) misses the marker on busy PRs, so
         // each run posts a NEW comment and stale bodies mislead reviewers.

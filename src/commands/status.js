@@ -453,7 +453,7 @@ async function runStatusMain(input = {}) {
         return runStaticStatus({ ...options, cwd, region, projectName });
     }
     const resourceSuffix = readResourceSuffix(cwd);
-    // Workspace-namespaced resources (BUG-90): --workspace (or the local
+    // Workspace-namespaced resources: --workspace (or the local
     // .terraform/environment) targets a preview stack like rollback and db
     // do. Explicit flags/env keep winning; telemetry keeps the raw name.
     const namespacedProject = resolveNamespacedProject(projectName, options, cwd);
@@ -502,9 +502,9 @@ async function runStatusMain(input = {}) {
             return;
         }
 
-        // Namespaced stem (BUG-151): the raw project prefix merged prod
+        // Namespaced stem: the raw project prefix merged prod
         // + preview alarms into one verdict and could auto-diagnose the
-        // wrong cluster. Paired with workspace-aware alarm names (BUG-132).
+        // wrong cluster. Paired with workspace-aware alarm names.
         const alarmsResp = await cloudWatchClient.send(new DescribeAlarmsCommand({ AlarmNamePrefix: `${namespacedProject}${resourceSuffix}`, MaxRecords: 100 }));
         const rawAlarms = [...(alarmsResp.MetricAlarms || []), ...(alarmsResp.CompositeAlarms || [])];
 

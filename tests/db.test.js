@@ -476,7 +476,7 @@ describe('Command: db connect (mocked AWS + spawn)', () => {
         expect(mockTrackEvent).not.toHaveBeenCalledWith('db_connect_run', expect.objectContaining({ success: true }));
     });
 
-    // BUG-149: signal death (code null) slipped through `?? 0` as
+    // Signal death (code null) slipped through `?? 0` as
     // success — it must fail naming the signal.
     it('reports tunnel failure when a signal kills the session', async () => {
         const spawnImpl = vi.fn(() => {
@@ -1494,7 +1494,7 @@ describe('db migrate: --setup-ci and gate injection', () => {
         expect(updated.match(/actions\/setup-node/g)).toHaveLength(1);
     });
 
-    // BUG-191: the gate runs migrations as an ephemeral ECS task —
+    // The gate runs migrations as an ephemeral ECS task —
     // on lambda/static there is no ECS to run it on. Refuse (init only
     // auto-skips; this command is explicit).
     it.each(['lambda', 'static'])('refuses --setup-ci on %s targets', async (target) => {
@@ -1598,7 +1598,7 @@ describe('db migrate: --setup-ci and gate injection', () => {
         expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true, workflowFile }));
     });
 
-    it('--setup-ci scopes the gate snapshot id to the database (BUG-205)', async () => {
+    it('--setup-ci scopes the gate snapshot id to the database', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
         const workflowFile = writeWorkflow(dir);
         const result = await runDbMigrate(migrateOptions({
@@ -1608,13 +1608,16 @@ describe('db migrate: --setup-ci and gate injection', () => {
         }));
         expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true }));
         expect(fs.readFileSync(workflowFile, 'utf8')).toContain('db backup --id "myapp-db-pre-deploy-${{ github.sha }}" --headless');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_migrate_run', expect.objectContaining({ success: true, ci_setup: true, db_kind: 'instance' }));
     });
 
-    it('--setup-ci uses the cluster prefix on aurora trees (BUG-205)', async () => {
+    it('--setup-ci uses the cluster prefix on aurora trees', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-ci-'));
         const workflowFile = writeWorkflow(dir);
         fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
-        fs.writeFileSync(path.join(dir, 'terraform', 'database-aurora-postgresql.tf'), '# aurora');
+        // Realistic aurora tree: the engine always renders to database.tf
+        // (no tree ever carries database-aurora-postgresql.tf).
+        fs.writeFileSync(path.join(dir, 'terraform', 'database.tf'), 'resource "aws_rds_cluster" "postgres" {}\n');
         const result = await runDbMigrate(migrateOptions({
             cwd: dir, setupCi: true, isHeadless: true,
             cmd: 'node ./dist/migrate.cjs',
@@ -1622,6 +1625,7 @@ describe('db migrate: --setup-ci and gate injection', () => {
         }));
         expect(result).toEqual(expect.objectContaining({ ok: true, ciSetup: true }));
         expect(fs.readFileSync(workflowFile, 'utf8')).toContain('db backup --id "myapp-db-cluster-pre-deploy-${{ github.sha }}" --headless');
+        expect(mockTrackEvent).toHaveBeenCalledWith('db_migrate_run', expect.objectContaining({ success: true, ci_setup: true, db_kind: 'cluster' }));
     });
 
     it('--setup-ci also wires the preview workflow when present', async () => {
@@ -1691,7 +1695,7 @@ describe('db migrate: gate helpers', () => {
         expect(refreshed.match(/Take pre-migration database snapshot/g)).toHaveLength(1);
     });
 
-    it('injectMigrationGate requires the db identifier for the snapshot id (BUG-205)', () => {
+    it('injectMigrationGate requires the db identifier for the snapshot id', () => {
         expect(() => injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate' })).toThrow(/dbIdentifier/);
         expect(() => injectMigrationGate(WORKFLOW_FIXTURE, { cmd: 'npm run migrate', dbIdentifier: '  ' })).toThrow(/dbIdentifier/);
     });
@@ -1779,7 +1783,7 @@ describe('db migrate: gate helpers', () => {
         expect(twice).toContain(`--cmd 'node ./dist/other.cjs'`);
     });
 
-    // BUG-138: injected gates run AWS calls — they must honor the
+    // Injected gates run AWS calls — they must honor the
     // credential-skip outcome like every other post-assume step.
     it('injected migration gates honor the credential outcome', () => {
         const preview = [
@@ -1952,7 +1956,7 @@ describe('buildVectorExtensionCommand', () => {
         expect(script).toContain('$DATABASE_URL');
     });
 
-    // BUG-139 sibling: message-only catches swallow the cause chain
+    // Message-only catches swallow the cause chain
     // that names the real failure (e.g. the Invalid URL inside a
     // wrapped query error) — log the stack instead.
     it('logs full stacks (not message-only) on the node branches', () => {
@@ -2243,7 +2247,7 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         const dump = calls[1];
         expect(dump.args).toEqual(expect.arrayContaining(['--no-owner', '--no-acl', '-h', 'src-host', '-p', '5433', '-U', 'srcuser', '-d', 'sourcedb']));
         expect(dump.opts.env.PGPASSWORD).toBe('src-pass');
-        // BUG-148: the SOURCE is arbitrary user infra (often no TLS) —
+        // The SOURCE is arbitrary user infra (often no TLS) —
         // prefer, don't require. The Grada RDS target still requires.
         expect(dump.opts.env.PGSSLMODE).toBe(process.env.PGSSLMODE || 'prefer');
         expect(calls[2].opts.env.PGPASSWORD).toBe(DB_PASSWORD);
@@ -2253,7 +2257,7 @@ describe('Command: db import (mocked AWS + spawn)', () => {
         expect(mockTrackEvent).toHaveBeenCalledWith('db_import_run', expect.objectContaining({ success: true, source: 'url' }));
     });
 
-    // BUG-149: Node reports signal death as code null, and `?? 0`
+    // Node reports signal death as code null, and `?? 0`
     // turned that into success ("Import complete" on a partial import).
     it('fails when a signal kills the source dump child', async () => {
         const spawnImpl = vi.fn((bin, args, opts) => {
@@ -2414,7 +2418,7 @@ describe('Command: db import (mocked AWS + spawn)', () => {
                 spawnImpl: fromFresh.spawnImpl,
             }));
             expect(okFrom.ok).toBe(true);
-            // BUG-148: the source is arbitrary user infra — prefer, and
+            // The source is arbitrary user infra — prefer, and
             // the Grada target in the same run still requires.
             expect(fromFresh.calls[1].opts.env.PGSSLMODE).toBe('prefer');
             expect(fromFresh.calls[2].opts.env.PGSSLMODE).toBe('require');
@@ -2815,7 +2819,7 @@ describe('Command: db backup (mocked AWS)', () => {
         }));
     });
 
-    it('refuses to adopt a foreign snapshot id (BUG-204)', async () => {
+    it('refuses to adopt a foreign snapshot id', async () => {
         const exists = new Error('snapshot already exists');
         exists.name = 'DBSnapshotAlreadyExists';
         const rdsClient = mockRdsBackupClient({
@@ -2833,7 +2837,7 @@ describe('Command: db backup (mocked AWS)', () => {
         }));
     });
 
-    it('refuses to adopt a foreign cluster snapshot id (BUG-204)', async () => {
+    it('refuses to adopt a foreign cluster snapshot id', async () => {
         const exists = new Error('snapshot already exists');
         exists.name = 'DBClusterSnapshotAlreadyExists';
         const rdsClient = mockRdsBackupClient({
@@ -2852,7 +2856,7 @@ describe('Command: db backup (mocked AWS)', () => {
         }));
     });
 
-    it('fails fast on a foreign snapshot even before it is available (BUG-204)', async () => {
+    it('fails fast on a foreign snapshot even before it is available', async () => {
         const exists = new Error('snapshot already exists');
         exists.name = 'DBSnapshotAlreadyExists';
         const rdsClient = mockRdsBackupClient({
@@ -2866,7 +2870,7 @@ describe('Command: db backup (mocked AWS)', () => {
         expect(rdsClient.described.length).toBe(1);
     });
 
-    it('verifies ownership on no-wait reuse (BUG-204)', async () => {
+    it('verifies ownership on no-wait reuse', async () => {
         const exists = new Error('snapshot already exists');
         exists.name = 'DBSnapshotAlreadyExists';
         const rdsClient = mockRdsBackupClient({
@@ -2882,7 +2886,7 @@ describe('Command: db backup (mocked AWS)', () => {
         }));
     });
 
-    it('tolerates a not-yet-visible snapshot on no-wait reuse (BUG-204)', async () => {
+    it('tolerates a not-yet-visible snapshot on no-wait reuse', async () => {
         const exists = new Error('snapshot already exists');
         exists.name = 'DBSnapshotAlreadyExists';
         const notFound = new Error('not yet visible');
@@ -3329,7 +3333,7 @@ describe('buildMigrationCommand', () => {
         expect(buildMigrationCommand('migrate', portOnly)[2]).toContain('var s="mysql"');
     });
 
-    // BUG-139: userinfo must be percent-encoded at RUNTIME — node
+    // Userinfo must be percent-encoded at RUNTIME — node
     // sees only shell references, never the values, so the encoding
     // ladder (node → sed → warned raw) ships inside the script.
     it('encodes userinfo at runtime via a node/sed/raw ladder', () => {
@@ -3358,7 +3362,7 @@ describe('buildMigrationCommand', () => {
         expect(decodeURIComponent(parsed.password)).toBe(hostile);
     });
 
-    // BUG-171: engine/port hints hide in valueFrom when values are
+    // Engine/port hints hide in valueFrom when values are
     // secrets-sourced; fallbacks must follow the sniffed scheme.
     it('sniffs valueFrom references for engine and port hints', () => {
         const mysqlHint = { name: 'c', environment: [{ name: 'DB_HOST', value: 'db.internal' }], secrets: [

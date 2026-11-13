@@ -764,7 +764,7 @@ describe('Infrastructure Generator: --target lambda', () => {
         const mainTf = await readTf('main.tf');
         expect(mainTf).not.toContain('vpc_config');
         await expect(fs.stat(path.join(lambdaTargetDir, 'terraform', 'database.tf'))).rejects.toThrow();
-        // BUG-137: the random pin is unconditional now (harmless when unused).
+        // The random pin is unconditional now (harmless when unused).
         expect(await readTf('backend.tf')).toContain('hashicorp/random');
     });
 
@@ -813,7 +813,7 @@ describe('App CDN template pair', () => {
         // The ALB origin-secret header is ECS-only (API Gateway has no
         // header validation to pair it with): strip the documented block,
         // then everything else must align.
-        const headerBlock = /    # Origin secret \(BUG-91\)[\s\S]*?    \}\n\n/;
+        const headerBlock = /    # Origin secret:[\s\S]*?    \}\n\n/;
         expect(ecsRaw).toMatch(headerBlock);
         const ecs = ecsRaw.replace(headerBlock, '').split('\n');
         const lambda = (await fs.readFile(path.resolve('templates/terraform', 'cloudfront-lambda.tf'), 'utf-8')).split('\n');
@@ -832,7 +832,7 @@ describe('App CDN template pair', () => {
     });
 });
 
-describe('App CDN cache behavior (BUG-82)', () => {
+describe('App CDN cache behavior', () => {
     const APP_CDNS = ['cloudfront.tf', 'cloudfront-lambda.tf'];
 
     async function readTemplate(name) {
@@ -863,7 +863,7 @@ describe('App CDN cache behavior (BUG-82)', () => {
     });
 });
 
-describe('App CDN security headers (BUG-92)', () => {
+describe('App CDN security headers', () => {
     it.each(['cloudfront.tf', 'cloudfront-lambda.tf'])('%s attaches the managed security-headers policy', async (name) => {
         const content = await fs.readFile(path.resolve('templates/terraform', name), 'utf-8');
         expect(content).toContain('Managed-SecurityHeadersPolicy');
@@ -871,7 +871,7 @@ describe('App CDN security headers (BUG-92)', () => {
     });
 });
 
-describe('ALB origin secret (BUG-91)', () => {
+describe('ALB origin secret', () => {
     it('sends a secret header from CloudFront and validates it at the ALB', async () => {
         const cf = await fs.readFile(path.resolve('templates/terraform', 'cloudfront.tf'), 'utf-8');
         expect(cf).toMatch(/custom_header\s*\{[^}]*X-Grada-Origin-Secret/s);
@@ -883,14 +883,14 @@ describe('ALB origin secret (BUG-91)', () => {
         expect(main).toContain('resource "random_password" "origin_secret"');
     });
 
-    // BUG-163: an instant-delete vault (recovery 0) turns any destroy
+    // An instant-delete vault (recovery 0) turns any destroy
     // bug into unrecoverable secret loss — keep the 30-day window.
     it('keeps a 30-day recovery window on the secrets vault', async () => {
         const template = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'secrets.tf'), 'utf-8');
         expect(template).toContain('recovery_window_in_days = 30');
     });
 
-    // BUG-137: the random pin must live in template backend.tf — the
+    // The random pin must live in template backend.tf — the
     // conditional injection left pre-existing trees' backend.tf without
     // the pin when the DB arrived via `add database`.
     it('declares the random provider pin in template backend.tf', async () => {
@@ -928,7 +928,7 @@ describe('ALB origin secret (BUG-91)', () => {
     });
 });
 
-describe('TF collision-guard advice (BUG-94)', () => {
+describe('TF collision-guard advice', () => {
     it('names the guard-list repair when push would not skip the key', async () => {
         const content = await fs.readFile(path.resolve('templates/terraform', 'main.tf'), 'utf-8');
         expect(content).toMatch(/managed_env_names in terraform\/main\.tf/);
@@ -1444,7 +1444,7 @@ describe('Compose merge safety', () => {
     });
 });
 
-describe('Managed env names list (BUG-81 CI cover)', () => {
+describe('Managed env names list', () => {
     const dir = path.join(process.cwd(), 'tests', '.tmp-managed-env-names');
 
     function ecsConfig(overrides = {}) {
@@ -1557,7 +1557,7 @@ describe('Managed env names list (BUG-81 CI cover)', () => {
         expect(managedLine(mainTf)).toContain('"RAILS_MASTER_KEY"');
     });
 
-    // BUG-156: `{{VAR}}` substitution used the string-replacement form,
+    // `{{VAR}}` substitution used the string-replacement form,
     // so `$&`/`$'`/`$$` in values interpolated match text into output.
     it('renders `$` patterns in Procfile commands byte-identical', async () => {
         await generateTemplates(dir, ecsConfig({ PROCFILE: { web: ['sh', '-c', "echo {print $&} $' $$"] } }));
@@ -1566,7 +1566,7 @@ describe('Managed env names list (BUG-81 CI cover)', () => {
         expect(mainTf).not.toContain('{{TASK_COMMAND}}');
     });
 
-    // BUG-146: the live master key must never render into committed .tf
+    // The live master key must never render into committed .tf
     // (or linger in state), and no constant dummy may boot prod — seed
     // a greppable, boot-failing placeholder plus a loud push instruction.
     it('seeds a placeholder Rails master key, never the live key or a dummy', async () => {
@@ -1616,13 +1616,13 @@ describe('terraform template safety nets (carried P4s)', () => {
         const content = await readTf(file);
         expect(content).toMatch(/max_allocated_storage\s*=\s*200/);
         expect(content).toMatch(/backup_retention_period\s*=\s*7/);
-        // BUG-111 remainder: explicit backup + maintenance windows so
+        // Explicit backup + maintenance windows so
         // AWS never picks peak-hour defaults.
         expect(content).toMatch(/backup_window\s*=\s*"[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}"/);
         expect(content).toMatch(/maintenance_window\s*=\s*"[a-z]{3}:[0-9]{2}:[0-9]{2}-[a-z]{3}:[0-9]{2}:[0-9]{2}"/);
     });
 
-    // BUG-203: the Aurora cluster carried no retention or windows
+    // The Aurora cluster carried no retention or windows
     // while both instance engines do — same 7 days + off-peak UTC.
     it('aurora cluster keeps 7-day retention and explicit preferred windows', async () => {
         const content = await readTf('database-aurora-postgresql.tf');

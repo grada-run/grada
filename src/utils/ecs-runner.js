@@ -311,7 +311,7 @@ export async function runEphemeralEcsTask({
 // Sniffs the URL scheme from discrete credentials. Explicit values win;
 // when DB_ENGINE/DB_PORT are secrets-sourced (valueFrom, values unknown
 // to the CLI) the reference text is sniffed for engine/port hints
-// instead (BUG-171). Indeterminate stays postgresql (back-compat).
+// instead. Indeterminate stays postgresql (back-compat).
 function sniffRunnerScheme(entries, values) {
     const engine = values.get('DB_ENGINE');
     if (typeof engine === 'string' && engine !== '') {
@@ -326,7 +326,7 @@ function sniffRunnerScheme(entries, values) {
     return 'postgresql';
 }
 
-// Runtime userinfo encoder for the synthesized URL (BUG-139): node sees
+// Runtime userinfo encoder for the synthesized URL: node sees
 // only shell references, never the values, so the encoding ladder ships
 // inside the script — node (encodeURIComponent) → sed (the URL-breaking
 // subset: %, ?, #, @, :, /) → warned raw. Quoting alone cannot save a
@@ -510,7 +510,7 @@ export async function reportRunnerOutcome({
     if (exitCode === 0) {
         // Owner pairs its own start/stop: the runner usually stops
         // first (idempotent no-op then), but success must never
-        // depend on a callee for the spinner lifecycle (BUG-202).
+        // depend on a callee for the spinner lifecycle.
         try { s.stop(color.green(`${label} succeeded.`)); } catch { /* already stopped */ }
         console.log(color.green(`\n✅ ${label} succeeded.`));
         await trackSuccess(event, { ...telemetry });

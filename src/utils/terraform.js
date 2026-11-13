@@ -218,7 +218,7 @@ export function runTerraformCommand(args, cwd, spin, loadingPrefix, options = {}
             if (timer && typeof timer.unref === 'function') timer.unref();
         }
 
-        // BUG-213: pipe chunks split lines at arbitrary byte offsets, so
+        // Pipe chunks split lines at arbitrary byte offsets, so
         // each chunk's trailing fragment is carried over and only
         // newline-terminated lines are delivered. Splitting per chunk
         // injects newlines into giant single-line JSON (show -json),

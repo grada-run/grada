@@ -87,7 +87,7 @@ describe('R15: preserved files across regenerate', () => {
     });
 });
 
-describe('BUG-158: preview/teardown/drift/plan manifest + backup coverage', () => {
+describe('Preview/teardown/drift/plan manifest + backup coverage', () => {
     it('flags hand edits to the four workflows and backs them up under --force', async () => {
         writeTree();
         for (const wf of ['preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml']) {

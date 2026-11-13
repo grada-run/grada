@@ -182,7 +182,7 @@ describe('precondition guards', () => {
         expect(flushTelemetry).toHaveBeenCalled();
     });
 
-    // BUG-157: static trees have no task role or VPC, so addons
+    // Static trees have no task role or VPC, so addons
     // referencing them render unplannable TF — refuse fast instead.
     // The refusal happens before scaffolding, so static adds never print
     // container env lines or the "Available in your container" outro.
@@ -1902,7 +1902,7 @@ describe('cron generated terraform', () => {
         expect(trackEvent).toHaveBeenCalledWith('add_run', expect.objectContaining({ capability: 'cron', success: true }));
     });
 
-    // BUG-156 twin: renderAddonTemplate shares the `$`-interpolation
+    // RenderAddonTemplate shares the `$`-interpolation
     // defect via replaceAll.
     it('renders `$` patterns in cron commands byte-identical', async () => {
         const dir = makeTmp();

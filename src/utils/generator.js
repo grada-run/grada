@@ -17,7 +17,7 @@ const __dirname = path.dirname(__filename);
 // name stays a writable candidate so pre-rebrand docs keep updating.
 export const MANAGED_DOC_FALLBACK = 'GRADA.md';
 export const LEGACY_MANAGED_DOC_FALLBACK = 'DEPLOY-STACK.md';
-// Greppable, boot-failing Rails master-key seed (BUG-146): Rails cannot
+// Greppable, boot-failing Rails master-key seed: Rails cannot
 // boot on it, so a tree that never pushes the real key fails closed.
 export const RAILS_MASTER_KEY_PLACEHOLDER = 'REPLACE_ME_PUSH_REAL_RAILS_MASTER_KEY';
 
@@ -505,7 +505,7 @@ export async function generateTemplates(targetDir, config) {
     // Build the initial HCL map for AWS Secrets Manager
     let initialSecretMap = `{\n    EXAMPLE_API_KEY = "replace_me_in_aws_console"`;
 
-    // 4.1. Seed a placeholder for the Rails master key (BUG-146): the
+    // 4.1. Seed a placeholder for the Rails master key: the
     // live key must never render into committed .tf (or linger in
     // state), and no constant dummy may boot prod. The placeholder is
     // greppable and boot-failing; the loud instruction tells the
@@ -587,7 +587,7 @@ resource "aws_lb_listener_rule" "vercel_redirect_${index}" {
 
         // Inject variables. Replacement FUNCTION (not string): `$&`/`$'`/
         // `$$` in values (Procfile commands, compose env vars) must land
-        // byte-identical, not interpolate match text (BUG-156).
+        // byte-identical, not interpolate match text.
         for (const [key, value] of Object.entries(config)) {
             const literal = String(value ?? '');
             content = content.replace(new RegExp(`{{${key}}}`, 'g'), () => literal);

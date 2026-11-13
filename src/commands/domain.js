@@ -529,7 +529,7 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
         cloudfrontPatched = patched.changed;
     } else if (previousDomain && previousDomain !== domain) {
         // External-pending wires nothing new, but a --force replace must
-        // still release the previous ACTIVE aliases (BUG-100).
+        // still release the previous ACTIVE aliases.
         const read = await readCloudFrontDistribution(cloudfrontTfPath, 'add', noExit);
         if (!read.ok) return read.failure;
         const updated = unpatchCloudFrontDomain(read.content, previousDomain);
@@ -799,7 +799,7 @@ async function runDomainRemove({ options, projectName, domainTfPath, cloudfrontT
         console.log(color.yellow(`⚠ ${remainingAliases.length} alias(es) remain (${remainingAliases.join(', ')}): the ACM viewer_certificate is kept, but its validation resource is deleted with domain.tf — rewire the certificate by hand before applying.`));
     } else if (!unpatched) {
         // The aliases were never touched: claiming a restore would send
-        // the next apply into a stale-alias failure (BUG-99).
+        // the next apply into a stale-alias failure.
         console.log(color.green(`\n✅ Custom domain ${domain || ''} removed.`.replace('  ', ' ')));
         const why = !domain
             ? 'terraform/domain.tf was unparseable, so CloudFront aliases were left untouched'

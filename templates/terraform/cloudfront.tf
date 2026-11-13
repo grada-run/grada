@@ -2,7 +2,7 @@
 # is wrong for an app server — one slot per path gets shared by HTML docs,
 # API/RSC variants, redirects, and errors, so a cacheable variant poisons
 # every other viewer of that path. Each traffic class below gets its own
-# key instead (BUG-82).
+# key instead.
 data "aws_cloudfront_cache_policy" "disabled" {
   name = "Managed-CachingDisabled"
 }
@@ -63,7 +63,7 @@ data "aws_cloudfront_origin_request_policy" "all_viewer" {
 }
 
 # Managed security headers (HSTS, frame/clickjacking guards, content-type
-# sniffing) on every behavior (BUG-92).
+# sniffing) on every behavior.
 data "aws_cloudfront_response_headers_policy" "security" {
   name = "Managed-SecurityHeadersPolicy"
 }
@@ -81,7 +81,7 @@ resource "aws_cloudfront_distribution" "cdn" {
     domain_name = aws_lb.main.dns_name
     origin_id   = "ALBOrigin"
 
-    # Origin secret (BUG-91): proves to the ALB that the request came
+    # Origin secret: proves to the ALB that the request came
     # through THIS distribution — any other tenant's distro, or a direct
     # ALB hit, lacks the header and gets a 403 from the listener rule.
     custom_header {

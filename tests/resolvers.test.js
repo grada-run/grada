@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readResourceSuffix, readRenderedContainerEnvNames } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -194,7 +194,7 @@ describe('readRenderedContainerEnvNames', () => {
             '',
         ].join('\n'));
         // OTEL_TOKEN shares no container with any secret: pushing it is
-        // safe, so it must not enter the managed set (BUG-93).
+        // safe, so it must not enter the managed set.
         expect(readRenderedContainerEnvNames(dir)).toEqual(['PORT']);
     });
 });
@@ -336,6 +336,30 @@ describe('readTerraformComputeTarget', () => {
         );
         expect(readTerraformComputeTarget(lambdaDir)).toBe('lambda');
         expect(readTerraformComputeTarget(makeTmp())).toBe('ecs');
+    });
+});
+
+describe('readTerraformDbKind', () => {
+    it('sniffs database.tf content, not the source template filename', () => {
+        // The generator and `add` always render to database.tf regardless
+        // of engine — no tree ever carries database-aurora-postgresql.tf.
+        const auroraDir = makeTmp();
+        fs.mkdirSync(path.join(auroraDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(auroraDir, 'terraform', 'database.tf'),
+            'resource "aws_rds_cluster" "postgres" {}\n'
+        );
+        expect(readTerraformDbKind(auroraDir)).toBe('cluster');
+
+        const instanceDir = makeTmp();
+        fs.mkdirSync(path.join(instanceDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(instanceDir, 'terraform', 'database.tf'),
+            'resource "aws_db_instance" "postgres" {}\n'
+        );
+        expect(readTerraformDbKind(instanceDir)).toBe('instance');
+
+        expect(readTerraformDbKind(makeTmp())).toBe('instance');
     });
 });
 

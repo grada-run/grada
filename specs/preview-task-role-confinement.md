@@ -1,4 +1,4 @@
-# Preview Task-Role Confinement (BUG-215)
+# Preview Task-Role Confinement
 
 ## 1. Problem
 
@@ -80,7 +80,7 @@ Resource-support grounding: `RunTask` and `PassRole` scoping is proven
 by Grada's own live cron triggers (the shipped scheduler policy scopes
 both the same way); `RegisterTaskDefinition` scoping is *not* proven
 and rides the RunTask-choke fallback above. No interaction with the
-BUG-214 boundary carve-out (it governs capped roles; these denies
+boundary PassRole carve-out (it governs capped roles; these denies
 govern preview credentials) — ship in either order.
 
 ## 3. Exact statements
@@ -212,5 +212,5 @@ against the static-template pipeline).
   flow reads values with non-preview credentials (push runs outside
   preview jobs, but prove it in that spec).
 - Full preview least-privilege redesign.
-- BUG-204/205 ship alongside per the combined-scope decision but are
+- The companion snapshot fixes ship alongside per the combined-scope decision but are
   separate fixes, not part of this spec.

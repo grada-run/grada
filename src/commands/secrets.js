@@ -64,7 +64,7 @@ function resolveSecretsFile(envFilePath) {
 }
 
 function resolveSecretsProject(projectName) {
-    // BUG-162: the terraform project name (what provisioned the vault)
+    // The terraform project name (what provisioned the vault)
     // outranks the directory basename — a renamed directory otherwise
     // silently aims at a missing vault.
     if (typeof projectName === 'string' && projectName.trim()) return projectName.trim();
@@ -87,7 +87,7 @@ export async function resolveSecretsRegion(options = {}) {
     try {
         const backendTfPath = path.join(process.cwd(), 'terraform', 'backend.tf');
         const backendTfContent = await fs.readFile(backendTfPath, 'utf-8');
-        // BUG-164: scan line-wise skipping comments — the old whole-file
+        // Scan line-wise skipping comments — the old whole-file
         // regex resolved commented-out regions (or legacy lines) as live.
         for (const rawLine of backendTfContent.split('\n')) {
             const line = rawLine.trim();
@@ -181,7 +181,7 @@ export async function getManagedEnvNames(cwd = process.cwd(), target = 'ecs') {
     }
     // NODE_ENV is injected only when the worker renders (the generator
     // scopes it to worker trees): on workerless trees it is a legitimate
-    // custom key and must not auto-skip (BUG-95). Unreadable dirs keep
+    // custom key and must not auto-skip. Unreadable dirs keep
     // the base set above (fail-closed; the TF precondition backstops
     // real collisions there).
     if (!tfFiles.includes('worker.tf')) names.delete('NODE_ENV');
@@ -252,9 +252,9 @@ function vaultPayloadShape(parsed) {
 }
 
 // Validates a GetSecretValue response into the managed JSON object.
-// Refuses binary payloads (BUG-145: they read as "empty" and a push
+// Refuses binary payloads (They read as "empty" and a push
 // would full-replace them away without the removal confirm) and
-// non-object/non-string payloads (BUG-159: phantom `0,1` removals,
+// non-object/non-string payloads (Phantom `0,1` removals,
 // garbage pull keys, TypeError crashes). A response carrying neither
 // field means an empty/new vault — live AWS never returns that shape
 // for a valued secret.
@@ -289,7 +289,7 @@ function vaultPayloadObject(resp, secretId) {
 const ATTEMPTED_KEY_RE = /^\s*([^=:#\s][^=:]*?)\s*[=:]/;
 
 // Finds .env input lines dotenv silently dropped plus duplicate keys
-// (BUG-143). Multiline double-quoted values span lines — continuation
+//. Multiline double-quoted values span lines — continuation
 // lines are value text, not dropped lines. Pure and unit-tested via
 // push output.
 function analyzeEnvLines(envContent, parsedSecrets) {
@@ -363,7 +363,7 @@ async function handleSecretsCatch({
     } else if (handleAuthErrorBranch(error, s, opts)) {
         return;
     }
-    // BUG-161: failures after the vault write (keys file, ECS restart)
+    // Failures after the vault write (keys file, ECS restart)
     // must report the vault as updated with the recovery step — a bare
     // "Failed to push" lies about what succeeded.
     const postVaultHints = {
@@ -415,7 +415,7 @@ export async function pushSecrets(envFilePath, projectName, options = {}) {
 }
 
 async function pushSecretsMain(envFilePath, projectName, options = {}) {
-    // BUG-144: push is read-modify-full-replace — serialize local
+    // Push is read-modify-full-replace — serialize local
     // concurrent pushes like every other mutating family (the re-read
     // before UpdateSecret below covers cross-machine second writers).
     return withProjectLock(process.cwd(), () => pushSecretsInner(envFilePath, projectName, options));
@@ -456,14 +456,14 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
         resolvedFilePath = '.env';
     }
 
-    // BUG-162: shared helper — the terraform project name outranks the
+    // Shared helper — the terraform project name outranks the
     // directory basename (a renamed directory must not aim at a phantom).
     const resolvedProjectName = resolveSecretsProject(explicitProjectName);
 
     const s = spinner();
     s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
 
-    // BUG-161: write progress for the catch below — names the post-vault
+    // Write progress for the catch below — names the post-vault
     // follow-up step when one fails, so the report says the vault is
     // updated instead of misreporting a failed push.
     let postVaultStep = null;
@@ -518,7 +518,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
 
         const parsedSecrets = dotenv.parse(envContent);
 
-        // BUG-143: dotenv silently drops lines it cannot parse (and
+        // Dotenv silently drops lines it cannot parse (and
         // last-wins duplicates) — name them so the success count below
         // reconciles with the file. Runs before the empty early-return
         // so an all-dropped file explains itself.
@@ -540,7 +540,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
             return;
         }
 
-        // Pre-write guards (BUG-79/81): colliding keys are auto-skipped
+        // Pre-write guards: colliding keys are auto-skipped
         // on ECS — pushing them can only brick the deploy, so excluding
         // them with a loud notice beats refusing and demanding a hand
         // edit. Local-dev wiring values warn. Everything surfaces before
@@ -612,18 +612,18 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
             }
         }
 
-        // BUG-80: push is full-replace, so vault keys absent from .env are
+        // Push is full-replace, so vault keys absent from .env are
         // deleted by the update below. Name every victim before writing;
         // interactive runs confirm first, headless proceeds loudly.
         // Skipped keys are present in .env, so they never land here — their
         // exclusion from the vault write is covered by the skip notice
         // above, not by this confirm.
         const removed = (existingKeys ?? []).filter((key) => !Object.hasOwn(parsedSecrets, key));
-        // BUG-89: skipped keys are present in .env (so they never land in
+        // Skipped keys are present in .env (so they never land in
         // `removed`) but excluded from the vault write — a stale vault
         // value for a skipped key is wiped by the full-replace update.
         // Name every such victim loudly. The skip notice above is the
-        // acknowledgment, so unlike BUG-80 removals these never confirm.
+        // acknowledgment, so unlike true removals these never confirm.
         const staleSkipped = skipped.filter((key) => (existingKeys ?? []).includes(key));
         if (staleSkipped.length > 0) {
             console.log(color.yellow(`⚠️  ${staleSkipped.length} skipped ${staleSkipped.length === 1 ? 'key' : 'keys'} still ${staleSkipped.length === 1 ? 'has' : 'have'} a stale vault value that this push deletes (no longer pushed):`));
@@ -656,7 +656,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
             s.start(truncateSpinnerText(`Reading ${envFilePath} and pushing to AWS Secrets Manager...`));
         }
 
-        // BUG-144: the confirm above can wait unboundedly — re-read the
+        // The confirm above can wait unboundedly — re-read the
         // vault immediately before the full-replace write and abort when
         // a second writer moved the payload since the first read.
         let rereadSecretString = null;
@@ -690,7 +690,7 @@ async function pushSecretsInner(envFilePath, projectName, options = {}) {
         const keys = Object.keys(pushableSecrets);
         const keysFilePath = path.join(process.cwd(), 'terraform', 'secret_keys.json');
 
-        // BUG-160: skip the write when the file is already byte-identical
+        // Skip the write when the file is already byte-identical
         // so unchanged pushes don't dirty `git status`.
         const nextKeysContent = JSON.stringify(keys, null, 2);
         let keysUnchanged = false;
@@ -1041,7 +1041,7 @@ async function auditSecretsMain(envFilePath, projectName, options = {}) {
             }
         }
 
-        // BUG-79: flag both limbs — keys colliding with Grada-managed
+        // Flag both limbs — keys colliding with Grada-managed
         // environment names (fatal on ECS, shadowing on Lambda) and
         // wiring-like values that look like local-dev placeholders.
         const auditTarget = readTerraformComputeTarget(process.cwd());

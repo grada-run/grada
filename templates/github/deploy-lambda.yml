@@ -64,7 +64,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # Deploy never skips: a failed assume fails the run with the
-      # bootstrap pointer (BUG-138).
+      # bootstrap pointer.
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
@@ -179,7 +179,7 @@ jobs:
 
       # A cancelled apply/destroy can strand the S3 state lockfile: point
       # at recovery instead of leaving the next run to fail obscurely
-      # (BUG-194). Generic by necessity — the lock ID only exists in the
+      #. Generic by necessity — the lock ID only exists in the
       # follow-up run's own error.
       - name: Cancellation recovery note
         if: cancelled()

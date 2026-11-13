@@ -662,7 +662,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(mockSpawn).toHaveBeenCalledTimes(3);
     });
 
-    // BUG-198: the snapshot wait re-started the already-running
+    // The snapshot wait re-started the already-running
     // shared spinner — clack overwrites the interval handle, leaking
     // the first interval so the session never exits. One start per
     // phase; the wait re-messages instead.
@@ -684,7 +684,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(snapshotMessages.length).toBeGreaterThanOrEqual(2);
     });
 
-    // BUG-196: surface PercentProgress during the snapshot wait.
+    // Surface PercentProgress during the snapshot wait.
     it('shows snapshot percent progress while waiting', async () => {
       writeBackend();
       confirmDestroy();
@@ -715,7 +715,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(clack.mockSpinnerMessage).toHaveBeenCalledWith(expect.stringContaining('42% complete'));
     });
 
-    // BUG-198: "spin this back up" overstated recovery — the bucket
+    // "spin this back up" overstated recovery — the bucket
     // confirm must name the snapshot (apply never restores the data).
     it('names the pre-destroy snapshot in the state-bucket confirm', async () => {
       writeBackend();
@@ -980,7 +980,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(exitSpy).not.toHaveBeenCalled();
     });
 
-    it('polls drained buckets to empty before running terraform destroy (BUG-210)', async () => {
+    it('polls drained buckets to empty before running terraform destroy', async () => {
       writeBackend('myapp-tfstate-123', 'us-east-2');
       confirmAndSucceed(SHOW_JSON);
       drainBucketObjects.mockResolvedValue({ deleted: 5, failed: [] });
@@ -1003,7 +1003,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
       expect(exitSpy).not.toHaveBeenCalled();
     });
 
-    it('fails closed when a drained bucket never reads empty (BUG-210)', async () => {
+    it('fails closed when a drained bucket never reads empty', async () => {
       writeBackend('myapp-tfstate-123', 'us-east-2');
       confirmAndSucceed(SHOW_JSON);
       drainBucketObjects.mockResolvedValue({ deleted: 5, failed: [] });
@@ -1020,7 +1020,7 @@ describe('Command: destroy (mocked terraform spawn)', () => {
     });
   });
 
-  describe('BucketNotEmpty retry (BUG-210)', () => {
+  describe('BucketNotEmpty retry', () => {
     it('settles and retries destroy once, then reports success', async () => {
       const attemptDestroy = vi.fn().mockResolvedValueOnce(undefined);
       const sleepFn = vi.fn().mockResolvedValue(undefined);

@@ -46,17 +46,15 @@ export function readTerraformComputeTarget(cwd = process.cwd()) {
 }
 
 // Offline database-kind detection for `--setup-ci` (no AWS calls): the
-// generator copies exactly one database template, so the aurora file's
-// presence means cluster snapshots. Unknown/absent means instance — the
-// runtime backup resolves the live kind anyway; the id prefix only
-// name-scopes the snapshot for guardrails + gc.
+// generator and `add` always render to database.tf regardless of engine,
+// so the kind comes from the rendered content — an aurora tree declares
+// an rds cluster. Unknown/absent means instance — the runtime backup
+// resolves the live kind anyway; the id prefix only name-scopes the
+// snapshot for guardrails + gc.
 export function readTerraformDbKind(cwd = process.cwd()) {
     const base = resolveCwd({}, cwd);
-    try {
-        if (fsSync.existsSync(path.join(base, 'terraform', 'database-aurora-postgresql.tf'))) return 'cluster';
-    } catch {
-        // Fall through to the instance default
-    }
+    const databaseTf = readFileSafe(path.join(base, 'terraform', 'database.tf'));
+    if (typeof databaseTf === 'string' && databaseTf.includes('resource "aws_rds_cluster"')) return 'cluster';
     return 'instance';
 }
 
@@ -210,7 +208,7 @@ function scanBracketBlock(content, openIdx) {
 // reference, so it never matches; the shape filter drops resource names
 // (`${...}`, hyphens, paths). Sorted, deduplicated, [] when unreadable.
 //
-// Scoped to secret-receiving containers (BUG-93): ECS collides secrets
+// Scoped to secret-receiving containers: ECS collides secrets
 // with environment per container definition, so sidecar `environment`
 // arrays (whose containers get no secrets) must not contribute names —
 // parsing them would falsely render same-named secrets undeployable.

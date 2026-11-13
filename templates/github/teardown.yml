@@ -3,7 +3,7 @@ name: Destroy PR Preview
 on:
   # pull_request_target (not pull_request): this file comes from the base
   # branch, so a fork PR cannot smuggle privileged steps into its own
-  # teardown run (BUG-140). The PR head is checked out explicitly by SHA
+  # teardown run. The PR head is checked out explicitly by SHA
   # in the guarded step instead.
   pull_request_target:
     types: [closed]
@@ -52,7 +52,7 @@ jobs:
       # STS denies a missing role and a trust mismatch with the same
       # message, so the API won't support distinguishing them: every
       # assume failure skips loud (green) with both cases + pointers
-      # named (BUG-199).
+      # named.
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
@@ -109,7 +109,7 @@ jobs:
 
       # A cancelled destroy can strand the S3 state lockfile: point at
       # recovery instead of leaving the next run to fail obscurely
-      # (BUG-194). Generic by necessity — the lock ID only exists in the
+      #. Generic by necessity — the lock ID only exists in the
       # follow-up run's own error.
       - name: Cancellation recovery note
         if: cancelled()

@@ -144,7 +144,7 @@ export function resolveDefaultBranch(targetDir, deployBranch, execSyncImpl = exe
 // Renders both CI roles' trust claims as HCL fragments from the resolved
 // repo trust: the deploy role binds to the effective deploy branch (the
 // same value rendered into the deploy trigger, so the two stay in sync),
-// the preview role binds to pull request events. BUG-209: scheduled drift
+// the preview role binds to pull request events. Scheduled drift
 // runs on the default branch, so when it differs from the deploy branch
 // the deploy role trusts both refs. The open trust and hand-customized
 // claims render verbatim — never silently widened.
@@ -193,7 +193,7 @@ export function buildRoleArn(accountId, roleName) {
 // dual-format pair resolves back to its classic entry so re-init stays
 // stable; anything richer is described for warnings and guarded against
 // silent widening.
-// Recognizes our own canonical dual-branch trust (BUG-209): two classic
+// Recognizes our own canonical dual-branch trust: two classic
 // branch refs for one slug plus each entry's immutable companion, in
 // render order. Returns { deploySub, branches } or null.
 function parseCanonicalDualTrust(entries) {
@@ -492,7 +492,7 @@ async function mainStackMain(input = {}) {
         target = targetAnswer;
     }
 
-    // Capability-vs-target policy for --with (BUG-157): refuse fast when
+    // Capability-vs-target policy for --with: refuse fast when
     // the requested capability cannot render on this target (static has
     // no task role or VPC), before any prompt/AWS call/write. Interactive
     // multiselect offers only compatible targets' caps; this covers --with.
@@ -962,7 +962,7 @@ async function mainStackMain(input = {}) {
 
     // 7. Synthesize Templates
     s.message('Synthesizing Terraform templates...');
-    // BUG-209: live origin/HEAD wins when it names a real branch; when
+    // Live origin/HEAD wins when it names a real branch; when
     // detection falls back, a re-init keeps the tree's own default branch
     // so dual trust never narrows silently.
     const treeDefaultBranch = oidcResolution.treeBranches?.[1] ?? null;
@@ -1025,7 +1025,7 @@ async function mainStackMain(input = {}) {
     if (migrationGateEnabled && migrationCmd) {
         const deployYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'deploy.yml');
         const workflowContent = readFileSafe(deployYmlPath);
-        // BUG-205: scope the gate's snapshot id to the database (aurora
+        // Scope the gate's snapshot id to the database (aurora
         // takes the cluster prefix) so guardrails and gc can name it.
         const gateDbRefs = resolveDbEngineRefs(config.dbEngine);
         const gateDbIdentifier = `${dirConfig.actualProjectName}${resourceSuffix}-db${gateDbRefs.isCluster ? '-cluster' : ''}`;
@@ -1053,7 +1053,7 @@ async function mainStackMain(input = {}) {
 
     if (driftEnabled) {
         // drift.yml rides the manifest + backup like deploy.yml now
-        // (BUG-158): re-init backs the old file up and regenerates fresh
+        // Re-init backs the old file up and regenerates fresh
         // (current role ARN) instead of silently keeping a stale copy.
         // Hand edits trip refuse-dirty before this point; --force regenerates.
         const drifted = scaffoldDriftWorkflow(dirConfig.targetDir, {
@@ -1235,7 +1235,7 @@ async function mainStackMain(input = {}) {
             console.log(color.dim('  💡 Vector-search dependencies detected: managed pgvector support is coming soon.'));
         }
         // Static targets refuse `add cron` (no compute) — don't send
-        // static users down a dead end (BUG-157).
+        // static users down a dead end.
         if (upcoming.cron && target !== 'static') {
             console.log(color.dim('  💡 Scheduled-task dependencies detected: scaffold a schedule with "grada add cron".'));
         }

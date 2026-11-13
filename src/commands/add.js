@@ -706,7 +706,7 @@ export function renderWorkerAutoscalingBlock(hasWorker) {
 function renderAddonTemplate(templateContent, templateVars = {}, conditionalBlocks = {}) {
     let rendered = String(templateContent ?? '');
     // Replacement FUNCTIONS (not strings): `$` patterns in values (cron
-    // commands, ARNs) land byte-identical (BUG-156).
+    // commands, ARNs) land byte-identical.
     for (const [key, value] of Object.entries(templateVars)) {
         const literal = String(value ?? '');
         rendered = rendered.replaceAll(`{{${key}}}`, () => literal);

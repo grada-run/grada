@@ -287,7 +287,7 @@ function makeChunkedChild(chunks, code = 0) {
     return child;
 }
 
-describe('runTerraformCommand chunk reassembly (BUG-213)', () => {
+describe('runTerraformCommand chunk reassembly', () => {
     it('reassembles lines split across stdout chunks', async () => {
         const seen = [];
         mockSpawn.mockReturnValueOnce(makeChunkedChild(['{"bucket-na', 'me": "myapp-stor', 'age-123"}']));
@@ -354,7 +354,7 @@ describe('getTerraformStateBuckets', () => {
         await expect(getTerraformStateBuckets('/tmp')).resolves.toEqual([]);
     });
 
-    it('parses show JSON split mid-string across stdout chunks (BUG-213)', async () => {
+    it('parses show JSON split mid-string across stdout chunks', async () => {
         // terraform show -json emits one giant line; ~64KB pipe chunks
         // split it mid-string. A naive per-chunk split injects newlines
         // into the JSON and parsing fails (destroy then skips the drain).

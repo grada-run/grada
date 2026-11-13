@@ -147,7 +147,7 @@ describe('Dockerfile supply-chain pins', () => {
         }
     });
 
-    // BUG-200: the node-only pins leave python/go/rails/nginx floating
+    // The node-only pins leave python/go/rails/nginx floating
     // on mutable tags. Zero unpinned FROMs, any base.
     it('pins every FROM by digest', () => {
         for (const file of dockerfiles()) {

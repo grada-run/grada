@@ -41,7 +41,7 @@ resource "aws_rds_cluster" "postgres" {
   storage_encrypted   = true
 
   # Match the instance engines: 7-day retention with explicit off-peak
-  # UTC windows instead of AWS-assigned ones (BUG-203).
+  # UTC windows instead of AWS-assigned ones.
   backup_retention_period      = 7
   preferred_backup_window      = "03:00-04:00"
   preferred_maintenance_window = "sun:04:00-sun:05:00"

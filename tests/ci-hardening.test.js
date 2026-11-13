@@ -195,7 +195,7 @@ describe('Shift-left: local test:iac matches blocking CI scans', () => {
     });
 });
 
-describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
+describe('Preview guardrails are self-protecting', () => {
     it('denies CI-role mutation on the preview role (scoped to the CI roles)', () => {
         const { guardrails } = twinSlices();
         expect(guardrails).toContain('DenyCIRoleMutation');
@@ -234,7 +234,7 @@ describe('Preview guardrails are self-protecting (BUG-207/208)', () => {
     });
 });
 
-describe('Preview permissions boundary (BUG-212)', () => {
+describe('Preview permissions boundary', () => {
     it('forces every created role to carry the boundary', () => {
         const { guardrails } = twinSlices();
         expect(guardrails).toContain('DenyRoleWithoutBoundary');
@@ -248,7 +248,7 @@ describe('Preview permissions boundary (BUG-212)', () => {
         expect(guardrails).toContain('iam:PutRolePermissionsBoundary');
         expect(guardrails).toContain('iam:DeleteRolePermissionsBoundary');
         expect(guardrails).toContain('DenyBoundaryMutation');
-        // BUG-214 carved PassRole out of the IAM veto; the veto itself is
+        // PassRole is carved out of the IAM veto; the veto itself is
         // an explicit IAM-write list — never NotAction, which would deny
         // every service (see the carve-out assertions below).
         const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
@@ -325,7 +325,7 @@ function twinSlices() {
     };
 }
 
-describe('Permissions boundary PassRole carve-out (BUG-214)', () => {
+describe('Permissions boundary PassRole carve-out', () => {
     it('carves PassRole out of the IAM deny instead of blocking the scheduler', () => {
         const { boundary } = twinSlices();
         const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
@@ -371,7 +371,7 @@ describe('Permissions boundary PassRole carve-out (BUG-214)', () => {
     });
 });
 
-describe('Preview task-role confinement (BUG-215)', () => {
+describe('Preview task-role confinement', () => {
     it('denies prod task execution on anchored ARNs (guardrail side)', () => {
         const { tf, guardrails } = twinSlices();
         const chunk = sidChunk(guardrails, 'DenyProdTaskExecution');
@@ -434,11 +434,14 @@ describe('Preview task-role confinement (BUG-215)', () => {
         }
     });
 
-    it('mirrors the four new statements into the boundary', () => {
+    it('mirrors the new statements into the boundary (PassRole via the trio)', () => {
         const { boundary } = twinSlices();
-        for (const sid of ['BoundaryDenyTaskExecution', 'BoundaryDenyTaskDefinitionRegistration', 'BoundaryDenyPassRole', 'BoundaryDenyAppRoleMutation']) {
+        for (const sid of ['BoundaryDenyTaskExecution', 'BoundaryDenyTaskDefinitionRegistration', 'BoundaryDenyAppRoleMutation']) {
             expect(sidChunk(boundary, sid), `${sid} missing`).not.toBe('');
         }
+        // No flat pass-role twin (see the scheduler repair suite): the
+        // OffService/OffTarget/OffScheduler trio gates it instead.
+        expect(sidChunk(boundary, 'BoundaryDenyPassRole')).toBe('');
     });
 
     it('matches no pr-* resource on the new statements', () => {
@@ -453,8 +456,8 @@ describe('Preview task-role confinement (BUG-215)', () => {
         const { guardrails, boundary } = twinSlices();
         const guardrailStmts = statementsBySid(guardrails);
         const boundaryStmts = statementsBySid(boundary);
-        // Exact enumeration: 13 identical + 1 asymmetric + 4 no-twin by
-        // design + 4 new. A new Sid without a twin fails here.
+        // Exact enumeration: 16 identical + 1 asymmetric + 4 no-twin by
+        // design + 1 trio-subsumed. A new Sid without a twin fails here.
         const identicalTwins = [
             'DenyComputeAbuse',
             'DenySnapshotSharing',
@@ -471,12 +474,16 @@ describe('Preview task-role confinement (BUG-215)', () => {
             'DenyProdLogDeletion',
             'DenyProdTaskExecution',
             'DenyProdTaskDefinitionRegistration',
-            'DenyProdPassRole',
             'DenyProdAppRoleMutation',
         ];
         const asymmetricTwin = new Map([['DenyIAMBackdoors', 'BoundaryDenyIAM']]);
         const noTwinByDesign = new Set(['DenyCIRoleMutation', 'DenyRoleWithoutBoundary', 'DenyBoundarySwap', 'DenyBoundaryMutation']);
-        expect([...guardrailStmts.keys()].sort()).toEqual([...identicalTwins, ...asymmetricTwin.keys(), ...noTwinByDesign].sort());
+        // DenyProdPassRole has no flat boundary twin: the unconditional
+        // twin denied the scheduler's own PassRole, so the boundary
+        // gates PassRole via the OffService/OffTarget/OffScheduler trio
+        // instead (see the scheduler repair suite).
+        const trioSubsumed = new Set(['DenyProdPassRole']);
+        expect([...guardrailStmts.keys()].sort()).toEqual([...identicalTwins, ...asymmetricTwin.keys(), ...noTwinByDesign, ...trioSubsumed].sort());
         for (const sid of identicalTwins) {
             const twin = boundaryStmts.get(twinSid(sid));
             expect(twin, `${sid} missing boundary twin`).toBeDefined();
@@ -494,7 +501,34 @@ describe('Preview task-role confinement (BUG-215)', () => {
     });
 });
 
-describe('Snapshot guardrails cover pre-deploy names (BUG-205)', () => {
+describe('Scheduler survives the boundary', () => {
+    it('gates boundary PassRole via the Off* trio instead of a flat twin', () => {
+        // The flat BoundaryDenyPassRole twin denied the scheduler's own
+        // PassRole unconditionally, defeating the OffScheduler carve-out
+        // (any Deny wins) — so the trio gates alone now.
+        const { boundary } = twinSlices();
+        expect(sidChunk(boundary, 'BoundaryDenyPassRole')).toBe('');
+        for (const sid of ['BoundaryDenyPassRoleOffService', 'BoundaryDenyPassRoleOffTarget', 'BoundaryDenyProdPassRoleOffScheduler']) {
+            expect(sidChunk(boundary, sid), `${sid} missing`).not.toBe('');
+        }
+    });
+
+    it('exempts the scheduler principal from both RunTask twins', () => {
+        // The bounded scheduler role must RunTask its task definition at
+        // trigger time; every other capped caller stays denied. The
+        // guardrail twin carries the same condition (a no-op there — the
+        // preview role is never the scheduler, which can only be assumed
+        // by the scheduler service) so the twins stay identical.
+        const { guardrails, boundary } = twinSlices();
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdTaskExecution')], ['boundary', sidChunk(boundary, 'BoundaryDenyTaskExecution')]]) {
+            expect(chunk, label).toContain('StringNotEquals');
+            expect(chunk, label).toContain('aws:PrincipalArn');
+            expect(chunk, label).toContain('role/${local.prod_prefix}-cron-scheduler-role');
+        }
+    });
+});
+
+describe('Snapshot guardrails cover pre-deploy names', () => {
     it('denies legacy bare pre-deploy snapshot deletion on both twins', () => {
         const { tf, guardrails, boundary } = twinSlices();
         expect(sidChunk(guardrails, 'DenyProdSnapshotDeletion')).toContain('local.guardrail_snapshot_deletion_resources');

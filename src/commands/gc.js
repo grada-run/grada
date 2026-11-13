@@ -287,7 +287,7 @@ async function discoverOldManualSnapshots({ rdsClient, dbIdentifier, dbClusterId
         .map((id) => id.trim().toLowerCase());
     const patterns = dbIds
         .map((id) => new RegExp(`^${escapeRegExp(id)}-manual-\\d{8}-\\d{6}$`));
-    // BUG-205: the gate's pre-deploy snapshots are per-commit, so without
+    // The gate's pre-deploy snapshots are per-commit, so without
     // a discovery rule they accumulate into the region snapshot quota.
     const predeployPatterns = dbIds
         .map((id) => new RegExp(`^${escapeRegExp(id)}-pre-deploy-[0-9a-f]{7,40}$`));
@@ -589,7 +589,7 @@ export async function deleteDiscoveredResources(clients, discovered) {
         try {
             summary[target.summary] = await target.remove(clients, discovered[target.field] || []);
         } catch (error) {
-            // One target's API failure must not strand the rest (BUG-105):
+            // One target's API failure must not strand the rest:
             // record it, zero its count, and keep deleting.
             errors.push({ target: target.summary, error });
             summary[target.summary] = 0;

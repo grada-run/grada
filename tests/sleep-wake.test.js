@@ -642,7 +642,7 @@ describe('runWake', () => {
         expect(output).toContain('Check your AWS credentials and region');
     });
 
-    // BUG-152: waking during a DB transition (e.g. `stopping`)
+    // Waking during a DB transition (e.g. `stopping`)
     // restored ECS immediately and reported success while the database
     // settled to stopped, never started. Wake must settle → start →
     // wait (mirroring destroy) or fail loud naming the transition.

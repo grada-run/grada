@@ -80,7 +80,7 @@ locals {
   guardrail_snapshot_deletion_resources = [
     "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
     "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
-    # BUG-205: legacy bare pre-deploy-<sha> ids carry no db prefix, so
+    # Legacy bare pre-deploy-<sha> ids carry no db prefix, so
     # they match no prod pattern above — deny them outright. gc never
     # runs under preview credentials, so nothing legitimate needs them.
     "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:pre-deploy-*",
@@ -255,7 +255,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Resource = "*"
       },
       {
-        # BUG-207: the preview role carries IAMFullAccess, so without this
+        # The preview role carries IAMFullAccess, so without this
         # statement it can delete its own guardrails, delete the deploy
         # role, or widen trust in one call. Scoped to the CI role ARNs
         # (not *): preview stacks legitimately manage their own
@@ -325,7 +325,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Resource = local.guardrail_table_deletion_resources
       },
       {
-        # BUG-208: manual snapshots (grada names them
+        # Manual snapshots (grada names them
         # <db-identifier>-manual-<stamp> and
         # <db-identifier>-pre-deploy-<sha>) are directly deletable;
         # automated snapshots can only go away via retention changes or
@@ -353,7 +353,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Resource = local.guardrail_log_deletion_resources
       },
       {
-        # BUG-212: every role preview credentials create must carry the
+        # Every role preview credentials create must carry the
         # boundary — a missing key fails StringNotEquals, so unbounded
         # creation is denied and born-capped roles cannot escalate.
         Sid      = "DenyRoleWithoutBoundary"
@@ -387,7 +387,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         ]
       },
       {
-        # BUG-215: close by target — deny the execution APIs on prod
+        # Close by target — deny the execution APIs on prod
         # ARNs while pr-* stays allowed. No describes: plan.yml
         # refreshes prod state with preview credentials, so describing
         # prod is legitimate traffic.
@@ -395,6 +395,15 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Effect   = "Deny"
         Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService"]
         Resource = local.guardrail_task_execution_resources
+        # The bounded scheduler role must RunTask its task
+        # definition at trigger time. A no-op on this side (the preview
+        # role is never the scheduler, assumable only by the scheduler
+        # service) but kept so the twins stay identical.
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalArn" = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-cron-scheduler-role"
+          }
+        }
       },
       {
         # RegisterTaskDefinition is likely resource-*-only (void half);
@@ -425,7 +434,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
   })
 }
 
-# BUG-212: permissions boundary capping every role preview credentials
+# Permissions boundary capping every role preview credentials
 # can create. The guardrail above denies CreateRole unless the request
 # carries this boundary, so a backdoor role is born capped: its
 # effective permissions are its own policies intersected with this one.
@@ -447,7 +456,7 @@ resource "aws_iam_policy" "preview_boundary" {
         Resource = "*"
       },
       {
-        # BUG-214: capped roles must pass their task roles to ECS (the
+        # Capped roles must pass their task roles to ECS (the
         # scheduler role passes at invocation time), so PassRole is
         # carved out here and re-gated on service + target below.
         # Explicit Action list on purpose: a Deny with NotAction would
@@ -550,6 +559,14 @@ resource "aws_iam_policy" "preview_boundary" {
         Effect   = "Deny"
         Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService"]
         Resource = local.guardrail_task_execution_resources
+        # The bounded scheduler role must RunTask its task
+        # definition at trigger time; every other capped caller stays
+        # denied. Mirrors the twin's condition above.
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalArn" = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-cron-scheduler-role"
+          }
+        }
       },
       {
         Sid      = "BoundaryDenyTaskDefinitionRegistration"
@@ -557,12 +574,10 @@ resource "aws_iam_policy" "preview_boundary" {
         Action   = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"]
         Resource = local.guardrail_task_definition_resources
       },
-      {
-        Sid      = "BoundaryDenyPassRole"
-        Effect   = "Deny"
-        Action   = ["iam:PassRole"]
-        Resource = local.guardrail_app_role_resources
-      },
+      # No flat BoundaryDenyPassRole twin: it denied the scheduler's
+      # own PassRole unconditionally, defeating the OffScheduler
+      # carve-out (any Deny wins). The OffService/OffTarget/
+      # OffScheduler trio below gates PassRole alone.
       {
         Sid      = "BoundaryDenyAppRoleMutation"
         Effect   = "Deny"
@@ -570,7 +585,7 @@ resource "aws_iam_policy" "preview_boundary" {
         Resource = local.guardrail_app_role_resources
       },
       {
-        # BUG-214: carved PassRole may only pass to the ECS tasks
+        # Carved PassRole may only pass to the ECS tasks
         # service (mirrors the scheduler policy's own condition).
         Sid      = "BoundaryDenyPassRoleOffService"
         Effect   = "Deny"

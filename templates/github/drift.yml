@@ -34,7 +34,7 @@ jobs:
       # STS denies a missing role and a trust mismatch with the same
       # message, so the API won't support distinguishing them: every
       # assume failure skips loud (green) with both cases + pointers
-      # named (BUG-199).
+      # named.
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |

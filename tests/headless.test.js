@@ -397,7 +397,7 @@ describe('Headless contract (automation-safe)', () => {
             const deployYml = await fs.readFile(path.join(tmpDir, '.github', 'workflows', 'deploy.yml'), 'utf-8');
             expect(deployYml).toContain('# grada:db-migrate-start');
             expect(deployYml).toContain('alembic upgrade head');
-            // BUG-205: the gate snapshot id is db-scoped, never bare.
+            // The gate snapshot id is db-scoped, never bare.
             expect(deployYml).toMatch(/db backup --id "[a-z0-9-]+-db-pre-deploy-\$\{\{ github\.sha \}\}" --headless/);
             expect(deployYml).not.toContain('--id "pre-deploy-');
             expect(trackEvent).toHaveBeenCalledWith(
@@ -437,7 +437,7 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
-    // BUG-158: re-init kept an existing drift.yml with zero output —
+    // Re-init kept an existing drift.yml with zero output —
     // now the old file is backed up and a fresh one scaffolded.
     it('regenerates drift.yml on re-init instead of silently keeping it', async () => {
         process.chdir(tmpDir);
@@ -449,7 +449,7 @@ describe('Headless contract (automation-safe)', () => {
         expect(entries.some((entry) => entry.startsWith('drift.yml.bak.'))).toBe(true);
     });
 
-    // BUG-158: on a rename, carried-over workflows must not linger
+    // On a rename, carried-over workflows must not linger
     // referencing the OLD project — re-init backs them up loudly and
     // regenerates (or baks) every in-place file.
     it('backs up carried-over workflows on rename instead of leaving them stale', async () => {
@@ -1787,7 +1787,7 @@ describe('resolveOidcTrust', () => {
         expect(logged.join('\n')).toContain('repo:*');
     });
 
-    it('resolves our own canonical dual-branch trust back to both branches (BUG-209)', async () => {
+    it('resolves our own canonical dual-branch trust back to both branches', async () => {
         const result = await resolveOidcTrust({
             ...base,
             treeClaim: {
@@ -1949,7 +1949,7 @@ describe('resolveOidcTrust', () => {
         });
     });
 
-    it('renderOidcRoleSubs trusts both branches when they differ (BUG-209)', () => {
+    it('renderOidcRoleSubs trusts both branches when they differ', () => {
         // Same branch: byte-identical to the two-arg form (zero churn).
         expect(renderOidcRoleSubs('repo:acme/widgets:*', 'main', 'main')).toEqual(
             renderOidcRoleSubs('repo:acme/widgets:*', 'main')
@@ -1966,7 +1966,7 @@ describe('resolveOidcTrust', () => {
         expect(renderOidcRoleSubs('repo:*', 'develop', 'main')).toEqual(renderOidcRoleSubs('repo:*', 'main'));
     });
 
-    it('resolveDefaultBranch parses origin/HEAD with deploy-branch fallback (BUG-209)', () => {
+    it('resolveDefaultBranch parses origin/HEAD with deploy-branch fallback', () => {
         const run = (stdout) => resolveDefaultBranch('/tmp/x', 'develop', () => Buffer.from(stdout));
         expect(run('origin/main\n')).toBe('main');
         expect(run('origin/feature/foo\n')).toBe('feature/foo');
@@ -1991,7 +1991,7 @@ describe('resolveOidcTrust', () => {
     });
 });
 
-describe('Headless: undetectable-framework default (BUG-211)', () => {
+describe('Headless: undetectable-framework default', () => {
     let tmpDir;
 
     beforeEach(async () => {

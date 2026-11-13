@@ -33,7 +33,7 @@ describe('revision-discovery seam', () => {
         expect(command.input).toMatchObject({ familyPrefix: 'myapp-task', status: 'ACTIVE', sort: 'DESC' });
     });
 
-    // BUG-175: a single 10-ARN page reports "no previous revisions"
+    // A single 10-ARN page reports "no previous revisions"
     // when the service is >10 behind head — follow nextToken (capped).
     it('ecs adapter paginates past the first page', async () => {
         const send = vi.fn(async (command) => {

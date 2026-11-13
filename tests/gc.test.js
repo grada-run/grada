@@ -591,7 +591,7 @@ describe('gc: manual snapshot retirement', () => {
         expect(result.totalCount).toBe(2 + result.untaggedImages.length + result.orphanedLogGroups.length + result.unattachedEips.length);
     });
 
-    it('proposes db-scoped pre-deploy snapshots past the age threshold (BUG-205)', async () => {
+    it('proposes db-scoped pre-deploy snapshots past the age threshold', async () => {
         const rdsSend = vi.fn(async (cmd) => {
             if (cmd instanceof MockDescribeDBSnapshotsCommand) {
                 return {
@@ -618,7 +618,7 @@ describe('gc: manual snapshot retirement', () => {
         ]);
     });
 
-    it('adopts legacy bare pre-deploy snapshots only with matching source db (BUG-205)', async () => {
+    it('adopts legacy bare pre-deploy snapshots only with matching source db', async () => {
         const rdsSend = vi.fn(async (cmd) => {
             if (cmd instanceof MockDescribeDBSnapshotsCommand) {
                 return {

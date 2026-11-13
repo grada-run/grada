@@ -178,7 +178,7 @@ async function runRollbackMain(input = {}) {
         let targetTaskDefArn;
         let targetRevisionNum;
         // Case A only: the requested web revision's image, for worker
-        // pairing (BUG-153). Null in Case B and when undescribable.
+        // pairing. Null in Case B and when undescribable.
         let requestedWebImage = null;
 
         if (options.revision !== undefined && options.revision !== null && String(options.revision).trim() !== '') {
@@ -236,7 +236,7 @@ async function runRollbackMain(input = {}) {
                     exitCode: 1,
                 });
             }
-            // BUG-127: a NEWER explicit revision would silently
+            // A NEWER explicit revision would silently
             // roll FORWARD — rollback only moves to older revisions.
             if (Number.isInteger(Number(targetRevisionNum)) && Number.isInteger(currentRevNum)
                 && Number(targetRevisionNum) > currentRevNum) {
@@ -322,7 +322,7 @@ async function runRollbackMain(input = {}) {
             }
         }
 
-        // 1b. Worker rollback (BUG-85): deploys advance web AND worker,
+        // 1b. Worker rollback: deploys advance web AND worker,
         // so a rollback must move both — otherwise the worker keeps the bad
         // image. Explicit --service keeps single-service semantics (the
         // escape hatch); workerless trees (no worker.tf) skip. Resolved
@@ -352,7 +352,7 @@ async function runRollbackMain(input = {}) {
                         exitCode: 1,
                     });
                 }
-                // BUG-153: in Case A the worker target pairs with the
+                // In Case A the worker target pairs with the
                 // REQUESTED web image (deploys pin both to the same SHA) —
                 // newest-previous regardless would skew the pairing. When
                 // no eligible worker revision carries the web image, fall

@@ -272,7 +272,7 @@ async function runDbConnectMain(input = {}) {
         });
 
         // Node reports signal death as code null — a killed tunnel is a
-        // failure naming the signal, never `?? 0` success (BUG-149).
+        // failure naming the signal, never `?? 0` success.
         const { code, signal } = await new Promise((resolve) => {
             const child = spawnImpl('aws', ssmArgs, { stdio: 'inherit' });
             child.on('error', (err) => {
@@ -288,7 +288,7 @@ async function runDbConnectMain(input = {}) {
         // Telemetry carries only non-sensitive fields. Credentials never leave this process
         // except to the terminal above and the local SSM session below.
         // Success is recorded only for a clean tunnel exit: a failed tunnel
-        // reports the tunnel's own exit code instead of ok:true (BUG-103).
+        // reports the tunnel's own exit code instead of ok:true.
         if (code !== 0) {
             const tunnelCode = Number.isInteger(code) && code > 0 ? Math.min(code, 255) : 1;
             return failCommand({

@@ -53,7 +53,7 @@ describe('github workflow templates', () => {
         for (const filename of ['deploy.yml', 'deploy-lambda.yml']) {
             const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
             // Same lookup convention as the static workflow: the distro
-            // carries comment "${local.app_name}-cdn" (BUG-82).
+            // carries comment "${local.app_name}-cdn".
             expect(raw).toContain('CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn');
             expect(raw).toContain('- name: Invalidate CloudFront');
             expect(raw).toContain('aws cloudfront create-invalidation');
@@ -61,7 +61,7 @@ describe('github workflow templates', () => {
         }
     });
 
-    // BUG-195: tasks must never start on an unpushed tag — the image
+    // Tasks must never start on an unpushed tag — the image
     // is built and pushed before `terraform apply` moves anything, with
     // a targeted repo bootstrap (the repo itself is TF-managed) and
     // job-level AWS credentials (previously only grada-action had them).
@@ -78,7 +78,7 @@ describe('github workflow templates', () => {
         expect(apply).toBeGreaterThan(push);
     });
 
-    // BUG-150: `update-service` returns before the rollout finishes —
+    // `update-service` returns before the rollout finishes —
     // wait for stability and verify the PRIMARY deployment actually
     // runs the registered revision (a breaker rollback re-stabilizes on
     // the OLD revision, which the wait alone would report green).
@@ -120,7 +120,7 @@ describe('github workflow templates', () => {
         expect(steps.some((s) => s?.name === 'Preview Database Migration')).toBe(true);
     });
 
-    // BUG-140: fork PRs must never obtain the admin CI role. Preview
+    // Fork PRs must never obtain the admin CI role. Preview
     // and teardown run on pull_request_target (file from base, so the
     // guard below is attacker-immutable), check out the PR head SHA
     // explicitly, and run privileged steps same-repo-only.
@@ -136,7 +136,7 @@ describe('github workflow templates', () => {
         expect(notice, `${filename} must loudly skip fork PRs`).toBeDefined();
     });
 
-    // BUG-138/199: STS denies a missing role and a trust mismatch with
+    // STS denies a missing role and a trust mismatch with
     // the same message, so the API won't support distinguishing them:
     // every assume failure on a skippable workflow skips loud (green)
     // with both cases + pointers named. No error-text grep (it can never
@@ -160,7 +160,7 @@ describe('github workflow templates', () => {
         expect(raw).toContain("steps.aws-creds.outcome == 'success'");
     });
 
-    // BUG-189: hand-rolled terraform without -input=false hangs on
+    // Hand-rolled terraform without -input=false hangs on
     // prompts, and no job has a timeout — a stuck apply bills the
     // runner forever.
     it('pins -input=false on every raw terraform apply/destroy/plan/init', () => {
@@ -184,7 +184,7 @@ describe('github workflow templates', () => {
         }
     });
 
-    // BUG-190: every preview push appends a new PR comment (noise), and
+    // Every preview push appends a new PR comment (noise), and
     // a failed preview leaves the last green URL standing as truth.
     it.each(['preview.yml', 'preview-lambda.yml'])('%s keeps one sticky comment and reports failures', (filename) => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
@@ -193,21 +193,21 @@ describe('github workflow templates', () => {
         expect(raw).toContain('if: failure()');
     });
 
-    // BUG-192: the Push step echoes an output no step id exposes.
+    // The Push step echoes an output no step id exposes.
     it.each(['deploy.yml', 'deploy-lambda.yml'])('%s exposes the pushed image via a step id', (filename) => {
         const doc = parseTemplate(filename);
         const push = doc.jobs.deploy.steps.find((s) => s?.name === 'Push image to Amazon ECR');
         expect(push?.id, `${filename} push step id`).toBeTruthy();
     });
 
-    // BUG-193: the scan step claims SARIF output but emits a table.
+    // The scan step claims SARIF output but emits a table.
     it.each(['deploy.yml', 'deploy-lambda.yml'])('%s labels the container scan honestly', (filename) => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
         expect(raw).not.toContain('SARIF');
         expect(raw).toContain('Scan Container for Vulnerabilities (table summary)');
     });
 
-    // BUG-194: cancelling mid-apply strands the S3 lockfile with no
+    // Cancelling mid-apply strands the S3 lockfile with no
     // recovery pointer — annotate every apply/destroy workflow.
     it.each(['deploy.yml', 'deploy-lambda.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml'])('%s annotates cancellation recovery', (filename) => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
@@ -226,7 +226,7 @@ describe('github workflow templates', () => {
         }
     });
 
-    // BUG-201: the static deploy missed the attempt-and-interpret
+    // The static deploy missed the attempt-and-interpret
     // rollout — it fails raw on an absent stack. Same deploy-side
     // shape as deploy.yml: job-level assume + fail loud with the
     // bootstrap pointer naming the missing role.
@@ -240,7 +240,7 @@ describe('github workflow templates', () => {
         expect(raw).not.toContain("steps.aws-creds.outcome == 'success'");
     });
 
-    // BUG-141: preview DBs carry deletion protection and `terraform
+    // Preview DBs carry deletion protection and `terraform
     // destroy` never applies var updates, so teardown lifts protection
     // out-of-band (instance + cluster) before destroying.
     it('teardown.yml lifts preview deletion protection before destroy', () => {
@@ -256,7 +256,7 @@ describe('github workflow templates', () => {
         expect(raw.indexOf('modify-db-instance')).toBeLessThan(raw.indexOf('terraform destroy -auto-approve'));
     });
 
-    // BUG-173: previews rebuild and redeploy but never invalidate —
+    // Previews rebuild and redeploy but never invalidate —
     // every push re-caches stale HTML until TTL expiry.
     it.each(['preview.yml', 'preview-lambda.yml'])('%s invalidates its preview distribution after deploy', (filename) => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
@@ -270,7 +270,7 @@ describe('github workflow templates', () => {
         expect(comment).toBeGreaterThan(invalidate);
     });
 
-    // BUG-154: teardown shares preview's cancellable group, so reopening
+    // Teardown shares preview's cancellable group, so reopening
     // a PR cancels the in-flight destroy. Separate group + lock timeouts
     // (the state lock now serializes the destroy/apply race instead).
     it('teardown runs in its own non-cancellable group', () => {
@@ -284,7 +284,7 @@ describe('github workflow templates', () => {
         expect(teardown).toContain('-lock-timeout=');
     });
 
-    // BUG-155: the drift plan step exits 0 on every path (exit 1 errors
+    // The drift plan step exits 0 on every path (exit 1 errors
     // go green and silent) — errors must fail the run and file an issue.
     it('drift.yml fails loud on plan errors', () => {
         const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'drift.yml'), 'utf8');
@@ -296,7 +296,7 @@ describe('github workflow templates', () => {
 
     it('plan.yml gates PR plans behind the same-repo guard with a fork notice', () => {
         const doc = parseTemplate('plan.yml');
-        expect(doc.on.pull_request, 'plan.yml must not trigger on pull_request (BUG-140)').toBeUndefined();
+        expect(doc.on.pull_request, 'plan.yml must not trigger on pull_request').toBeUndefined();
         expect(doc.on.pull_request_target.types).toEqual(['opened', 'synchronize', 'reopened']);
         expect(doc.on.pull_request_target.paths).toEqual(['terraform/**']);
         expect(doc.permissions).toMatchObject({ 'id-token': 'write', contents: 'read', 'pull-requests': 'write' });
@@ -445,7 +445,7 @@ describe('github workflow templates', () => {
             });
         }
         const teardown = parseTemplate('teardown.yml');
-        // Own group (BUG-154): sharing preview's group let a reopen
+        // Own group: sharing preview's group let a reopen
         // cancel the in-flight destroy.
         expect(teardown.concurrency.group).toBe('teardown-${{ github.event.pull_request.number }}');
         expect(teardown.concurrency, 'teardown must run to completion, never cancel').not.toHaveProperty('cancel-in-progress');

@@ -123,7 +123,7 @@ export async function handleDestroyTerraformError({ options, tfDirPath, attemptD
         return namedFail('STATE_LOCK_HELD');
     }
 
-    // BUG-210: a drained bucket can still report versions when terraform
+    // A drained bucket can still report versions when terraform
     // runs (S3 empty-visibility race). Settle briefly, then retry the
     // destroy exactly once — a second BucketNotEmpty is terminal.
     if (code === 'BUCKET_NOT_EMPTY') {
@@ -447,11 +447,11 @@ async function destroyStackMain(input = {}) {
         }
         // Wait for the snapshot to reach `available` before touching the
         // database: deleting while it is still `creating` races snapshot
-        // completion on large DBs (BUG-98). A failed snapshot or a timeout
+        // completion on large DBs. A failed snapshot or a timeout
         // refuses the destroy — re-run with --allow-data-loss to skip.
         // Re-message (never re-start): the phase spinner is already
         // running, and a second start leaks clack's first interval so the
-        // session never exits (BUG-198).
+        // session never exits.
         s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete...`));
         const snapshotReady = await pollUntil({
             intervalMs: pollIntervalMs,
@@ -477,7 +477,7 @@ async function destroyStackMain(input = {}) {
                 if (status === 'failed' || status === 'deleted') {
                     return { done: true, value: { failed: true, reason: `snapshot ${status}` } };
                 }
-                // BUG-196: surface PercentProgress while creating so long
+                // Surface PercentProgress while creating so long
                 // snapshots don't look wedged.
                 const detail = typeof percent === 'number' ? `${status || 'pending'} (${percent}% complete)` : (status || 'pending');
                 s.message(truncateSpinnerText(`Waiting for snapshot ${snapshotId} to complete... (${detail})`));
@@ -613,7 +613,7 @@ async function destroyStackMain(input = {}) {
                     resultExtra: { region },
                 });
             }
-            // BUG-210: versioned deletes can lag S3's empty-reads, so
+            // Versioned deletes can lag S3's empty-reads, so
             // verify each drained bucket reads empty before terraform
             // destroy runs — otherwise destroy flakes on BucketNotEmpty.
             // A bucket deleted out-of-band counts as empty.
@@ -690,7 +690,7 @@ async function destroyStackMain(input = {}) {
             });
             if (refused) return refused;
         }
-        // BUG-198: "spin this back up" overstated recovery — apply
+        // "spin this back up" overstated recovery — apply
         // recreates compute, never the destroyed database. Name the
         // snapshot (or its absence) so the choice is informed.
         const dbRecoveryNote = snapshotReadyId

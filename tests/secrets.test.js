@@ -257,7 +257,7 @@ describe('Secrets Push Command', () => {
         expect(result).toEqual(expect.objectContaining({ keysChanged: false, restarted: true }));
     });
 
-    // BUG-161: the ECS restart runs after the vault update — its
+    // The ECS restart runs after the vault update — its
     // failure must not masquerade as a failed push.
     it('reports the vault as updated when the ECS restart fails', async () => {
         await fs.writeFile('.env', 'API_KEY=newvalue\nDB_PASS=newsecret');
@@ -367,7 +367,7 @@ describe('Secrets Push Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-143: dotenv silently drops lines it cannot parse (and
+    // Dotenv silently drops lines it cannot parse (and
     // last-wins duplicates) while push reports success — name them.
     it('warns naming unparseable .env lines and duplicate keys', async () => {
         await fs.writeFile('.env', 'KEEP=yes\nFOO:BAR=x\nA=1\nA=2\nJUSTKEY\n');
@@ -391,7 +391,7 @@ describe('Secrets Push Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-144: push reads the vault, possibly waits on a confirm
+    // Push reads the vault, possibly waits on a confirm
     // unboundedly, then full-replaces from the stale read — a second
     // writer's keys are silently lost. Re-read before writing; abort
     // when the payload moved.
@@ -419,7 +419,7 @@ describe('Secrets Push Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-145: a binary vault reads as "empty" (no SecretString), so
+    // A binary vault reads as "empty" (no SecretString), so
     // push skips the removal confirm and full-replaces it away.
     it('refuses push against a binary vault payload', async () => {
         await fs.writeFile('.env', 'A=1');
@@ -440,7 +440,7 @@ describe('Secrets Push Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-159: a non-object vault payload yields phantom BUG-80
+    // A non-object vault payload yields phantom
     // removals (`0,1`) or a TypeError crash — refuse naming the shape.
     it.each([
         ['[1,2]', 'array'],
@@ -462,7 +462,7 @@ describe('Secrets Push Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-160: push rewrote secret_keys.json on every run even when
+    // Push rewrote secret_keys.json on every run even when
     // keys were unchanged — dirtying `git status` for no reason.
     it('skips rewriting secret_keys.json when keys are byte-identical', async () => {
         await fs.writeFile('.env', 'A=1');
@@ -477,7 +477,7 @@ describe('Secrets Push Command', () => {
         expect((await fs.stat(keysPath)).mtimeMs).toBe(past.getTime());
     });
 
-    // BUG-161: the keys-file write lands after the vault update, so its
+    // The keys-file write lands after the vault update, so its
     // failure must report the vault as updated (with the recovery step),
     // not as a failed push.
     it('reports the vault as updated when the keys-file write fails', async () => {
@@ -494,7 +494,7 @@ describe('Secrets Push Command', () => {
         exitSpy.mockRestore();
     });
 
-    // BUG-162: the vault name fell back to the directory basename, so a
+    // The vault name fell back to the directory basename, so a
     // renamed directory silently aimed at a missing vault — the
     // terraform project name (what provisioned the vault) wins.
     it('resolves the vault from the terraform project name when no name is passed', async () => {
@@ -633,7 +633,7 @@ describe('Secrets Pull Command', () => {
         mockSend.mockResolvedValue({});
     });
 
-    // BUG-145/159: pull must refuse binary and non-object vault
+    // Pull must refuse binary and non-object vault
     // payloads instead of syncing 0 secrets / materializing garbage.
     it.each([
         [{ SecretBinary: 'aGVsbG8=' }, 'binary'],
@@ -653,7 +653,7 @@ describe('Secrets Pull Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-161: pull's overwrite-append revives locally deleted keys
+    // Pull's overwrite-append revives locally deleted keys
     // silently — name what came back.
     it('names revived keys appended by pull', async () => {
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ KEPT: 'remote', REVIVED: 'back' }) });
@@ -668,7 +668,7 @@ describe('Secrets Pull Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-160: pull rewrote .env on every run (dotenv.parse stripping
+    // Pull rewrote .env on every run (dotenv.parse stripping
     // comments/formatting) even when nothing changed.
     it('leaves .env untouched when pull is already in sync', async () => {
         mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ A: '1' }) });
@@ -683,7 +683,7 @@ describe('Secrets Pull Command', () => {
         expect(await fs.readFile('.env', 'utf-8')).toBe('A="1"\n');
     });
 
-    // BUG-160 remainder: byte comparison always differs on commented
+    // Byte comparison always differs on commented
     // files (serializeEnv emits canonical lines), so compare parsed
     // content — an in-sync commented file must keep its comments.
     it('leaves a commented .env untouched when pull is semantically in sync', async () => {
@@ -709,7 +709,7 @@ describe('Secrets Pull Command', () => {
         expect(await fs.readFile('.env', 'utf-8')).toBe('A="2"\n');
     });
 
-    // BUG-160: the unrepresentable check ranged over every key incl.
+    // The unrepresentable check ranged over every key incl.
     // local-only ones, so a local-only exotic value blocked unrelated
     // syncs. Only added/overwritten keys can block the write.
     it('does not let local-only exotic values block pull', async () => {
@@ -871,7 +871,7 @@ describe('Secrets Audit Command', () => {
         consoleSpy.mockRestore();
     });
 
-    // BUG-145/159: audit must refuse binary and non-object vault
+    // Audit must refuse binary and non-object vault
     // payloads instead of reporting every local key untracked.
     it.each([
         [{ SecretBinary: 'aGVsbG8=' }, 'binary'],
@@ -988,7 +988,7 @@ describe('Secrets Region Resolution', () => {
         expect(await resolveSecretsRegion({})).toBe('us-east-2');
     });
 
-    // BUG-164: the backend.tf region regex matched inside comment
+    // The backend.tf region regex matched inside comment
     // lines — comments must never resolve the vault region.
     it('ignores commented region lines in backend.tf', async () => {
         await fs.writeFile(path.join('terraform', 'backend.tf'), '# region = "eu-dead-1"\nregion = "eu-west-1"\n');
@@ -1279,7 +1279,7 @@ describe('Secrets Pull round-trip', () => {
     });
 });
 
-describe('Secrets managed-env helpers (BUG-79)', () => {
+describe('Secrets managed-env helpers', () => {
     const originalCwd = process.cwd();
     const testDir = path.join(originalCwd, 'tests', '.tmp-secrets-managed-env');
 
@@ -1295,7 +1295,7 @@ describe('Secrets managed-env helpers (BUG-79)', () => {
     });
 
     it('returns the target base set when no database or addon files exist', async () => {
-        // Workerless ECS trees inject no NODE_ENV (BUG-95): it stays a
+        // Workerless ECS trees inject no NODE_ENV: it stays a
         // legitimate custom key, not a managed name.
         await expect(getManagedEnvNames(testDir, 'ecs')).resolves.toEqual(['PORT']);
         await expect(getManagedEnvNames(testDir, 'lambda')).resolves.toEqual(['APP_SECRETS_ARN', 'AWS_LWA_PORT', 'PORT']);
@@ -1361,7 +1361,7 @@ describe('Secrets managed-env helpers (BUG-79)', () => {
     });
 });
 
-describe('Secrets Push guards (BUG-79/BUG-80)', () => {
+describe('Secrets Push guards', () => {
     const originalCwd = process.cwd();
     const testDir = path.join(originalCwd, 'tests', '.tmp-secrets-guards');
     let savedCi;

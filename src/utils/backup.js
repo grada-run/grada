@@ -32,7 +32,7 @@ function collectManifestFiles(targetDir) {
     // Preview/teardown/drift carry project names + role ARNs and invite
     // hand edits like deploy.yml — manifest them so re-init refuses
     // dirty trees and backs them up instead of silently overwriting or
-    // leaving them stale (BUG-158).
+    // leaving them stale.
     for (const rel of ['Dockerfile', 'preview.yml', 'teardown.yml', 'drift.yml', 'plan.yml'].map((name) => (
         name === 'Dockerfile' ? name : path.join('.github', 'workflows', name)
     ))) {

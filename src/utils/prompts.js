@@ -90,7 +90,7 @@ export async function getProjectConfig(isHeadless, headlessOptions, targetDir, d
     const skipsContainerSizing = hints && typeof hints === 'object'
         && (hints.target === 'lambda' || hints.target === 'static');
     if (isHeadless) {
-        // BUG-211: an undetectable framework with a package.json present is
+        // An undetectable framework with a package.json present is
         // a plain-Node project, not a static site — defaulting to 'static'
         // renders an nginx Dockerfile that can neither build scriptless
         // projects nor run node payloads. No package.json keeps 'static'.

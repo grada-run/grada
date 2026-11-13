@@ -149,7 +149,7 @@ describe('Command: status (mocked ECS + CloudWatch)', () => {
         }
     });
 
-    // BUG-151: the alarm query used the raw project prefix, merging
+    // The alarm query used the raw project prefix, merging
     // prod + preview alarms into one verdict — it must use the same
     // namespaced stem as cluster/service/logGroup.
     it('queries alarms with the namespaced stem prefix', async () => {

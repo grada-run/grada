@@ -221,7 +221,7 @@ async function runWakeMain(input = {}) {
             // both must reach the main flow, never the already-awake
             // skip. Every other status (available, starting, …) is
             // started or self-resolving, so there is nothing for wake
-            // to do (BUG-152).
+            // to do.
             const dbAwake = !foundDb || (foundDb.status !== 'stopped' && foundDb.status !== 'stopping');
             if (servicesAwake && dbAwake) {
                 return reportSleepWakeSkip({
@@ -258,7 +258,7 @@ async function runWakeMain(input = {}) {
             // A transitional database (stopping/starting/…) can neither
             // start nor serve: settle first (mirroring destroy), then
             // start when it lands on `stopped`. Never restore ECS +
-            // report success over an unsettled database (BUG-152).
+            // report success over an unsettled database.
             if (dbTarget && dbTarget.status !== 'stopped' && dbTarget.status !== 'available') {
                 const transitional = dbTarget.status;
                 const isCluster = dbTarget.kind === 'cluster';

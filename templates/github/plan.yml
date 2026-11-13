@@ -3,7 +3,7 @@ name: Terraform Plan on PR
 on:
   # pull_request_target (not pull_request): this file comes from the base
   # branch, so a fork PR cannot delete the same-repo guard below to reach
-  # the privileged CI roles (BUG-140). The PR head is checked out explicitly by
+  # the privileged CI roles. The PR head is checked out explicitly by
   # SHA in the guarded step instead.
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -53,7 +53,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # Plan-on-PR is a merge signal: a failed assume fails the run with
-      # the bootstrap pointer (deploy shape, BUG-138) — never green-silent.
+      # the bootstrap pointer (deploy shape) — never green-silent.
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |

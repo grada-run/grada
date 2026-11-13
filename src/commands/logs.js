@@ -117,7 +117,7 @@ function eventKey(event) {
 
 // Fetches the most recent matching events from a log group.
 // FilterLogEvents pages oldest-first, so slicing the first page shows the
-// OLDEST N on groups larger than one page (BUG-87). This probes with a
+// OLDEST N on groups larger than one page. This probes with a
 // small page (cheap when the group fits), and only multi-page groups pay
 // for a wide-page scan to the live edge; a rolling window keeps memory
 // O(tail). Returns `{ events, nextToken }` — the trailing window plus the
@@ -195,7 +195,7 @@ async function runLogsMain(input = {}) {
     try {
         cwd = resolveCwd(options);
         region = resolveRegion(options, cwd);
-        // Workspace-namespaced resources (BUG-90): --workspace (or the
+        // Workspace-namespaced resources: --workspace (or the
         // local .terraform/environment) targets a preview stack like
         // rollback and db do. Explicit flags/env keep winning.
         const namespacedOptions = withWorkspaceNamespace(options, cwd);
@@ -212,7 +212,7 @@ async function runLogsMain(input = {}) {
     const isLambda = isComputeTarget(cwd, 'lambda');
     const explicitService = hasExplicitService(options) && !isLambda;
 
-    // Explicit garbage fails loud (BUG-107): silently substituting defaults
+    // Explicit garbage fails loud: silently substituting defaults
     // for a mistyped --tail/--since shows logs the user never asked for.
     // Absent flags still default via the normalizers below.
     const rawTail = options.tail ?? options.tailLines ?? options.lines;

@@ -262,7 +262,7 @@ async function runDiagnoseMain(input = {}) {
         cwd = resolveCwd(options);
         projectName = resolveProjectName(options, cwd);
         region = resolveRegion(options, cwd);
-        // Workspace-namespaced resources (BUG-90): --workspace (or the
+        // Workspace-namespaced resources: --workspace (or the
         // local .terraform/environment) targets a preview stack like
         // rollback and db do. Explicit flags/env keep winning; telemetry
         // keeps the raw project name.

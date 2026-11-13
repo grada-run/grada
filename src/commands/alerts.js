@@ -187,7 +187,7 @@ export function buildAlertsTf({ projectName, target = 'ecs', email, webhook, thr
     const defaults = ALERT_TARGET_DEFAULTS[target] || ALERT_TARGET_DEFAULTS.ecs;
     const limit = threshold ?? defaults.threshold;
     // All targets use the workspace-aware local: flat ECS names let a
-    // preview apply clobber the prod alarm (BUG-132). Existing trees
+    // preview apply clobber the prod alarm. Existing trees
     // migrate on the next `grada alerts` + apply (topic/alarm recreate).
     const namePrefix = '${local.app_name}';
     const aliasLine = target === 'static' ? '  provider = aws.us_east_1\n' : '';

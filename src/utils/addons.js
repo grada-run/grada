@@ -83,7 +83,7 @@ export const ADDON_REGISTRY = {
 export const ADDON_TARGET_POLICY = {
     // Static trees have no task role or VPC: every one of these renders
     // a dangling aws_iam_role.task_role / aws_vpc reference on static
-    // (BUG-157) — refuse fast instead of emitting unplannable TF.
+    // Refuse fast instead of emitting unplannable TF.
     'storage:s3': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
     'db:dynamodb': { ecs: 'allow', lambda: 'allow', static: 'refuse' },
     'db:redis': { ecs: 'allow', lambda: 'allow', static: 'refuse' },

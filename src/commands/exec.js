@@ -109,7 +109,7 @@ async function runExecMain(input = {}) {
         cwd = resolveCwd(options);
         region = resolveRegion(options, cwd);
         projectName = resolveProjectName(options, cwd);
-        // Workspace-namespaced resources (BUG-90): --workspace (or the
+        // Workspace-namespaced resources: --workspace (or the
         // local .terraform/environment) targets a preview stack like
         // rollback and db do — exec into a preview must not land in
         // production. Explicit flags/env keep winning.

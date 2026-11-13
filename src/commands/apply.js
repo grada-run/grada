@@ -492,7 +492,7 @@ async function applyStackMain(input = {}) {
         if (!sleepGuard.proceed) return sleepGuard.result;
     }
 
-    // 1d. Preflight secret/env collisions (BUG-81): stale,
+    // 1d. Preflight secret/env collisions: stale,
     // confirmed-through, or hand-edited keys files would die late on
     // the raw ECS 400 — fail here naming the key and the fix. ECS-only
     // (Lambda maps no secrets into env), unconditional (a collision is
@@ -671,7 +671,7 @@ async function applyStackMain(input = {}) {
         if (cfUrl) finalMessage += `\n  🌍 App URL: ${color.cyan(cfUrl)} ${color.dim('(global CDN — share this link)')}`;
         // The origin only answers CloudFront (listener rule 403s direct
         // hits without the origin-secret header) — label the URL as
-        // unreachable instead of a working bypass (BUG-136).
+        // unreachable instead of a working bypass.
         if (albUrl) finalMessage += `\n  🚦 Direct URL: ${color.gray(albUrl)} ${color.dim('(CloudFront-only origin — direct hits 403)')}`;
         // Lambda stacks have no CDN: without a CloudFront URL the API
         // URL is the primary link, not a debug bypass.

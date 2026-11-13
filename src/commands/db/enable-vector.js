@@ -322,7 +322,7 @@ async function runDbEnableVectorMain(input = {}) {
         const exitCode = outcome.exitCode;
         const stoppedReason = outcome.stoppedReason;
         if (exitCode === 0) {
-            // Owner pairs its own start/stop (see migrate.js BUG-202).
+            // Owner pairs its own start/stop: a callee must never stop its caller's spinner.
             try { s.stop(color.green('pgvector extension enabled.')); } catch { /* already stopped */ }
             console.log(color.green('\n✅ pgvector extension enabled.'));
             try {

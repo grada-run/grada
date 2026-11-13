@@ -5,7 +5,7 @@ resource "aws_secretsmanager_secret" "app_secrets" {
   count       = terraform.workspace == "default" ? 1 : 0
   name        = "{{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-secrets"
   description = "Environment variables for {{PROJECT_NAME}}"
-  # 30-day recovery (BUG-163): an instant-delete vault turns any destroy
+  # 30-day recovery: an instant-delete vault turns any destroy
   # bug into unrecoverable secret loss. Lower per-tree if you must.
   recovery_window_in_days = 30
 }

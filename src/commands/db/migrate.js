@@ -101,7 +101,7 @@ function renderGateBlock({ includeSetupNode, steps }) {
         lines.push(
             `      - name: ${stepName}`,
             // Gates run AWS calls: honor the credential-skip outcome like
-            // every other post-assume step (BUG-138). Neutral on deploy
+            // every other post-assume step. Neutral on deploy
             // (a failed assume fails the run before any gate runs).
             `        if: steps.aws-creds.outcome == 'success'`,
             '        run: |',
@@ -147,7 +147,7 @@ function injectGateBlock(content, { steps, anchor }) {
 // Idempotently injects (or refreshes) the migration gate block into a
 // deploy.yml document. Returns the updated content, or null when neither
 // anchor step is present. Pure and unit-tested. The snapshot id embeds
-// the database identifier (BUG-205): bare pre-deploy-<sha> ids match no
+// the database identifier: bare pre-deploy-<sha> ids match no
 // guardrail or gc name pattern, so they were never protected or retired.
 export function injectMigrationGate(workflowContent, { cmd, cliVersion, dbIdentifier } = {}) {
     if (typeof dbIdentifier !== 'string' || dbIdentifier.trim() === '') {
@@ -297,7 +297,7 @@ async function runDbMigrateMain(input = {}) {
 
     // 2. --setup-ci: patch the workflow file, no AWS calls.
     if (setupCi) {
-        // BUG-191: the gate runs migrations as an ephemeral ECS task —
+        // The gate runs migrations as an ephemeral ECS task —
         // refuse on lambda/static (no ECS to run on). Init auto-skips
         // with a warning; this explicit command fails closed.
         const setupTarget = readTerraformComputeTarget(cwd);
@@ -328,12 +328,13 @@ async function runDbMigrateMain(input = {}) {
                 resultExtra: { cluster, service, region },
             });
         }
-        // BUG-205: the gate always targets production (deploy.yml), so
+        // The gate always targets production (deploy.yml), so
         // resolve the prod db id even with a preview workspace checked
         // out locally. Aurora needs the cluster prefix: cluster
         // snapshots named with the instance prefix would miss the
         // cluster-snapshot guardrail pattern.
-        const setupDbResolver = readTerraformDbKind(cwd) === 'cluster' ? resolveDbClusterIdentifier : resolveDbIdentifier;
+        const setupDbKind = readTerraformDbKind(cwd);
+        const setupDbResolver = setupDbKind === 'cluster' ? resolveDbClusterIdentifier : resolveDbIdentifier;
         const setupDbIdentifier = setupDbResolver({ projectName, workspace: 'default' }, cwd);
         const updated = injectMigrationGate(workflowContent, { cmd: resolvedCmd, cliVersion: getCliVersion(), dbIdentifier: setupDbIdentifier });
         if (updated === null) {
@@ -367,7 +368,7 @@ async function runDbMigrateMain(input = {}) {
                 }
             }
         }
-        await trackSuccess('db_migrate_run', { projectName, cmd_source: cmdSource, ci_setup: true });
+        await trackSuccess('db_migrate_run', { projectName, cmd_source: cmdSource, ci_setup: true, db_kind: setupDbKind });
         outro(color.green('Setup complete.'));
         return { ok: true, ciSetup: true, workflowFile, cmdSource };
     }

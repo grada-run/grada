@@ -7,7 +7,7 @@
 # chosen model in the AWS Bedrock console first.
 
 # --- Least-Privilege IAM Policy for the ECS Task Role ---
-# Scoped to the chosen model in the deploy region (BUG-102): the
+# Scoped to the chosen model in the deploy region: the
 # foundation-model ARN names the model exactly, and the
 # inference-profile line stays (profile-style model IDs invoke through
 # profiles) but pinned to the region.

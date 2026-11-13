@@ -138,7 +138,7 @@ describe('buildAlertsTf', () => {
         expect(tf).toContain('more than 25 5XX errors in 2 minutes');
     });
 
-    // BUG-132: flat ECS names let a preview apply clobber the prod
+    // Flat ECS names let a preview apply clobber the prod
     // alarm — ECS uses the workspace-aware local like lambda/static.
     it('uses workspace-aware names on ECS targets', () => {
         const tf = buildAlertsTf({ projectName: 'myapp', target: 'ecs' });

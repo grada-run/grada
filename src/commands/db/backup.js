@@ -33,7 +33,7 @@ function snapshotSourceDb(snapshot, isCluster) {
     return isCluster ? snapshot.DBClusterIdentifier : snapshot.DBInstanceIdentifier;
 }
 
-// BUG-204 failure: the reused id names another database's snapshot.
+// The reused id names another database's snapshot.
 // Shared by the wait and no-wait paths (they differ only in `waited`).
 function failSnapshotMismatch({ spinnerHandle, snapshotId, foreignDb, targetId, projectName, waited, dbIdentifier, region }) {
     spinnerHandle.stop(color.red('❌ Snapshot belongs to another database.'));
@@ -202,7 +202,7 @@ async function runDbBackupMain(input = {}) {
 
         if (noWait) {
             if (reusedExisting) {
-                // BUG-204: verify ownership even when not waiting — one
+                // Verify ownership even when not waiting — one
                 // describe, fail closed on a foreign snapshot. A
                 // not-found here is transient (eventual consistency),
                 // so only proceed past it.
@@ -268,7 +268,7 @@ async function runDbBackupMain(input = {}) {
                     throw error;
                 }
                 const snapshot = snapshots[0] || null;
-                // BUG-204: an explicit --id can name another database's
+                // An explicit --id can name another database's
                 // snapshot (AlreadyExists proves existence, not
                 // ownership) — fail closed instead of adopting a
                 // foreign snapshot as our safety backup. Checked

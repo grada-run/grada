@@ -64,7 +64,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # Deploy never skips: a failed assume fails the run with the
-      # bootstrap pointer (BUG-201).
+      # bootstrap pointer.
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |

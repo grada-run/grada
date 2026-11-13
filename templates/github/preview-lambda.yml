@@ -3,7 +3,7 @@ name: Ephemeral PR Preview
 on:
   # pull_request_target (not pull_request): this file comes from the base
   # branch, so a fork PR cannot delete the same-repo guard below to reach
-  # the privileged CI roles (BUG-140). The PR head is checked out explicitly by
+  # the privileged CI roles. The PR head is checked out explicitly by
   # SHA in the guarded step instead.
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -58,7 +58,7 @@ jobs:
       # STS denies a missing role and a trust mismatch with the same
       # message, so the API won't support distinguishing them: every
       # assume failure skips loud (green) with both cases + pointers
-      # named (BUG-199).
+      # named.
       - name: Interpret credential failure
         if: steps.aws-creds.outcome == 'failure'
         run: |
@@ -137,7 +137,7 @@ jobs:
 
       # One sticky comment per PR (updated in place), never a new
       # comment per push — and a failed run overwrites the green URL
-      # instead of leaving it standing as truth (BUG-190).
+      # instead of leaving it standing as truth.
       - name: Comment PR
         if: steps.aws-creds.outcome == 'success'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -199,7 +199,7 @@ jobs:
 
       # A cancelled apply can strand the S3 state lockfile: point at
       # recovery instead of leaving the next run to fail obscurely
-      # (BUG-194). Generic by necessity — the lock ID only exists in the
+      #. Generic by necessity — the lock ID only exists in the
       # follow-up run's own error.
       - name: Cancellation recovery note
         if: cancelled()
