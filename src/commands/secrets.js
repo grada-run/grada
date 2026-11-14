@@ -368,7 +368,7 @@ async function handleSecretsCatch({
     // "Failed to push" lies about what succeeded.
     const postVaultHints = {
         'secret_keys.json write': '  Re-run the push to regenerate terraform/secret_keys.json — the vault already holds the new values.\n',
-        'ECS restart': '  Trigger the restart by hand (aws ecs update-service --force-new-deployment) or deploy — the vault already holds the new values.\n',
+        'ECS restart': '  Re-run the push to retry the restart (or trigger it by hand: aws ecs update-service --force-new-deployment) — the vault already holds the new values.\n',
     };
     const failureMessage = postVaultStep === null
         ? `❌ Failed to ${verb} secrets: ${error.message}`

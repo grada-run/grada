@@ -2,12 +2,14 @@ import fsSync from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import color from 'picocolors';
-import { intro, outro, confirm, cancel, isCancel } from '@clack/prompts';
+import { intro, outro, confirm, cancel, isCancel, select } from '@clack/prompts';
 import { trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { resolveProjectName, resolveHeadless, resolveCwd } from '../utils/resolvers.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { getTerraformOutputs } from '../utils/terraform.js';
+import { Route53Client, ListHostedZonesCommand } from '@aws-sdk/client-route-53';
+import { resolveClient } from '../utils/aws.js';
 import {
     findResourceBlock,
     findNestedBlock,
@@ -435,7 +437,7 @@ async function runDomainMain(input = {}) {
                 return failCommand({
                     noExit,
                     message: `\n✖ Invalid Route 53 zone ID "${options.zoneId}".`,
-                    hint: '  Zone IDs look like Z1234567890ABC (find yours with: aws route53 list-hosted-zones).\n',
+                    hint: '  Zone IDs look like Z1234567890ABC (re-run without --zone-id to pick from your hosted zones, or find yours with: aws route53 list-hosted-zones).\n',
                     event: 'domain_run',
                     telemetry: { subcommand, error_code: 'INVALID_ZONE_ID' },
                     reason: 'invalid-zone-id',
@@ -483,6 +485,42 @@ async function runDomainMain(input = {}) {
     }, { scope: 'terraform' });
 }
 
+// Hosted-zone discovery for `add` without --zone-id: lists zones
+// matching the domain (apex or parent) and lets the user pick one.
+// Returns the picked zone id, or null for external DNS, no match,
+// cancel, or any lookup failure (all fall back to external mode).
+async function discoverHostedZoneId({ route53Client, region, domain }) {
+    let zones;
+    try {
+        const client = resolveClient(route53Client, Route53Client, { region });
+        const resp = await client.send(new ListHostedZonesCommand({ MaxItems: 100 }));
+        zones = resp?.HostedZones || [];
+    } catch {
+        return null;
+    }
+    const bare = (name) => String(name || '').replace(/\.$/, '').toLowerCase();
+    const matches = zones
+        .filter((zone) => {
+            const name = bare(zone.Name);
+            const target = domain.toLowerCase();
+            return name !== '' && (target === name || target.endsWith(`.${name}`));
+        })
+        .sort((a, b) => String(b.Name).length - String(a.Name).length);
+    if (matches.length === 0) return null;
+    const picked = await select({
+        message: `Pick the Route 53 hosted zone for ${domain}:`,
+        options: [
+            ...matches.map((zone) => {
+                const id = normalizeZoneId(zone.Id) || zone.Id;
+                return { value: id, label: `${zone.Name} (${id}${zone.Config?.PrivateZone ? ', private' : ''})` };
+            }),
+            { value: null, label: 'External DNS instead' },
+        ],
+    });
+    if (isCancel(picked) || !picked) return null;
+    return picked;
+}
+
 async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath, cloudfrontTfPath }) {
     const noExit = isProgrammaticCall(options);
     const force = options.force === true;
@@ -507,6 +545,15 @@ async function runDomainAdd({ options, projectName, domain, zoneId, domainTfPath
         } catch {
             previousDomain = null;
         }
+    }
+
+    if (!zoneId && !resolveHeadless(options)) {
+        const discovered = await discoverHostedZoneId({
+            route53Client: options.route53Client,
+            region: options.region ?? process.env.AWS_REGION ?? 'us-east-2',
+            domain,
+        });
+        if (discovered) zoneId = discovered;
     }
 
     const mode = zoneId ? 'route53' : (activate ? 'external-active' : 'external-pending');

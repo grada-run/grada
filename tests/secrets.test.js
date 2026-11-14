@@ -268,13 +268,19 @@ describe('Secrets Push Command', () => {
         mockConfirm.mockResolvedValueOnce(true);
         mockEcsSend.mockRejectedValueOnce(new Error('boom'));
         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { });
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
 
         await pushSecrets('.env', 'my-project', { isHeadless: false });
 
         expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('Vault updated'));
         expect(mockSpinnerStop).toHaveBeenCalledWith(expect.stringContaining('restart'));
+        expect(output.join('\n')).toContain('Re-run the push to retry the restart');
         expect(exitSpy).toHaveBeenCalledWith(1);
         exitSpy.mockRestore();
+        consoleSpy.mockRestore();
     });
 
     it('skips the ECS restart when keys are identical but the user declines', async () => {

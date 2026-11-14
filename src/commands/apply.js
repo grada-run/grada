@@ -9,7 +9,7 @@ import { failCommand, isProgrammaticCall, shouldAutoApprove, refuseIfNonInteract
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { spawnSync } from 'child_process';
 import { runTerraformCommand, getTerraformOutputs, readLastRunMarker, isInterruptedMarker, ensureTerraformInit, checkOutputsContract, DEFAULT_TERRAFORM_PHASE_TIMEOUT_MS, PROGRESS_MODES } from '../utils/terraform.js';
-import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES } from '../utils/terraform-errors.js';
+import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES, parseCollisionImports } from '../utils/terraform-errors.js';
 import { readInitManifest, recordAppliedTarget } from '../utils/backup.js';
 import { requireManagedTree, parseStateBucketBackend, upsertAutoTfvar } from '../utils/terraform-metadata.js';
 import { readTerraformComputeTarget, resolveRegion, readRenderedContainerEnvNames } from '../utils/resolvers.js';
@@ -797,12 +797,54 @@ async function applyStackMain(input = {}) {
                 });
                 return failCommand({ exitCode: 1 });
             }
+            // Guided import first: stderr names the collided resource
+            // and (for most families) its provider id — import in-flow
+            // instead of hand-typing. Secrets are excluded (import needs
+            // the ARN, not derivable from stderr); declined, failed, or
+            // unparseable markers fall through to the manual runbook.
+            let collisionImportError = null;
+            if (options._collisionImported !== true) {
+                const pairs = parseCollisionImports(errString)
+                    .filter((pair) => !pair.address.startsWith('aws_secretsmanager_secret.'));
+                if (pairs.length > 0) {
+                    const refused = await refuseIfNonInteractive(options, {
+                        message: '\n✖ apply needs approval to import collided resources into state.',
+                        hint: '  Re-run with --auto-approve to import non-interactively.\n',
+                        event: 'infrastructure_applied',
+                        telemetry: { projectName: actualProjectName },
+                        errorCode: 'COLLISION_IMPORT_NON_INTERACTIVE',
+                    });
+                    if (refused) return refused;
+                    let proceed = shouldAutoApprove(options);
+                    if (!proceed) {
+                        const confirmed = await confirm({
+                            message: `Import ${pairs.length} collided resource${pairs.length === 1 ? '' : 's'} into state and retry?`,
+                            initialValue: true,
+                        });
+                        proceed = !isCancel(confirmed) && confirmed === true;
+                    }
+                    if (proceed) {
+                        try {
+                            for (const pair of pairs) {
+                                await runTerraform(['import', pair.address, pair.id], tfDir, null, `Importing ${pair.address}`);
+                            }
+                        } catch (error) {
+                            collisionImportError = error;
+                        }
+                        if (collisionImportError === null) {
+                            trackEvent('collision_resources_imported', { projectName: actualProjectName, count: pairs.length });
+                            log.message(color.cyan('Imported collided resources — retrying apply...'));
+                            return applyStack({ ...options, _skipPreview: true, _collisionImported: true });
+                        }
+                    }
+                }
+            }
             trackEvent('bucket_recovery_probed', { projectName: actualProjectName, collisions });
             await flushTelemetry();
             const runbook = getRunbook('RECREATE_COLLISION', { headless: shouldAutoApprove(options) });
             return failCommand({
                 message: `\n✖ ${runbook.message}`,
-                hint: `  ${runbook.hint}\n  Import each address it names, e.g.:\n    ${color.green('cd terraform && terraform import <address> <aws-id>')}\n`,
+                hint: `  ${runbook.hint}\n  Import each address it names, e.g.:\n    ${color.green('cd terraform && terraform import <address> <aws-id>')}\n${collisionImportError ? color.dim(`  (Automatic import failed: ${collisionImportError.message})`) + '\n' : ''}`,
                 event: 'infrastructure_applied',
                 telemetry: { projectName: actualProjectName, error_code: 'RECREATE_COLLISION', ...costProps },
                 errorCode: 'RECREATE_COLLISION',
@@ -862,14 +904,51 @@ async function applyStackMain(input = {}) {
             if (adoptUpsertError) {
                 log.message(color.dim(`  (Automatic adoption failed: ${adoptUpsertError.message})`));
             }
-        } else if (code === 'BACKEND_RECONFIGURE_REQUIRED' || code === 'CLOUDFRONT_IN_PROGRESS' || code === 'DELETION_PROTECTION_ACTIVE') {
+        } else if (code === 'BACKEND_RECONFIGURE_REQUIRED' || code === 'CLOUDFRONT_IN_PROGRESS' || code === 'DELETION_PROTECTION_ACTIVE' || code === 'SECRET_PENDING_DELETION') {
             // Named but flow-neutral: runbook guidance with a coded
             // failure. (RECREATE_COLLISION has its dedicated branch
             // above; deletion protection's destroy flow lives in
             // destroy.js.)
+            let reconfigureError = null;
+            if (code === 'BACKEND_RECONFIGURE_REQUIRED' && options._backendReconfigured !== true) {
+                // Offer the reconfigure in-flow instead of shelling the
+                // user out to raw terraform; declined or failed runs
+                // fall through to the runbook below.
+                const refused = await refuseIfNonInteractive(options, {
+                    message: '\n✖ apply needs approval to reconfigure the Terraform backend.',
+                    hint: '  Re-run with --auto-approve to reconfigure non-interactively.\n',
+                    event: 'infrastructure_applied',
+                    telemetry: { projectName: actualProjectName },
+                    errorCode: 'BACKEND_RECONFIGURE_NON_INTERACTIVE',
+                });
+                if (refused) return refused;
+                let proceed = shouldAutoApprove(options);
+                if (!proceed) {
+                    const confirmed = await confirm({
+                        message: 'Reconfigure the Terraform backend (init -reconfigure) and retry?',
+                        initialValue: true,
+                    });
+                    proceed = !isCancel(confirmed) && confirmed === true;
+                }
+                if (proceed) {
+                    try {
+                        await runTerraform(['init', '-reconfigure'], tfDir, null, 'Reconfiguring backend');
+                    } catch (error) {
+                        reconfigureError = error;
+                    }
+                    if (reconfigureError === null) {
+                        trackEvent('backend_reconfigured', { projectName: actualProjectName });
+                        log.message(color.cyan('Reconfigured the backend — retrying apply...'));
+                        return applyStack({ ...options, _skipPreview: true, _backendReconfigured: true });
+                    }
+                }
+            }
             const runbook = getRunbook(code, { headless: shouldAutoApprove(options), lockId });
             log.error(color.red(`✖ ${runbook.message}`));
             log.message(`  ${runbook.hint}\n`);
+            if (reconfigureError) {
+                log.message(color.dim(`  (Automatic reconfigure failed: ${reconfigureError.message})`));
+            }
             log.message(color.dim(errString.split('\n').slice(0, 8).join('\n')));
         } else {
             // Generic fallback for unknown errors

@@ -13,6 +13,7 @@ export const ERROR_CODES = [
     'OIDC_PROVIDER_CONFLICT',
     'CLOUDFRONT_IN_PROGRESS',
     'BUCKET_NOT_EMPTY',
+    'SECRET_PENDING_DELETION',
 ];
 
 // AWS AlreadyExists family: every create-path "reality has what state
@@ -34,6 +35,40 @@ export function countRecreateCollisions(stderr) {
     return stderr.match(new RegExp(RECREATE_COLLISION_RE.source, 'gi'))?.length ?? 0;
 }
 
+const COLLISION_NAME_RE = /creating [A-Za-z][A-Za-z0-9 ]*?\(([^)]+)\)/;
+const COLLISION_WITH_RE = /^\s*[│|]?\s*with ([A-Za-z0-9_."[\]-]+),/;
+const COLLISION_ERROR_RE = /^\s*[╷╵│]?\s*Error:/;
+
+// Guided-import pairs for recreate collisions: each AlreadyExists-style
+// marker carries the provider name in parens, and the resource address
+// follows on a `with <addr>,` context line. Markers without either are
+// skipped — the caller falls back to the manual runbook. Capped so a
+// pathological stderr cannot queue unbounded imports.
+export function parseCollisionImports(stderr, limit = 20) {
+    if (typeof stderr !== 'string' || stderr === '') return [];
+    const lines = stderr.split('\n');
+    const pairs = [];
+    const seen = new Set();
+    for (let i = 0; i < lines.length && pairs.length < limit; i++) {
+        if (!RECREATE_COLLISION_RE.test(lines[i])) continue;
+        const nameMatch = COLLISION_NAME_RE.exec(lines[i]);
+        if (!nameMatch) continue;
+        for (let j = i + 1; j < Math.min(i + 9, lines.length); j++) {
+            if (COLLISION_ERROR_RE.test(lines[j])) break;
+            const withMatch = COLLISION_WITH_RE.exec(lines[j]);
+            if (withMatch) {
+                const address = withMatch[1].replace(/"/g, '');
+                if (!seen.has(address)) {
+                    seen.add(address);
+                    pairs.push({ address, id: nameMatch[1] });
+                }
+                break;
+            }
+        }
+    }
+    return pairs;
+}
+
 // Pure classifier over stderr text. Returns `{ code, lockId }` or null.
 export function classifyTerraformError(stderr, ctx = {}) {
     const text = typeof stderr === 'string' ? stderr : '';
@@ -48,6 +83,13 @@ export function classifyTerraformError(stderr, ctx = {}) {
     }
     if (RECREATE_COLLISION_RE.test(text)) {
         return { code: 'RECREATE_COLLISION', lockId: null };
+    }
+    // Re-apply inside the Secrets Manager recovery window: the committed
+    // suffix reuses the secret name while deletion is still pending.
+    // Disjoint from the collision family ("already scheduled for
+    // deletion" carries no AlreadyExists marker).
+    if (/scheduled for deletion/i.test(text)) {
+        return { code: 'SECRET_PENDING_DELETION', lockId: null };
     }
     if (/NoSuchBucket/i.test(text) || /does not exist/i.test(text)) {
         return { code: 'STATE_BUCKET_MISSING', lockId: null };
@@ -115,6 +157,11 @@ const RUNBOOKS = {
         message: 'Terraform destroy failed twice: an S3 bucket still holds object versions.',
         headless: 'Re-run destroy — drained buckets usually read empty within a minute; if it persists, empty the bucket by hand in the AWS Console.',
         interactive: 'Re-run destroy — drained buckets usually read empty within a minute; if it persists, empty the bucket by hand in the AWS Console.',
+    },
+    SECRET_PENDING_DELETION: {
+        message: 'A Secrets Manager secret is scheduled for deletion.',
+        headless: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import <address> <id>) or force-delete without recovery and re-apply + push — grada never force-deletes, the window protects against accidental loss.',
+        interactive: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import <address> <id>) or force-delete without recovery and re-apply + push — grada never force-deletes, the window protects against accidental loss.',
     },
 };
 

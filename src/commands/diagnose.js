@@ -1,6 +1,6 @@
 import { spawnSync } from 'child_process';
 import { ECSClient, ListTasksCommand, DescribeTasksCommand } from '@aws-sdk/client-ecs';
-import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
+import { CloudWatchLogsClient, DescribeLogGroupsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
@@ -86,7 +86,7 @@ function isLogGroupNotFoundError(error) {
 // Shared log tail for the ECS and Lambda paths: fetched lines, the honest
 // fetch-failure warning (never "no events" when the fetch failed), the
 // missing-group hint, or the genuine empty line — in that order.
-function printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix, region }) {
+async function printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix, region, logsClient }) {
     if (logs.length > 0) {
         console.log(`\n  ${color.bold(`Last ${logs.length} log lines (${color.cyan(logGroup)}):`)}`);
         for (const line of logs) {
@@ -96,6 +96,19 @@ function printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchEr
         console.log(color.yellow(`\n⚠ Could not fetch recent logs from ${logGroup} (${fetchError}). Log health is unverified.`));
     } else if (logGroupMissing) {
         console.log(color.yellow(`\n⚠ Log group not found (expected ${logGroup}).`));
+        try {
+            const resp = await logsClient.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: listPrefix, limit: 10 }));
+            const names = (resp?.logGroups || []).map((group) => group.logGroupName).filter(Boolean).slice(0, 10);
+            if (names.length > 0) {
+                console.log(color.dim('Matching groups:'));
+                for (const name of names) console.log(color.dim(`  ${name}`));
+            } else {
+                console.log(color.dim(`No log groups match "${listPrefix}".`));
+            }
+            return;
+        } catch {
+            // Listing failed: fall back to the CLI pointer below.
+        }
         console.log(color.dim(`List matching groups with: aws logs describe-log-groups --log-group-name-prefix "${listPrefix}" --region ${region}`));
     } else {
         console.log(color.dim(`\n  No recent log events found in ${logGroup}.`));
@@ -215,7 +228,7 @@ export async function runLambdaDiagnose(input = {}) {
     console.log(`  ${color.dim('State:')} ${state === 'Active' ? color.green(state) : color.yellow(state)} ${color.dim(`/ ${lastUpdateStatus}`)}`);
     if (configuration.LastModified) console.log(`  ${color.dim('Modified:')} ${configuration.LastModified}`);
 
-    printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix: '/aws/lambda/', region });
+    await printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix: '/aws/lambda/', region, logsClient });
 
     if (healthy) {
         outro(color.green('Diagnose complete. Nothing to fix!'));
@@ -489,7 +502,7 @@ async function runDiagnoseMain(input = {}) {
             console.log(`  ${color.dim('Container reason:')} ${color.yellow(containerReason)}`);
         }
 
-        printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix: '/ecs/', region });
+        await printLogTail({ logGroup, logs, logGroupMissing, logFetchFailed, fetchError, listPrefix: '/ecs/', region, logsClient });
 
         outro(color.green('Diagnose complete. Fix the error above, then redeploy. 🚀'));
 

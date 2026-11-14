@@ -1,4 +1,4 @@
-import { CloudWatchLogsClient, FilterLogEventsCommand, DescribeLogStreamsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { CloudWatchLogsClient, FilterLogEventsCommand, DescribeLogStreamsCommand, DescribeLogGroupsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import color from 'picocolors';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
@@ -167,9 +167,22 @@ export function buildLogStreamName(containerName, taskId, prefix = 'ecs') {
     return `${prefix}/${containerName}/${taskId}`;
 }
 
-function printMissingLogGroupGuidance(logGroup, service, region) {
+async function printMissingLogGroupGuidance(logGroup, service, region, logsClient) {
     const prefix = `/${String(logGroup).split('/').filter(Boolean).slice(0, 2).join('/')}/`;
     console.log(color.yellow(`\n⚠ No log group found for "${service}" (expected ${logGroup}).`));
+    try {
+        const resp = await logsClient.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: prefix, limit: 10 }));
+        const names = (resp?.logGroups || []).map((group) => group.logGroupName).filter(Boolean).slice(0, 10);
+        if (names.length > 0) {
+            console.log(color.dim('Matching groups:'));
+            for (const name of names) console.log(color.dim(`  ${name}`));
+        } else {
+            console.log(color.dim(`No log groups match "${prefix}".`));
+        }
+        return;
+    } catch {
+        // Listing failed: fall back to the CLI pointer below.
+    }
     console.log(color.dim(`List matching groups with: aws logs describe-log-groups --log-group-name-prefix "${prefix}" --region ${region}`));
 }
 
@@ -268,7 +281,7 @@ async function runLogsMain(input = {}) {
         } catch (verifyError) {
             if (isAuthError(verifyError)) throw verifyError;
             if (isNotFoundError(verifyError)) {
-                printMissingLogGroupGuidance(logGroup, service, region);
+                await printMissingLogGroupGuidance(logGroup, service, region, logsClient);
                 return { logs: [], logGroup, region, service };
             }
             // Any other verification failure is non-fatal: the fetch below is authoritative.
@@ -344,7 +357,7 @@ async function runLogsMain(input = {}) {
             return { logs: [], logGroup, region, service };
         }
         if (isNotFoundError(error)) {
-            printMissingLogGroupGuidance(logGroup, service, region);
+            await printMissingLogGroupGuidance(logGroup, service, region, logsClient);
             return { logs: [], logGroup, region, service };
         }
 

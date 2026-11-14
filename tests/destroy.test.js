@@ -134,6 +134,31 @@ describe('Command: destroy (mocked terraform spawn)', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('warns about the secrets recovery window when the tree has secrets', async () => {
+    writeBackend();
+    fs.writeFileSync(path.join(tmpDir, 'terraform', 'secrets.tf'), '# secrets\n');
+    clack.mockConfirm.mockResolvedValue(false);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 0 });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('30-day recovery window'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('stays silent about secrets when the tree has none', async () => {
+    writeBackend();
+    clack.mockConfirm.mockResolvedValue(false);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(destroyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 0 });
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('30-day recovery window'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('cancels cleanly when the user declines the confirm prompt', async () => {
     writeBackend();
     clack.mockConfirm.mockResolvedValue(false);
@@ -1051,6 +1076,103 @@ describe('Command: destroy (mocked terraform spawn)', () => {
         'infrastructure_destroyed',
         expect.objectContaining({ error_code: 'BUCKET_NOT_EMPTY' })
       );
+    });
+  });
+
+  describe('DependencyViolation enumeration', () => {
+    const projectTags = () => [
+      { Key: 'ManagedBy', Value: 'grada' },
+      { Key: 'GradaProject', Value: path.basename(process.cwd()) },
+    ];
+    function scriptedEc2Client({ vpcs, enis = [], sgs = [] } = {}) {
+      return {
+        send: vi.fn(async (command) => {
+          const name = command.constructor.name;
+          if (name === 'DescribeVpcsCommand') return { Vpcs: vpcs ?? [{ VpcId: 'vpc-1' }] };
+          if (name === 'DescribeNetworkInterfacesCommand') return { NetworkInterfaces: enis };
+          if (name === 'DescribeSecurityGroupsCommand') return { SecurityGroups: sgs };
+          if (name === 'DeleteSecurityGroupCommand') return {};
+          throw new Error(`unexpected ${name}`);
+        }),
+      };
+    }
+    const dependencyError = () => new Error('Error: deleting VPC: DependencyViolation: The vpc has dependencies and cannot be deleted');
+
+    it('deletes grada-owned blockers and retries destroy once', async () => {
+      const attemptDestroy = vi.fn().mockResolvedValueOnce(undefined);
+      const ec2Client = scriptedEc2Client({
+        sgs: [{ GroupId: 'sg-1', GroupName: 'myapp-extra', Tags: projectTags() }],
+      });
+      // Reset first: earlier tests queue one-shot answers that
+      // clearAllMocks does not drain, and a stale answer would win
+      // over this test's own.
+      clack.mockConfirm.mockReset();
+      clack.mockConfirm.mockResolvedValue(true);
+      const handled = await handleDestroyTerraformError({
+        options: { isHeadless: false, ec2Client },
+        tfDirPath: path.join(tmpDir, 'terraform'),
+        attemptDestroy,
+        error: dependencyError(),
+      });
+      expect(handled).toEqual({ retried: true });
+      expect(attemptDestroy).toHaveBeenCalledTimes(1);
+      expect(ec2Client.send).toHaveBeenCalledWith(expect.objectContaining({
+        input: expect.objectContaining({ GroupId: 'sg-1' }),
+      }));
+      expect(trackEvent).toHaveBeenCalledWith(
+        'dependency_blockers_removed',
+        expect.objectContaining({ count: 1 })
+      );
+    });
+
+    it('names foreign blockers and never deletes them', async () => {
+      const attemptDestroy = vi.fn();
+      const ec2Client = scriptedEc2Client({
+        enis: [{ NetworkInterfaceId: 'eni-9', Attachment: { InstanceId: 'i-9' }, TagSet: [] }],
+        sgs: [{ GroupId: 'sg-9', GroupName: 'foreign', Tags: [] }],
+      });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const handled = await handleDestroyTerraformError({
+          options: { json: true, ec2Client },
+          tfDirPath: path.join(tmpDir, 'terraform'),
+          attemptDestroy,
+          error: dependencyError(),
+        });
+        expect(handled.retried).toBe(false);
+        await expect(handled.result).rejects.toMatchObject({ exitCode: 1 });
+        expect(attemptDestroy).not.toHaveBeenCalled();
+        expect(ec2Client.send).not.toHaveBeenCalledWith(expect.objectContaining({ input: expect.objectContaining({ GroupId: expect.anything() }) }));
+        const printed = errorSpy.mock.calls.map((args) => String(args[0])).join('\n');
+        expect(printed).toContain('eni-9');
+        expect(printed).toContain('sg-9');
+        expect(trackEvent).toHaveBeenCalledWith(
+          'infrastructure_destroyed',
+          expect.objectContaining({ error_code: 'DESTROY_DEPENDENCY_VIOLATION' })
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('falls back to the runbook when enumeration fails', async () => {
+      const attemptDestroy = vi.fn();
+      const ec2Client = { send: vi.fn().mockRejectedValue(new Error('network down')) };
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const handled = await handleDestroyTerraformError({
+          options: { json: true, ec2Client },
+          tfDirPath: path.join(tmpDir, 'terraform'),
+          attemptDestroy,
+          error: dependencyError(),
+        });
+        expect(handled.retried).toBe(false);
+        await expect(handled.result).rejects.toMatchObject({ exitCode: 1 });
+        const printed = errorSpy.mock.calls.map((args) => String(args[0])).join('\n');
+        expect(printed).toContain('blocked');
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 });

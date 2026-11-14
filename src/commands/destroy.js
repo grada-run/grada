@@ -1,9 +1,10 @@
 import fsSync from 'fs';
 import path from 'path';
-import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
+import { intro, outro, confirm, spinner, cancel, isCancel } from '@clack/prompts';
 import color from 'picocolors';
 import { RDSClient, DescribeDBInstancesCommand, DescribeDBClustersCommand, DescribeDBSnapshotsCommand, DescribeDBClusterSnapshotsCommand, StartDBInstanceCommand, StartDBClusterCommand, CreateDBSnapshotCommand, CreateDBClusterSnapshotCommand, ModifyDBInstanceCommand, ModifyDBClusterCommand } from '@aws-sdk/client-rds';
 import { S3Client, ListObjectVersionsCommand } from '@aws-sdk/client-s3';
+import { EC2Client, DescribeVpcsCommand, DescribeNetworkInterfacesCommand, DescribeSecurityGroupsCommand, DeleteSecurityGroupCommand } from '@aws-sdk/client-ec2';
 import { teardownStateBucket, drainBucketObjects, resolveClient } from '../utils/aws.js';
 import { checkDependency, pollUntil, sleep } from '../utils/system.js';
 import { trackEvent, flushTelemetry, trackSuccess, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
@@ -14,6 +15,7 @@ import { findDbTarget, dbStatusOf, resolveDbIdentifier, resolveDbClusterIdentifi
 import { requireManagedTree, parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { guardSleepingEnv } from '../utils/sleep-state.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
+import { resolveHeadless } from '../utils/resolvers.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 
 export const DEFAULT_DESTROY_DB_TIMEOUT_MS = 600000;
@@ -57,7 +59,37 @@ export function parseDestroyArgs(argv = []) {
 // Returns `{ retried: true }` when the destroy recovered so the caller
 // continues to bucket cleanup, else `{ retried: false, result }`.
 // Exported for unit tests: every branch must honor this contract.
-export async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy, error }) {
+async function describeDependencyBlockers(ec2, projectName) {
+    const { Vpcs = [] } = await ec2.send(new DescribeVpcsCommand({
+        Filters: [
+            { Name: 'tag:ManagedBy', Values: ['grada'] },
+            { Name: 'tag:GradaProject', Values: [projectName] },
+        ],
+    }));
+    if (Vpcs.length !== 1 || !Vpcs[0].VpcId) return null;
+    const vpcId = Vpcs[0].VpcId;
+    const [niResp, sgResp] = await Promise.all([
+        ec2.send(new DescribeNetworkInterfacesCommand({ Filters: [{ Name: 'vpc-id', Values: [vpcId] }] })),
+        ec2.send(new DescribeSecurityGroupsCommand({ Filters: [{ Name: 'vpc-id', Values: [vpcId] }] })),
+    ]);
+    const owned = (tags = []) => tags.some((tag) => tag.Key === 'ManagedBy' && tag.Value === 'grada')
+        && tags.some((tag) => tag.Key === 'GradaProject' && tag.Value === projectName);
+    return {
+        vpcId,
+        enis: (niResp.NetworkInterfaces || []).map((ni) => ({
+            id: ni.NetworkInterfaceId,
+            detail: ni.Attachment?.InstanceId || ni.Description || ni.InterfaceType || 'attached',
+            owned: owned(ni.TagSet),
+        })),
+        sgs: (sgResp.SecurityGroups || []).map((sg) => ({
+            id: sg.GroupId,
+            detail: sg.GroupName || '',
+            owned: owned(sg.Tags),
+        })),
+    };
+}
+
+export async function handleDestroyTerraformError({ options, tfDirPath, attemptDestroy, error, region }) {
     const actualProjectName = path.basename(process.cwd());
     const errString = String(error.message || error);
     const structuredCode = typeof error.code === 'string' && ERROR_CODES.includes(error.code) ? error.code : null;
@@ -136,6 +168,68 @@ export async function handleDestroyTerraformError({ options, tfDirPath, attemptD
             return namedFail('BUCKET_NOT_EMPTY');
         }
         return { retried: true };
+    }
+
+    if (code === 'DESTROY_DEPENDENCY_VIOLATION') {
+        // Enumerate the blockers (read-only, always safe) so the failure
+        // names attachments instead of gesturing at the console.
+        // Grada-owned security groups can go in-flow; ENIs and foreign
+        // attachments are report-only — detaching live interfaces is
+        // never automatic. Any discovery failure falls through to the
+        // plain runbook below.
+        let blockers = null;
+        let ec2 = null;
+        try {
+            ec2 = resolveClient(options.ec2Client, EC2Client, { region: region ?? process.env.AWS_REGION ?? 'us-east-2' });
+            blockers = await describeDependencyBlockers(ec2, actualProjectName);
+        } catch {
+            blockers = null;
+        }
+        if (blockers !== null) {
+            const ownedSgs = blockers.sgs.filter((sg) => sg.owned);
+            if (ownedSgs.length > 0) {
+                let proceed = shouldAutoApprove(options);
+                if (!proceed && !resolveHeadless(normalizeOptions(options))) {
+                    const confirmed = await confirm({
+                        message: `Delete ${ownedSgs.length} grada-owned security group${ownedSgs.length === 1 ? '' : 's'} blocking VPC deletion and retry?`,
+                        initialValue: true,
+                    });
+                    proceed = !isCancel(confirmed) && confirmed === true;
+                }
+                if (proceed) {
+                    try {
+                        for (const sg of ownedSgs) {
+                            await ec2.send(new DeleteSecurityGroupCommand({ GroupId: sg.id }));
+                        }
+                    } catch {
+                        return namedFail('DESTROY_DEPENDENCY_VIOLATION');
+                    }
+                    trackEvent('dependency_blockers_removed', { projectName: actualProjectName, count: ownedSgs.length });
+                    try {
+                        await attemptDestroy();
+                    } catch {
+                        return namedFail('DESTROY_DEPENDENCY_VIOLATION');
+                    }
+                    return { retried: true };
+                }
+            }
+            const lines = [
+                ...blockers.enis.map((ni) => `  ENI ${ni.id} (${ni.detail})${ni.owned ? '' : ' — foreign, remove by hand'}`),
+                ...blockers.sgs.map((sg) => `  SG ${sg.id} (${sg.detail})${sg.owned ? '' : ' — foreign, remove by hand'}`),
+            ];
+            const runbook = getRunbook('DESTROY_DEPENDENCY_VIOLATION', { headless: shouldAutoApprove(options), lockId });
+            return {
+                retried: false,
+                result: failCommand({
+                    message: `\n✖ VPC deletion blocked by ${blockers.enis.length + blockers.sgs.length} attachment(s) in ${blockers.vpcId}:\n${lines.join('\n')}\n  ${runbook.hint}\n`,
+                    useErrorStream: true,
+                    event: 'infrastructure_destroyed',
+                    telemetry: { projectName: actualProjectName, error_code: 'DESTROY_DEPENDENCY_VIOLATION' },
+                    errorCode: 'DESTROY_DEPENDENCY_VIOLATION',
+                    reason: 'destroy-dependency-violation',
+                }),
+            };
+        }
     }
 
     if (code === 'BACKEND_RECONFIGURE_REQUIRED' || code === 'DESTROY_DEPENDENCY_VIOLATION'
@@ -280,6 +374,18 @@ async function destroyStackMain(input = {}) {
         if (refused) return refused;
     }
 
+    // Secrets enter the 30-day recovery window on destroy: re-applying
+    // inside the window fails until the secret is restored or
+    // force-deleted (see the apply runbook). Warn in both modes —
+    // informational only, the confirm below still gates.
+    try {
+        if (fsSync.existsSync(path.join(tfDirPath, 'secrets.tf'))) {
+            console.warn(color.yellow('⚠ Vault secrets enter a 30-day recovery window on destroy — re-applying within 30 days needs a restore or force-delete first.'));
+        }
+    } catch {
+        // Unreadable tree: the confirm below still gates.
+    }
+
     const proceed = shouldAutoApprove(options) ? true : await confirm({
         message: dbNeedsProtection
             ? color.red(`⚠️  WARNING: This will permanently destroy all AWS resources including database ${dbTarget.id} (a pre-destroy snapshot will be taken first). Are you absolutely sure?`)
@@ -308,7 +414,7 @@ async function destroyStackMain(input = {}) {
     try {
         await runInit();
     } catch (error) {
-        const handled = await handleDestroyTerraformError({ options, tfDirPath, attemptDestroy: runInit, error });
+        const handled = await handleDestroyTerraformError({ options, tfDirPath, attemptDestroy: runInit, error, region });
         if (!handled.retried) return handled.result;
     }
 
@@ -672,7 +778,7 @@ async function destroyStackMain(input = {}) {
         s.stop('AWS compute resources destroyed.');
     } catch (error) {
         s.stop(color.red('❌ Terraform destroy failed.'));
-        const handled = await handleDestroyTerraformError({ options, tfDirPath, attemptDestroy, error });
+        const handled = await handleDestroyTerraformError({ options, tfDirPath, attemptDestroy, error, region });
         if (!handled.retried) return handled.result;
     }
 

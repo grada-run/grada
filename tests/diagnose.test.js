@@ -17,7 +17,8 @@ const {
     MockListTasksCommand,
     MockDescribeTasksCommand,
     MockLogsClient,
-    MockFilterLogEventsCommand
+    MockFilterLogEventsCommand,
+    MockDescribeLogGroupsCommand
 } = vi.hoisted(() => {
     const ecsSend = vi.fn();
     const logsSend = vi.fn();
@@ -38,6 +39,9 @@ const {
         }),
         MockFilterLogEventsCommand: vi.fn(function (input) {
             Object.assign(this, input);
+        }),
+        MockDescribeLogGroupsCommand: vi.fn(function (input) {
+            Object.assign(this, input);
         })
     };
 });
@@ -53,7 +57,8 @@ vi.mock('@aws-sdk/client-ecs', () => {
 vi.mock('@aws-sdk/client-cloudwatch-logs', () => {
     return {
         CloudWatchLogsClient: MockLogsClient,
-        FilterLogEventsCommand: MockFilterLogEventsCommand
+        FilterLogEventsCommand: MockFilterLogEventsCommand,
+        DescribeLogGroupsCommand: MockDescribeLogGroupsCommand
     };
 });
 
@@ -750,13 +755,45 @@ describe('Command: diagnose', () => {
         });
         try {
             const result = await runDiagnose({ cluster: 'test-cluster', region: 'us-east-2', logGroup: '/ecs/missing' });
-            expect(mockLogsSend).toHaveBeenCalledTimes(1);
+            // Fetch fails, then the guidance lists in-flow (no match here).
+            expect(mockLogsSend).toHaveBeenCalledTimes(2);
             expect(result.logs).toEqual([]);
             expect(output.join('\n')).toContain('Log group not found');
             expect(trackEvent).toHaveBeenCalledWith(
                 'diagnose_run',
                 expect.objectContaining({ success: true, healthy: false, log_source: 'none' })
             );
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
+    it('lists matching groups in-flow when the log group is missing', async () => {
+        mockEcsSend
+            .mockResolvedValueOnce({ taskArns: ['arn-task'] })
+            .mockResolvedValueOnce({
+                tasks: [{
+                    taskArn: 'arn:aws:ecs:us-east-2:123456789012:task/test-cluster/abc123',
+                    stoppedReason: 'crash',
+                    stoppedAt: '2026-09-26T12:19:47.000Z',
+                    containers: [{ name: 'app', exitCode: 1 }],
+                }]
+            });
+        const notFound = new Error('The specified log group does not exist.');
+        notFound.name = 'ResourceNotFoundException';
+        mockLogsSend.mockReset();
+        mockLogsSend
+            .mockRejectedValueOnce(notFound)
+            .mockResolvedValueOnce({ logGroups: [{ logGroupName: '/ecs/other' }] });
+
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            await runDiagnose({ cluster: 'test-cluster', region: 'us-east-2', logGroup: '/ecs/missing' });
+            expect(output.join('\n')).toContain('/ecs/other');
+            expect(output.join('\n')).not.toContain('describe-log-groups');
         } finally {
             consoleSpy.mockRestore();
         }

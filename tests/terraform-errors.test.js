@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES } from '../src/utils/terraform-errors.js';
+import { classifyTerraformError, countRecreateCollisions, getRunbook, ERROR_CODES, parseCollisionImports } from '../src/utils/terraform-errors.js';
 
 describe('R1: terraform error taxonomy', () => {
     it('exposes the named code set', () => {
@@ -12,6 +12,7 @@ describe('R1: terraform error taxonomy', () => {
             'RECREATE_COLLISION',
             'OIDC_PROVIDER_CONFLICT',
             'BUCKET_NOT_EMPTY',
+            'SECRET_PENDING_DELETION',
         ]) {
             expect(ERROR_CODES).toContain(code);
         }
@@ -36,6 +37,7 @@ describe('R1: terraform error taxonomy', () => {
         ['iam collision without recovery', 'Error: creating IAM Role: EntityAlreadyExists: The role already exists', {}, 'RECREATE_COLLISION', undefined],
         ['cloudfront in progress', 'Error: deleting CloudFront Distribution (E1): PreconditionFailed: distribution is in progress', {}, 'CLOUDFRONT_IN_PROGRESS', undefined],
         ['bucket not empty', 'Error: deleting S3 Bucket (myapp-storage-123): BucketNotEmpty: The bucket you tried to delete is not empty. You must delete all versions in the bucket.', {}, 'BUCKET_NOT_EMPTY', undefined],
+        ['pending-deletion secret', 'Error: creating Secrets Manager Secret (myapp-secrets-ab12cd): InvalidRequestException: You tried to create a secret that is already scheduled for deletion', {}, 'SECRET_PENDING_DELETION', undefined],
     ])('classifies %s', (_name, stderr, ctx, code, lockId) => {
         expect(classifyTerraformError(stderr, ctx)).toMatchObject({ code, lockId: lockId ?? null });
     });
@@ -88,5 +90,35 @@ describe('R1: terraform error taxonomy', () => {
 
     it('recreate-collision runbook is a terraform import runbook', () => {
         expect(getRunbook('RECREATE_COLLISION', { headless: true }).hint).toContain('terraform import');
+    });
+
+    it('pending-deletion runbook names restore and force-delete paths', () => {
+        for (const headless of [true, false]) {
+            const hint = getRunbook('SECRET_PENDING_DELETION', { headless }).hint;
+            expect(hint).toContain('restore-secret');
+            expect(hint).toContain('force-delete');
+        }
+    });
+
+    it('pairs with-lines to collision markers for guided import', () => {
+        const stderr = [
+            'Error: creating S3 Bucket (myapp-x): BucketAlreadyExists: The requested bucket name is not available',
+            '│ ',
+            '│   with aws_s3_bucket.assets,',
+            '│   on main.tf line 12, in resource "aws_s3_bucket" "assets":',
+            'Error: creating IAM Role (myapp-task-role): EntityAlreadyExists: The role already exists',
+            '│   with aws_iam_role.task,',
+        ].join('\n');
+        expect(parseCollisionImports(stderr)).toEqual([
+            { address: 'aws_s3_bucket.assets', id: 'myapp-x' },
+            { address: 'aws_iam_role.task', id: 'myapp-task-role' },
+        ]);
+    });
+
+    it('skips markers without names or addresses', () => {
+        expect(parseCollisionImports('Error: creating ELB listener: DuplicateListenerException: A listener already exists')).toEqual([]);
+        expect(parseCollisionImports('Error: creating S3 Bucket (myapp-x): BucketAlreadyExists: taken')).toEqual([]);
+        expect(parseCollisionImports('')).toEqual([]);
+        expect(parseCollisionImports(null)).toEqual([]);
     });
 });

@@ -26,6 +26,7 @@ const {
     MockLogsClient,
     MockFilterLogEventsCommand,
     MockDescribeLogStreamsCommand,
+    MockDescribeLogGroupsCommand,
 } = vi.hoisted(() => {
     const send = vi.fn();
     return {
@@ -39,6 +40,9 @@ const {
         MockDescribeLogStreamsCommand: vi.fn(function (input) {
             Object.assign(this, input);
         }),
+        MockDescribeLogGroupsCommand: vi.fn(function (input) {
+            Object.assign(this, input);
+        }),
     };
 });
 
@@ -46,6 +50,7 @@ vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
     CloudWatchLogsClient: MockLogsClient,
     FilterLogEventsCommand: MockFilterLogEventsCommand,
     DescribeLogStreamsCommand: MockDescribeLogStreamsCommand,
+    DescribeLogGroupsCommand: MockDescribeLogGroupsCommand,
 }));
 
 
@@ -528,6 +533,27 @@ describe('Command: logs on --target lambda projects', () => {
         } finally {
             consoleSpy.mockRestore();
             fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('lists matching groups in-flow when the log group is missing', async () => {
+        const missing = new Error('The specified log group does not exist.');
+        missing.name = 'ResourceNotFoundException';
+        mockLogsSend.mockReset();
+        mockLogsSend
+            .mockRejectedValueOnce(missing)
+            .mockResolvedValueOnce({ logGroups: [{ logGroupName: '/ecs/other-service' }] });
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            const result = await runLogs({ tail: 5, region: 'us-east-2' });
+            expect(result.logs).toEqual([]);
+            expect(output.join('\n')).toContain('/ecs/other-service');
+            expect(output.join('\n')).not.toContain('describe-log-groups');
+        } finally {
+            consoleSpy.mockRestore();
         }
     });
 

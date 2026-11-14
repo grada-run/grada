@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // NOTE: helper imports must stay above src imports: vi.mock factories run
 // during module evaluation and need the factories initialized.
 import { createTmpDirTracker } from './helpers/tmpdir.js';
+import { mockSelect } from './helpers/clack.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -682,6 +683,37 @@ describe('domain: guards and validation order', () => {
         expect(trackEvent).toHaveBeenCalledWith('domain_run', expect.objectContaining({
             error_code: 'TERRAFORM_NOT_INITIALIZED',
         }));
+    });
+
+    it('discovers hosted zones when --zone-id is omitted interactively', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        writeMainTf(dir);
+        const route53Client = {
+            send: vi.fn(async () => ({
+                HostedZones: [
+                    { Id: '/hostedzone/Z1', Name: 'example.com.', Config: { PrivateZone: false } },
+                    { Id: '/hostedzone/Z2', Name: 'other.com.', Config: { PrivateZone: false } },
+                ],
+            })),
+        };
+        mockSelect.mockResolvedValueOnce('Z1');
+        const result = await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com', isHeadless: false, route53Client });
+        expect(result.ok).toBe(true);
+        const domainTf = fs.readFileSync(path.join(dir, 'terraform', 'domain.tf'), 'utf-8');
+        expect(parseDomainTf(domainTf)).toEqual({ domain: 'example.com', mode: 'route53', zoneId: 'Z1' });
+    });
+
+    it('keeps external-pending headless without --zone-id (no discovery)', async () => {
+        const dir = makeTmp();
+        writeCloudfrontTf(dir);
+        writeMainTf(dir);
+        const route53Client = { send: vi.fn(async () => ({ HostedZones: [] })) };
+        const result = await runDomain({ cwd: dir, subcommand: 'add', domain: 'example.com', isHeadless: true, route53Client });
+        expect(result.ok).toBe(true);
+        expect(route53Client.send).not.toHaveBeenCalled();
+        const domainTf = fs.readFileSync(path.join(dir, 'terraform', 'domain.tf'), 'utf-8');
+        expect(parseDomainTf(domainTf).mode).toBe('external-pending');
     });
 
     it('hardens runDomain against non-object input', async () => {

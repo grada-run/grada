@@ -335,6 +335,96 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(fs.existsSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'))).toBe(false);
   });
 
+  it('imports collided resources in-flow and retries when accepted', async () => {
+    writeProject();
+    const collision = 'Error: creating S3 Bucket (myapp-x): BucketAlreadyExists: taken\n│   with aws_s3_bucket.assets,';
+    let applies = 0;
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      if (args[0] === 'import') return makeChild({ code: 0, stdout: 'Import successful' });
+      if (args[0] === 'output') return makeChild({ code: 0, stdout: JSON.stringify({ alb_direct_url: { value: 'http://alb.example' }, ecr_repository_url: { value: 'repo' } }) });
+      if (args[0] === 'apply') {
+        applies += 1;
+        if (applies === 1) return makeChild({ code: 1, stderr: collision });
+        return makeChild({ code: 0 });
+      }
+      return makeChild({ code: 0 });
+    });
+    clack.mockConfirm.mockResolvedValue(true);
+
+    const result = await applyStack({ isHeadless: false });
+    expect(result).toMatchObject({ ok: true });
+    expect(mockSpawn).toHaveBeenCalledWith('terraform', ['import', 'aws_s3_bucket.assets', 'myapp-x'], expect.anything());
+    expect(trackEvent).toHaveBeenCalledWith('collision_resources_imported', expect.objectContaining({ count: 1 }));
+  });
+
+  it('falls back to the manual import runbook when guided import is declined', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: 'Error: creating S3 Bucket (myapp-x): BucketAlreadyExists: taken\n│   with aws_s3_bucket.assets,' });
+    });
+    clack.mockConfirm.mockResolvedValue(false); // decline import
+
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
+    expect(mockSpawn).not.toHaveBeenCalledWith('terraform', expect.arrayContaining(['import']), expect.anything());
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false })
+    );
+  });
+
+  it('skips guided import for secrets-only collisions (ARN not derivable)', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: 'Error: creating Secrets Manager Secret (myapp-x): ResourceExistsException: taken\n│   with aws_secretsmanager_secret.vault,' });
+    });
+    clack.mockConfirm.mockResolvedValue(true);
+
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
+    expect(mockSpawn).not.toHaveBeenCalledWith('terraform', expect.arrayContaining(['import']), expect.anything());
+  });
+
+  it('reconfigures the backend in-flow and retries when accepted', async () => {
+    writeProject();
+    const backendErr = 'Error: Backend initialization required, please run "terraform init"\nReason: Backend configuration changed';
+    let applies = 0;
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init' && args[1] !== '-reconfigure') return makeChild({ code: 0 });
+      if (args[0] === 'init') return makeChild({ code: 0, stdout: 'Backend reinitialized' });
+      if (args[0] === 'output') return makeChild({ code: 0, stdout: JSON.stringify({ alb_direct_url: { value: 'http://alb.example' }, ecr_repository_url: { value: 'repo' } }) });
+      if (args[0] === 'apply') {
+        applies += 1;
+        if (applies === 1) return makeChild({ code: 1, stderr: backendErr });
+        return makeChild({ code: 0 });
+      }
+      return makeChild({ code: 0 });
+    });
+    clack.mockConfirm.mockResolvedValue(true);
+
+    const result = await applyStack({ isHeadless: false });
+    expect(result).toMatchObject({ ok: true });
+    expect(mockSpawn).toHaveBeenCalledWith('terraform', ['init', '-reconfigure'], expect.anything());
+    expect(trackEvent).toHaveBeenCalledWith('backend_reconfigured', expect.anything());
+  });
+
+  it('falls back to the runbook when backend reconfigure is declined', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: 'run terraform init -reconfigure to proceed' });
+    });
+    clack.mockConfirm.mockResolvedValue(false); // decline reconfigure
+
+    await expect(applyStack({ isHeadless: false })).rejects.toMatchObject({ exitCode: 1 });
+    expect(mockSpawn).not.toHaveBeenCalledWith('terraform', ['init', '-reconfigure'], expect.anything());
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false })
+    );
+  });
+
   it('falls through to guidance (never a raw crash) when the adopt write fails', async () => {
     if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root bypasses directory perms
     writeProject();

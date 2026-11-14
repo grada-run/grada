@@ -38,7 +38,7 @@ This infrastructure provisions a highly available Application Load Balancer (ALB
    ```
 
 3. **Automated CI/CD:**
-   Push this repository to GitHub. Your deployment pipeline uses the official [Grada GitHub Action](https://github.com/marketplace/actions/deploy-stack-aws-fargate-terraform-deploy). Every push to `{{DEPLOY_BRANCH}}` will automatically run your infrastructure changes, build your container, and deploy your application.
+   Push this repository to GitHub. Your deployment pipeline uses the official [Grada GitHub Action](https://github.com/marketplace/actions/deploy-stack-aws-fargate-terraform-deploy). Every push to `{{DEPLOY_BRANCH}}` will automatically build your container, run your infrastructure changes, and deploy your application.
 
 ### 📟 Day-2 Operations
 Once live, manage the stack without opening the AWS console:
@@ -63,7 +63,7 @@ Run the automated teardown command from the root of your project:
 ```bash
 npx grada-run destroy
 ```
-*Type `yes` when prompted. This will execute a safe Terraform teardown of your Load Balancer, ECS cluster, and networking components. You will then be asked whether to also empty and delete your remote S3 state bucket (kept by default, so you can re-provision later with `npx grada-run apply`).*
+*Confirm when prompted. This will execute a safe Terraform teardown of your Load Balancer, ECS cluster, and networking components. You will then be asked whether to also empty and delete your remote S3 state bucket (kept by default, so you can re-provision later with `npx grada-run apply`).*
 
 ## ⚠️ Critical Application Prerequisites
 

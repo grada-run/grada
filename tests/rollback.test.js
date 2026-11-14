@@ -795,6 +795,31 @@ describe('Command: rollback (mocked ECS)', () => {
         });
     });
 
+    it('lists eligible revisions in-flow when the explicit revision is missing', async () => {
+        const ecsClient = mockClient((command) => {
+            if (command instanceof DescribeServicesCommand) return { services: [activeService(14)] };
+            if (command instanceof DescribeTaskDefinitionCommand) {
+                const error = new Error('Task definition not found');
+                error.name = 'ClientException';
+                throw error;
+            }
+            if (command instanceof ListTaskDefinitionsCommand) return { taskDefinitionArns: [arn(13), arn(12)] };
+            throw new Error(`unexpected command ${command.constructor.name}`);
+        });
+
+        const output = [];
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+            output.push(args.join(' '));
+        });
+        try {
+            await runRollback({ ...baseOptions(), revision: '99', ecsClient });
+            expect(output.join('\n')).toContain('Eligible revisions (newest first): 13, 12');
+            expect(output.join('\n')).not.toContain('list-task-definitions');
+        } finally {
+            consoleSpy.mockRestore();
+        }
+    });
+
     it('exits 1 with ROLLOUT_FAILED when the deployment fails', async () => {
         const ecsClient = mockClient((command) => {
             if (command instanceof DescribeServicesCommand) {

@@ -63,6 +63,21 @@ export async function discoverEligibleRevisions(ecsClient, family, currentRevNum
     return discoverWithAdapter(createEcsRevisionAdapter(ecsClient), family, currentRevNum);
 }
 
+// Failure-path hint naming the revisions the user can actually pick,
+// listed in-flow through the same seam Case B selects from. Falls back
+// to the CLI pointer when discovery itself fails.
+async function eligibleRevisionsHint(ecsClient, family, currentRevNum, region) {
+    const fallback = 'List recent revisions with: aws ecs list-task-definitions --family-prefix ' + family + ` --region ${region}\n`;
+    try {
+        const eligible = await discoverEligibleRevisions(ecsClient, family, currentRevNum);
+        if (eligible.length === 0) return fallback;
+        const revs = eligible.slice(0, 5).map((arn) => String(arn).split(':').pop());
+        return `Eligible revisions (newest first): ${revs.join(', ')}\n`;
+    } catch {
+        return fallback;
+    }
+}
+
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
 // invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function runRollback(input = {}) {
@@ -195,7 +210,7 @@ async function runRollbackMain(input = {}) {
                 s.stop(color.red('Revision not found.'));
                 return failCommand({
                     message: `\n✖ Task definition "${targetInput}" was not found in family "${family}".`,
-                    hint: 'List recent revisions with: aws ecs list-task-definitions --family-prefix ' + family + ` --region ${region}\n`,
+                    hint: await eligibleRevisionsHint(ecsClient, family, currentRevNum, region),
                     event: 'rollback_run',
                     telemetry: { projectName, error_code: 'REVISION_NOT_FOUND' },
                     reason: 'revision-not-found',
@@ -212,7 +227,7 @@ async function runRollbackMain(input = {}) {
                 s.stop(color.red('Foreign task definition family.'));
                 return failCommand({
                     message: `\n✖ Task definition "${targetInput}" belongs to family "${descResp.taskDefinition.family ?? 'unknown'}", not "${family}". Rollback stays within the service's own family.`,
-                    hint: 'List recent revisions with: aws ecs list-task-definitions --family-prefix ' + family + ` --region ${region}\n`,
+                    hint: await eligibleRevisionsHint(ecsClient, family, currentRevNum, region),
                     event: 'rollback_run',
                     telemetry: { projectName, error_code: 'REVISION_FAMILY_MISMATCH' },
                     reason: 'revision-family-mismatch',
