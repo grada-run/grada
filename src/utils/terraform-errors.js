@@ -89,7 +89,8 @@ export function classifyTerraformError(stderr, ctx = {}) {
     // Disjoint from the collision family ("already scheduled for
     // deletion" carries no AlreadyExists marker).
     if (/scheduled for deletion/i.test(text)) {
-        return { code: 'SECRET_PENDING_DELETION', lockId: null };
+        const nameMatch = /Secrets Manager Secret \(([^)]+)\)/.exec(text);
+        return { code: 'SECRET_PENDING_DELETION', lockId: null, secretName: nameMatch ? nameMatch[1] : null };
     }
     if (/NoSuchBucket/i.test(text) || /does not exist/i.test(text)) {
         return { code: 'STATE_BUCKET_MISSING', lockId: null };
@@ -160,8 +161,8 @@ const RUNBOOKS = {
     },
     SECRET_PENDING_DELETION: {
         message: 'A Secrets Manager secret is scheduled for deletion.',
-        headless: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import <address> <id>) or force-delete without recovery and re-apply + push — grada never force-deletes, the window protects against accidental loss.',
-        interactive: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import <address> <id>) or force-delete without recovery and re-apply + push — grada never force-deletes, the window protects against accidental loss.',
+        headless: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import aws_secretsmanager_secret.app_secrets <arn>) or force-delete without recovery (aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery) and re-apply + push — fetch the ARN via aws secretsmanager describe-secret --secret-id <name> --query ARN --output text. Grada never force-deletes: the window protects against accidental loss.',
+        interactive: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import aws_secretsmanager_secret.app_secrets <arn>) or force-delete without recovery (aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery) and re-apply + push — fetch the ARN via aws secretsmanager describe-secret --secret-id <name> --query ARN --output text. Grada never force-deletes: the window protects against accidental loss.',
     },
 };
 
@@ -169,12 +170,15 @@ const RUNBOOKS = {
 // codes. `headless` selects the variant; `lockId` fills the interactive
 // lock runbook. Resource identifiers stay in the rendered hint (stdout),
 // never in telemetry payloads.
-export function getRunbook(code, { headless = false, lockId = null } = {}) {
+export function getRunbook(code, { headless = false, lockId = null, secretName = null } = {}) {
     const runbook = RUNBOOKS[code];
     if (!runbook) return null;
     let hint = headless ? runbook.headless : runbook.interactive;
     if (code === 'STATE_LOCK_HELD' && lockId) {
         hint = hint.replace(/<lock-id>/g, String(lockId));
+    }
+    if (code === 'SECRET_PENDING_DELETION' && secretName) {
+        hint = hint.replace(/<name>/g, String(secretName));
     }
     return { message: runbook.message, hint };
 }

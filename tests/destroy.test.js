@@ -1174,5 +1174,53 @@ describe('Command: destroy (mocked terraform spawn)', () => {
         errorSpy.mockRestore();
       }
     });
+
+    it('selects the prod VPC by Name tag when preview VPCs exist', async () => {
+      fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, 'terraform', 'main.tf'),
+        'locals {\n  app_name = "myapp${local.env_suffix}${local.grada_resource_suffix}"\n  grada_resource_suffix = "-abc123"\n}\n'
+      );
+      process.chdir(tmpDir);
+      const vpcs = [
+        { VpcId: 'vpc-prod', Tags: [{ Key: 'Name', Value: 'myapp-abc123-vpc' }] },
+        { VpcId: 'vpc-pr', Tags: [{ Key: 'Name', Value: 'myapp-pr-3-abc123-vpc' }] },
+      ];
+      const sgTags = [
+        { Key: 'ManagedBy', Value: 'grada' },
+        { Key: 'GradaProject', Value: 'myapp' },
+      ];
+      const ec2Client = {
+        send: vi.fn(async (command) => {
+          const name = command.constructor.name;
+          // Faithful filter emulation: AWS narrows by the tag filters.
+          if (name === 'DescribeVpcsCommand') {
+            const filters = command.input?.Filters || [];
+            const nameFilter = filters.find((f) => f.Name === 'tag:Name');
+            const found = nameFilter
+              ? vpcs.filter((v) => (v.Tags || []).some((t) => t.Key === 'Name' && nameFilter.Values.includes(t.Value)))
+              : vpcs;
+            return { Vpcs: found };
+          }
+          if (name === 'DescribeNetworkInterfacesCommand') return { NetworkInterfaces: [] };
+          if (name === 'DescribeSecurityGroupsCommand') {
+            return { SecurityGroups: [{ GroupId: 'sg-1', GroupName: 'myapp-extra', Tags: sgTags }] };
+          }
+          if (name === 'DeleteSecurityGroupCommand') return {};
+          throw new Error(`unexpected ${name}`);
+        }),
+      };
+      clack.mockConfirm.mockReset();
+      clack.mockConfirm.mockResolvedValue(true);
+      const handled = await handleDestroyTerraformError({
+        options: { isHeadless: false, ec2Client },
+        tfDirPath: path.join(tmpDir, 'terraform'),
+        attemptDestroy: vi.fn().mockResolvedValueOnce(undefined),
+        error: dependencyError(),
+      });
+      expect(handled).toEqual({ retried: true });
+      const describeCall = ec2Client.send.mock.calls.find(([cmd]) => cmd.constructor.name === 'DescribeVpcsCommand');
+      expect(JSON.stringify(describeCall[0].input.Filters)).toContain('myapp-abc123-vpc');
+    });
   });
 });

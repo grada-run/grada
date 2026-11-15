@@ -15,7 +15,7 @@ import { findDbTarget, dbStatusOf, resolveDbIdentifier, resolveDbClusterIdentifi
 import { requireManagedTree, parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { guardSleepingEnv } from '../utils/sleep-state.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
-import { resolveHeadless } from '../utils/resolvers.js';
+import { resolveHeadless, readTerraformProjectName, readResourceSuffix } from '../utils/resolvers.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 
 export const DEFAULT_DESTROY_DB_TIMEOUT_MS = 600000;
@@ -59,13 +59,18 @@ export function parseDestroyArgs(argv = []) {
 // Returns `{ retried: true }` when the destroy recovered so the caller
 // continues to bucket cleanup, else `{ retried: false, result }`.
 // Exported for unit tests: every branch must honor this contract.
-async function describeDependencyBlockers(ec2, projectName) {
-    const { Vpcs = [] } = await ec2.send(new DescribeVpcsCommand({
-        Filters: [
-            { Name: 'tag:ManagedBy', Values: ['grada'] },
-            { Name: 'tag:GradaProject', Values: [projectName] },
-        ],
-    }));
+async function describeDependencyBlockers(ec2, projectName, vpcName) {
+    // Preview workspaces share the GradaProject tag, so the project
+    // filter alone matches every preview VPC too — the exact prod
+    // Name narrows to the destroy target. Without a readable tree
+    // there is no Name, and the single-VPC length check below keeps
+    // the legacy behavior.
+    const filters = [
+        { Name: 'tag:ManagedBy', Values: ['grada'] },
+        { Name: 'tag:GradaProject', Values: [projectName] },
+    ];
+    if (vpcName) filters.push({ Name: 'tag:Name', Values: [vpcName] });
+    const { Vpcs = [] } = await ec2.send(new DescribeVpcsCommand({ Filters: filters }));
     if (Vpcs.length !== 1 || !Vpcs[0].VpcId) return null;
     const vpcId = Vpcs[0].VpcId;
     const [niResp, sgResp] = await Promise.all([
@@ -181,7 +186,21 @@ export async function handleDestroyTerraformError({ options, tfDirPath, attemptD
         let ec2 = null;
         try {
             ec2 = resolveClient(options.ec2Client, EC2Client, { region: region ?? process.env.AWS_REGION ?? 'us-east-2' });
-            blockers = await describeDependencyBlockers(ec2, actualProjectName);
+            // Rendered names beat the directory basename: the TF
+            // project + suffix pin the exact prod VPC Name, and
+            // unreadable trees fall back to basename matching.
+            let tagProject = actualProjectName;
+            let vpcName = null;
+            try {
+                const tfProject = readTerraformProjectName();
+                if (tfProject) {
+                    tagProject = tfProject;
+                    vpcName = `${tfProject}${readResourceSuffix()}-vpc`;
+                }
+            } catch {
+                // fall through with basename matching
+            }
+            blockers = await describeDependencyBlockers(ec2, tagProject, vpcName);
         } catch {
             blockers = null;
         }

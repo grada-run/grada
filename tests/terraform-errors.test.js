@@ -42,6 +42,13 @@ describe('R1: terraform error taxonomy', () => {
         expect(classifyTerraformError(stderr, ctx)).toMatchObject({ code, lockId: lockId ?? null });
     });
 
+    it('returns the secret name for pending-deletion errors', () => {
+        expect(classifyTerraformError('Error: creating Secrets Manager Secret (myapp-secrets-ab12cd): InvalidRequestException: already scheduled for deletion', {}))
+            .toMatchObject({ code: 'SECRET_PENDING_DELETION', secretName: 'myapp-secrets-ab12cd' });
+        expect(classifyTerraformError('Error: something already scheduled for deletion', {}))
+            .toMatchObject({ code: 'SECRET_PENDING_DELETION', secretName: null });
+    });
+
     it('returns null for unrecognized stderr (generic fallback retained)', () => {
         expect(classifyTerraformError('some mysterious provider explosion', {})).toBeNull();
         expect(classifyTerraformError('', {})).toBeNull();
@@ -98,6 +105,17 @@ describe('R1: terraform error taxonomy', () => {
             expect(hint).toContain('restore-secret');
             expect(hint).toContain('force-delete');
         }
+    });
+
+    it('pending-deletion runbook interpolates the secret name when known', () => {
+        for (const headless of [true, false]) {
+            const hint = getRunbook('SECRET_PENDING_DELETION', { headless, secretName: 'myapp-secrets-ab12cd' }).hint;
+            expect(hint).toContain('restore-secret --secret-id myapp-secrets-ab12cd');
+            expect(hint).toContain('aws_secretsmanager_secret.app_secrets');
+            expect(hint).not.toContain('<name>');
+        }
+        const fallback = getRunbook('SECRET_PENDING_DELETION', { headless: true }).hint;
+        expect(fallback).toContain('<name>');
     });
 
     it('pairs with-lines to collision markers for guided import', () => {

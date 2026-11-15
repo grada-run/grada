@@ -708,6 +708,7 @@ async function applyStackMain(input = {}) {
         const classified = classifyTerraformError(errString, { postRecovery: options._postRecovery === true });
         const code = structuredCode || classified?.code || null;
         const lockId = error.lockId || classified?.lockId || null;
+        const secretName = classified?.secretName || null;
 
         if (code === 'STATE_BUCKET_MISSING' && options._postRecovery === true) {
             // The bucket is still missing after a recreate: refuse instead
@@ -943,7 +944,7 @@ async function applyStackMain(input = {}) {
                     }
                 }
             }
-            const runbook = getRunbook(code, { headless: shouldAutoApprove(options), lockId });
+            const runbook = getRunbook(code, { headless: shouldAutoApprove(options), lockId, secretName });
             log.error(color.red(`✖ ${runbook.message}`));
             log.message(`  ${runbook.hint}\n`);
             if (reconfigureError) {
