@@ -1,7 +1,8 @@
 import path from 'path';
 import fs from 'fs';
-import { intro, outro, spinner, log, cancel, confirm, isCancel } from '@clack/prompts';
+import { intro, outro, spinner, log, cancel, confirm, isCancel, select } from '@clack/prompts';
 import color from 'picocolors';
+import { SecretsManagerClient, RestoreSecretCommand, DescribeSecretCommand, DeleteSecretCommand } from '@aws-sdk/client-secrets-manager';
 import { renderDryRunPreview, parseTerraformConfig, buildCostTelemetryProps } from '../utils/visualizer.js';
 import { detectFramework } from '../utils/detector.js';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName, isCliEntry } from '../core/telemetry.js';
@@ -17,7 +18,7 @@ import { requireAwakeEnvironment, resolveSleepTarget, guardSleepingEnv } from '.
 import { promptStateBucketRecovery, recreateStateBucket } from '../utils/recovery.js';
 import { resolveProjectName, readResourceSuffix } from '../utils/resolvers.js';
 import { ensureLambdaSeedImage } from '../utils/lambda-ecr.js';
-import { checkAwsCredentials, ensureStateBucketExists, isAuthError, printAwsAuthGuidance } from '../utils/aws.js';
+import { checkAwsCredentials, ensureStateBucketExists, isAuthError, printAwsAuthGuidance, resolveClient } from '../utils/aws.js';
 import { findUnreconciledFiles, isValidAccountId, PLACEHOLDER_ACCOUNT_ID } from '../utils/reconcile.js';
 import { runWake } from './wake.js';
 
@@ -944,11 +945,73 @@ async function applyStackMain(input = {}) {
                     }
                 }
             }
+            let secretRecoveryError = null;
+            if (code === 'SECRET_PENDING_DELETION' && secretName && options._secretRecovered !== true) {
+                // Offer the recovery in-flow instead of shelling the user
+                // out to pasted AWS CLI + raw terraform; declined, failed,
+                // dismissed, or unparseable runs fall through to the
+                // runbook below. Restore is non-destructive (auto under
+                // --auto-approve); force-delete always needs an explicit
+                // interactive choice, never auto.
+                const refused = await refuseIfNonInteractive(options, {
+                    message: '\n✖ apply needs approval to recover the deleted secret vault.',
+                    hint: '  Re-run with --auto-approve to restore non-interactively.\n',
+                    event: 'infrastructure_applied',
+                    telemetry: { projectName: actualProjectName },
+                    errorCode: 'SECRET_RECOVERY_NON_INTERACTIVE',
+                });
+                if (refused) return refused;
+                let method = shouldAutoApprove(options) ? 'restore' : null;
+                if (!method) {
+                    const choice = await select({
+                        message: `Secret "${secretName}" is scheduled for deletion — recover it and retry?`,
+                        options: [
+                            { value: 'restore', label: 'Restore the vault, import, and retry' },
+                            { value: 'force-delete', label: 'Force-delete without recovery and retry' },
+                            { value: 'cancel', label: 'Cancel (show manual steps)' },
+                        ],
+                    });
+                    if (!isCancel(choice) && (choice === 'restore' || choice === 'force-delete')) method = choice;
+                }
+                if (method) {
+                    try {
+                        const targetRegion = detectedConfig.region || process.env.AWS_REGION || 'us-east-2';
+                        const client = resolveClient(options.secretsClient, SecretsManagerClient, { region: targetRegion });
+                        if (method === 'restore') {
+                            await client.send(new RestoreSecretCommand({ SecretId: secretName }));
+                            const described = await client.send(new DescribeSecretCommand({ SecretId: secretName }));
+                            if (!described || !described.ARN) {
+                                throw new Error(`DescribeSecret returned no ARN for "${secretName}".`);
+                            }
+                            // Argv-spawned (no shell), so the count index
+                            // needs no quoting — unlike the printed runbook.
+                            await runTerraform(['import', 'aws_secretsmanager_secret.app_secrets[0]', described.ARN], tfDir, null, `Importing ${secretName}`);
+                        } else {
+                            await client.send(new DeleteSecretCommand({ SecretId: secretName, ForceDeleteWithoutRecovery: true }));
+                        }
+                    } catch (error) {
+                        secretRecoveryError = error;
+                    }
+                    if (secretRecoveryError === null) {
+                        trackEvent('secret_deletion_recovered', { projectName: actualProjectName, method });
+                        if (method === 'restore') {
+                            log.message(color.cyan('Restored the secret vault and imported it — retrying apply...'));
+                        } else {
+                            log.message(color.cyan('Force-deleted the secret vault — retrying apply...'));
+                            log.message(color.dim('  Re-push your secrets after apply (secrets push): the vault is recreated empty.'));
+                        }
+                        return applyStack({ ...options, _skipPreview: true, _secretRecovered: true });
+                    }
+                }
+            }
             const runbook = getRunbook(code, { headless: shouldAutoApprove(options), lockId, secretName });
             log.error(color.red(`✖ ${runbook.message}`));
             log.message(`  ${runbook.hint}\n`);
             if (reconfigureError) {
                 log.message(color.dim(`  (Automatic reconfigure failed: ${reconfigureError.message})`));
+            }
+            if (secretRecoveryError) {
+                log.message(color.dim(`  (Automatic recovery failed: ${secretRecoveryError.message})`));
             }
             log.message(color.dim(errString.split('\n').slice(0, 8).join('\n')));
         } else {

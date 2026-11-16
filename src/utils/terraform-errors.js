@@ -161,8 +161,8 @@ const RUNBOOKS = {
     },
     SECRET_PENDING_DELETION: {
         message: 'A Secrets Manager secret is scheduled for deletion.',
-        headless: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import aws_secretsmanager_secret.app_secrets <arn>) or force-delete without recovery (aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery) and re-apply + push — fetch the ARN via aws secretsmanager describe-secret --secret-id <name> --query ARN --output text. Grada never force-deletes: the window protects against accidental loss.',
-        interactive: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import aws_secretsmanager_secret.app_secrets <arn>) or force-delete without recovery (aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery) and re-apply + push — fetch the ARN via aws secretsmanager describe-secret --secret-id <name> --query ARN --output text. Grada never force-deletes: the window protects against accidental loss.',
+        headless: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import \'aws_secretsmanager_secret.app_secrets[0]\' <arn>) or force-delete without recovery (aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery) and re-apply + push — fetch the ARN via aws secretsmanager describe-secret --secret-id <name> --query ARN --output text. Grada never force-deletes: the window protects against accidental loss.',
+        interactive: 'Restore it (aws secretsmanager restore-secret --secret-id <name>, then cd terraform && terraform import \'aws_secretsmanager_secret.app_secrets[0]\' <arn>) or force-delete without recovery (aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery) and re-apply + push — fetch the ARN via aws secretsmanager describe-secret --secret-id <name> --query ARN --output text. Grada never force-deletes: the window protects against accidental loss.',
     },
 };
 

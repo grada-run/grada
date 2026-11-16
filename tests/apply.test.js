@@ -51,6 +51,7 @@ import { renderDryRunPreview } from '../src/utils/visualizer.js';
 import { provisionStateBucket, ensureStateBucketExists } from '../src/utils/aws.js';
 import { upsertAutoTfvar } from '../src/utils/terraform-metadata.js';
 import { trackEvent, flushTelemetry } from '../src/core/telemetry.js';
+import { RestoreSecretCommand, DescribeSecretCommand, DeleteSecretCommand } from '@aws-sdk/client-secrets-manager';
 
 const COST_PROPS_SHAPE = {
   projectName: expect.any(String),
@@ -727,6 +728,185 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(dryLambda).toEqual({ ok: true, dryRun: true });
     expect(mockSpawn).not.toHaveBeenCalled();
   });
+
+  // --- Pending-deletion recovery: restore/import/retry in-flow ---
+  const PENDING_DELETION_STDERR =
+    'Error: creating Secrets Manager Secret (myapp-secrets-ab12cd): InvalidRequestException: secret myapp-secrets-ab12cd is already scheduled for deletion';
+  const VAULT_ARN = 'arn:aws:secretsmanager:us-east-2:123456789012:secret:myapp-secrets-ab12cd-x7Q12z';
+  const OUTPUT_JSON = JSON.stringify({
+    cloudfront_url: { value: 'https://d123.cloudfront.net' },
+    alb_direct_url: { value: 'http://alb-123.us-east-2.elb.amazonaws.com' },
+  });
+
+  function mockPendingDeletionApply({ applies, imports }) {
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      if (args[0] === 'apply') {
+        applies.count += 1;
+        if (applies.count === 1) return makeChild({ code: 1, stderr: PENDING_DELETION_STDERR });
+        return makeChild({ code: 0, stdout: 'Apply complete!' });
+      }
+      if (args[0] === 'import') {
+        imports.push(args);
+        return makeChild({ code: 0, stdout: 'Import successful!' });
+      }
+      if (args[0] === 'output') return makeChild({ code: 0, stdout: OUTPUT_JSON });
+      return makeChild({ code: 0 });
+    });
+  }
+
+  it('restores the pending-deletion vault on selection and retries the apply', async () => {
+    writeProject();
+    const applies = { count: 0 };
+    const imports = [];
+    mockPendingDeletionApply({ applies, imports });
+    const sent = [];
+    const secretsClient = {
+      send: vi.fn(async (command) => {
+        sent.push(command);
+        if (command instanceof DescribeSecretCommand) return { ARN: VAULT_ARN };
+        return {};
+      }),
+    };
+    clack.mockSelect.mockResolvedValue('restore');
+
+    const result = await applyStack({ isHeadless: false, secretsClient });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(applies.count).toBe(2);
+    expect(sent[0]).toBeInstanceOf(RestoreSecretCommand);
+    expect(sent[0].input).toMatchObject({ SecretId: 'myapp-secrets-ab12cd' });
+    expect(sent[1]).toBeInstanceOf(DescribeSecretCommand);
+    expect(imports).toEqual([['import', 'aws_secretsmanager_secret.app_secrets[0]', VAULT_ARN]]);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'secret_deletion_recovered',
+      expect.objectContaining({ method: 'restore' })
+    );
+  });
+
+  it('restores without prompting under --auto-approve', async () => {
+    writeProject();
+    const applies = { count: 0 };
+    const imports = [];
+    mockPendingDeletionApply({ applies, imports });
+    const secretsClient = {
+      send: vi.fn(async (command) => {
+        if (command instanceof DescribeSecretCommand) return { ARN: VAULT_ARN };
+        return {};
+      }),
+    };
+
+    const result = await applyStack({ isHeadless: true, autoApprove: true, secretsClient });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(applies.count).toBe(2);
+    expect(clack.mockSelect).not.toHaveBeenCalled();
+    expect(secretsClient.send).toHaveBeenCalledTimes(2);
+    expect(imports).toHaveLength(1);
+  });
+
+  it('refuses secret recovery headless without approval and touches nothing', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: PENDING_DELETION_STDERR });
+    });
+    const secretsClient = { send: vi.fn() };
+
+    await expect(applyStack({ _skipPreview: true, secretsClient })).rejects.toMatchObject({ exitCode: 1 });
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'SECRET_RECOVERY_NON_INTERACTIVE' })
+    );
+    expect(secretsClient.send).not.toHaveBeenCalled();
+    expect(clack.mockSelect).not.toHaveBeenCalled();
+  });
+
+  it('force-deletes on explicit selection and retries without importing', async () => {
+    writeProject();
+    const applies = { count: 0 };
+    const imports = [];
+    mockPendingDeletionApply({ applies, imports });
+    const secretsClient = { send: vi.fn(async () => ({})) };
+    clack.mockSelect.mockResolvedValue('force-delete');
+
+    const result = await applyStack({ isHeadless: false, secretsClient });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(applies.count).toBe(2);
+    expect(secretsClient.send).toHaveBeenCalledTimes(1);
+    const command = secretsClient.send.mock.calls[0][0];
+    expect(command).toBeInstanceOf(DeleteSecretCommand);
+    expect(command.input).toMatchObject({ SecretId: 'myapp-secrets-ab12cd', ForceDeleteWithoutRecovery: true });
+    expect(imports).toEqual([]);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'secret_deletion_recovered',
+      expect.objectContaining({ method: 'force-delete' })
+    );
+  });
+
+  it('falls through to the runbook when recovery is declined or dismissed', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: PENDING_DELETION_STDERR });
+    });
+    const secretsClient = { send: vi.fn() };
+    clack.mockIsCancel.mockImplementation((value) => typeof value === 'symbol');
+    clack.mockSelect.mockResolvedValueOnce('cancel').mockResolvedValueOnce(Symbol('dismissed'));
+
+    for (let i = 0; i < 2; i++) {
+      await expect(applyStack({ isHeadless: false, secretsClient })).rejects.toMatchObject({ exitCode: 1 });
+    }
+    expect(secretsClient.send).not.toHaveBeenCalled();
+    expect(trackEvent).toHaveBeenCalledWith(
+      'infrastructure_applied',
+      expect.objectContaining({ success: false, error_code: 'SECRET_PENDING_DELETION' })
+    );
+  });
+
+  it('skips the offer when the secret name is unparseable', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: 'Error: apply failed: a vault secret is already scheduled for deletion' });
+    });
+    const secretsClient = { send: vi.fn() };
+
+    await expect(applyStack({ isHeadless: false, secretsClient })).rejects.toMatchObject({ exitCode: 1 });
+    expect(clack.mockSelect).not.toHaveBeenCalled();
+    expect(secretsClient.send).not.toHaveBeenCalled();
+  });
+
+  it('falls through with a failure note when automatic recovery fails', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: PENDING_DELETION_STDERR });
+    });
+    const secretsClient = { send: vi.fn(async () => { throw new Error('AccessDenied'); }) };
+    clack.mockSelect.mockResolvedValue('restore');
+
+    await expect(applyStack({ isHeadless: false, secretsClient })).rejects.toMatchObject({ exitCode: 1 });
+    const messages = clack.mockLogMessage.mock.calls.map((call) => stripVTControlCharacters(String(call[0])));
+    expect(messages.some((message) => message.includes('Automatic recovery failed'))).toBe(true);
+    expect(messages.some((message) => message.includes('terraform import'))).toBe(true);
+  });
+
+  it('does not re-offer recovery after a recovered retry fails again', async () => {
+    writeProject();
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      return makeChild({ code: 1, stderr: PENDING_DELETION_STDERR });
+    });
+    const secretsClient = { send: vi.fn() };
+
+    await expect(applyStack({ isHeadless: false, _secretRecovered: true, secretsClient })).rejects.toMatchObject({
+      exitCode: 1,
+    });
+    expect(clack.mockSelect).not.toHaveBeenCalled();
+    expect(secretsClient.send).not.toHaveBeenCalled();
+  });
 });
 
 describe('apply: fuzzer hardening', () => {
@@ -989,4 +1169,5 @@ describe('upsertAutoTfvar', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
 });

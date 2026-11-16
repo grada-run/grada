@@ -118,6 +118,14 @@ describe('R1: terraform error taxonomy', () => {
         expect(fallback).toContain('<name>');
     });
 
+    it('pending-deletion runbook prints the indexed import address quoted for shells', () => {
+        for (const headless of [true, false]) {
+            const hint = getRunbook('SECRET_PENDING_DELETION', { headless, secretName: 'myapp-secrets-ab12cd' }).hint;
+            expect(hint).toContain(`terraform import 'aws_secretsmanager_secret.app_secrets[0]'`);
+            expect(hint).not.toContain('terraform import aws_secretsmanager_secret.app_secrets ');
+        }
+    });
+
     it('pairs with-lines to collision markers for guided import', () => {
         const stderr = [
             'Error: creating S3 Bucket (myapp-x): BucketAlreadyExists: The requested bucket name is not available',

@@ -116,6 +116,7 @@ Several gates commonly bite scripted pipelines — every one fails loud with a n
 - Every command rejects a misspelled or unsupported flag with `UNKNOWN_FLAG` — naming the offending flag — instead of silently ignoring it (a typo like `sleep --skp-db` exits 1 before touching anything; check the spelling or run `grada <command> --help`).
 - `apply` fails with `RECONCILE_NON_INTERACTIVE` on an unreconciled `--offline` tree without approval (pass `--auto-approve` to rewrite the placeholders and create the state bucket non-interactively).
 - `apply` fails with `OIDC_ADOPT_NON_INTERACTIVE` when the account already has a GitHub OIDC provider and adoption isn't approved (pass `--auto-approve` to adopt it into `terraform/grada.auto.tfvars` and retry non-interactively).
+- `apply` fails with `SECRET_RECOVERY_NON_INTERACTIVE` when the secrets vault is scheduled for deletion and recovery isn't approved (pass `--auto-approve` to restore, import, and retry non-interactively; force-delete always needs an interactive choice).
 - Anything that escapes all of the above (an SDK-internal failure, a bug) is caught by a last-resort handler: exit 1 with a one-line report on stderr — or a parseable `{ok: false, exitCode: 1, error, reason}` envelope on stdout under `--json` — so even unanticipated failures stay machine-readable.
 
 ## Exit codes
