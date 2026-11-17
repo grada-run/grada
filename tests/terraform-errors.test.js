@@ -107,6 +107,14 @@ describe('R1: terraform error taxonomy', () => {
         }
     });
 
+    it('pending-deletion runbook scopes force-delete to an explicit choice', () => {
+        for (const headless of [true, false]) {
+            const hint = getRunbook('SECRET_PENDING_DELETION', { headless }).hint;
+            expect(hint).toContain('only force-deletes when you explicitly choose it');
+            expect(hint).not.toContain('never force-deletes:');
+        }
+    });
+
     it('pending-deletion runbook interpolates the secret name when known', () => {
         for (const headless of [true, false]) {
             const hint = getRunbook('SECRET_PENDING_DELETION', { headless, secretName: 'myapp-secrets-ab12cd' }).hint;

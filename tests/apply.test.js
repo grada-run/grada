@@ -764,7 +764,9 @@ describe('Command: apply (mocked terraform spawn)', () => {
     const secretsClient = {
       send: vi.fn(async (command) => {
         sent.push(command);
-        if (command instanceof DescribeSecretCommand) return { ARN: VAULT_ARN };
+        if (command instanceof DescribeSecretCommand) {
+          return { ARN: VAULT_ARN, VersionIdsToStages: { 'ver-prev': ['AWSPREVIOUS'], 'ver-live': ['AWSCURRENT'] } };
+        }
         return {};
       }),
     };
@@ -777,10 +779,13 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(sent[0]).toBeInstanceOf(RestoreSecretCommand);
     expect(sent[0].input).toMatchObject({ SecretId: 'myapp-secrets-ab12cd' });
     expect(sent[1]).toBeInstanceOf(DescribeSecretCommand);
-    expect(imports).toEqual([['import', 'aws_secretsmanager_secret.app_secrets[0]', VAULT_ARN]]);
+    expect(imports).toEqual([
+      ['import', 'aws_secretsmanager_secret.app_secrets[0]', VAULT_ARN],
+      ['import', 'aws_secretsmanager_secret_version.app_secrets_initial[0]', `${VAULT_ARN}|ver-live`],
+    ]);
     expect(trackEvent).toHaveBeenCalledWith(
       'secret_deletion_recovered',
-      expect.objectContaining({ method: 'restore' })
+      expect.objectContaining({ method: 'restore', adopted: true })
     );
   });
 
@@ -791,7 +796,9 @@ describe('Command: apply (mocked terraform spawn)', () => {
     mockPendingDeletionApply({ applies, imports });
     const secretsClient = {
       send: vi.fn(async (command) => {
-        if (command instanceof DescribeSecretCommand) return { ARN: VAULT_ARN };
+        if (command instanceof DescribeSecretCommand) {
+          return { ARN: VAULT_ARN, VersionIdsToStages: { 'ver-live': ['AWSCURRENT'] } };
+        }
         return {};
       }),
     };
@@ -802,7 +809,98 @@ describe('Command: apply (mocked terraform spawn)', () => {
     expect(applies.count).toBe(2);
     expect(clack.mockSelect).not.toHaveBeenCalled();
     expect(secretsClient.send).toHaveBeenCalledTimes(2);
+    expect(imports).toHaveLength(2);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'secret_deletion_recovered',
+      expect.objectContaining({ method: 'restore', adopted: true })
+    );
+  });
+
+  it('warns and skips version adoption when no live version is staged current', async () => {
+    writeProject();
+    const applies = { count: 0 };
+    const imports = [];
+    mockPendingDeletionApply({ applies, imports });
+    const secretsClient = {
+      send: vi.fn(async (command) => {
+        if (command instanceof DescribeSecretCommand) return { ARN: VAULT_ARN, VersionIdsToStages: {} };
+        return {};
+      }),
+    };
+    clack.mockSelect.mockResolvedValue('restore');
+
+    const result = await applyStack({ isHeadless: false, secretsClient });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(applies.count).toBe(2);
+    expect(imports).toEqual([['import', 'aws_secretsmanager_secret.app_secrets[0]', VAULT_ARN]]);
+    const messages = clack.mockLogMessage.mock.calls.map((call) => stripVTControlCharacters(String(call[0])));
+    expect(messages.some((message) => message.includes('secrets audit'))).toBe(true);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'secret_deletion_recovered',
+      expect.objectContaining({ method: 'restore', adopted: false })
+    );
+  });
+
+  it('treats a stageless describe response as no live version', async () => {
+    writeProject();
+    const applies = { count: 0 };
+    const imports = [];
+    mockPendingDeletionApply({ applies, imports });
+    const secretsClient = {
+      send: vi.fn(async (command) => {
+        if (command instanceof DescribeSecretCommand) return { ARN: VAULT_ARN };
+        return {};
+      }),
+    };
+    clack.mockSelect.mockResolvedValue('restore');
+
+    const result = await applyStack({ isHeadless: false, secretsClient });
+
+    expect(result).toMatchObject({ ok: true });
     expect(imports).toHaveLength(1);
+    const messages = clack.mockLogMessage.mock.calls.map((call) => stripVTControlCharacters(String(call[0])));
+    expect(messages.some((message) => message.includes('secrets audit'))).toBe(true);
+    expect(trackEvent).toHaveBeenCalledWith(
+      'secret_deletion_recovered',
+      expect.objectContaining({ method: 'restore', adopted: false })
+    );
+  });
+
+  it('falls through with a failure note when the version import fails', async () => {
+    writeProject();
+    const applies = { count: 0 };
+    const imports = [];
+    mockSpawn.mockImplementation((cmd, args = []) => {
+      if (args[0] === 'init') return makeChild({ code: 0 });
+      if (args[0] === 'apply') {
+        applies.count += 1;
+        return makeChild({ code: 1, stderr: PENDING_DELETION_STDERR });
+      }
+      if (args[0] === 'import') {
+        imports.push(args);
+        if (imports.length === 1) return makeChild({ code: 0, stdout: 'Import successful!' });
+        return makeChild({ code: 1, stderr: 'Error: Cannot import non-existent remote object' });
+      }
+      if (args[0] === 'output') return makeChild({ code: 0, stdout: OUTPUT_JSON });
+      return makeChild({ code: 0 });
+    });
+    const secretsClient = {
+      send: vi.fn(async (command) => {
+        if (command instanceof DescribeSecretCommand) {
+          return { ARN: VAULT_ARN, VersionIdsToStages: { 'ver-live': ['AWSCURRENT'] } };
+        }
+        return {};
+      }),
+    };
+    clack.mockSelect.mockResolvedValue('restore');
+
+    await expect(applyStack({ isHeadless: false, secretsClient })).rejects.toMatchObject({ exitCode: 1 });
+    expect(applies.count).toBe(1);
+    expect(imports).toHaveLength(2);
+    const messages = clack.mockLogMessage.mock.calls.map((call) => stripVTControlCharacters(String(call[0])));
+    expect(messages.some((message) => message.includes('Automatic recovery failed'))).toBe(true);
+    expect(messages.some((message) => message.includes('terraform import'))).toBe(true);
   });
 
   it('refuses secret recovery headless without approval and touches nothing', async () => {

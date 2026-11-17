@@ -406,6 +406,18 @@ function preflightSecretEnvCollisions({ targetDir }) {
     return { kind: 'collision', keys: collisions };
 }
 
+// Picks the live AWSCURRENT version id out of a DescribeSecret
+// response — null when none is staged current (a missing or
+// stageless map means there is nothing safe to adopt).
+function currentLiveVersionId(described) {
+    const stages = described?.VersionIdsToStages;
+    if (!stages || typeof stages !== 'object') return null;
+    for (const [versionId, versionStages] of Object.entries(stages)) {
+        if (Array.isArray(versionStages) && versionStages.includes('AWSCURRENT')) return versionId;
+    }
+    return null;
+}
+
 export async function applyStack(input = {}) {
     setActiveCommandName('apply');
     try {
@@ -974,6 +986,7 @@ async function applyStackMain(input = {}) {
                     if (!isCancel(choice) && (choice === 'restore' || choice === 'force-delete')) method = choice;
                 }
                 if (method) {
+                    let versionAdopted = null;
                     try {
                         const targetRegion = detectedConfig.region || process.env.AWS_REGION || 'us-east-2';
                         const client = resolveClient(options.secretsClient, SecretsManagerClient, { region: targetRegion });
@@ -986,6 +999,15 @@ async function applyStackMain(input = {}) {
                             // Argv-spawned (no shell), so the count index
                             // needs no quoting — unlike the printed runbook.
                             await runTerraform(['import', 'aws_secretsmanager_secret.app_secrets[0]', described.ARN], tfDir, null, `Importing ${secretName}`);
+                            // Adopt the live current version too: without
+                            // it the retry recreates the placeholder
+                            // version over the restored real values
+                            // (ignore_changes never stops creation).
+                            const liveVersion = currentLiveVersionId(described);
+                            versionAdopted = liveVersion !== null;
+                            if (liveVersion) {
+                                await runTerraform(['import', 'aws_secretsmanager_secret_version.app_secrets_initial[0]', `${described.ARN}|${liveVersion}`], tfDir, null, `Importing ${secretName} live values`);
+                            }
                         } else {
                             await client.send(new DeleteSecretCommand({ SecretId: secretName, ForceDeleteWithoutRecovery: true }));
                         }
@@ -993,9 +1015,18 @@ async function applyStackMain(input = {}) {
                         secretRecoveryError = error;
                     }
                     if (secretRecoveryError === null) {
-                        trackEvent('secret_deletion_recovered', { projectName: actualProjectName, method });
+                        trackEvent('secret_deletion_recovered', {
+                            projectName: actualProjectName,
+                            method,
+                            ...(method === 'restore' ? { adopted: versionAdopted === true } : {}),
+                        });
                         if (method === 'restore') {
-                            log.message(color.cyan('Restored the secret vault and imported it — retrying apply...'));
+                            if (versionAdopted) {
+                                log.message(color.cyan('Restored the secret vault and adopted its live values — retrying apply...'));
+                            } else {
+                                log.message(color.cyan('Restored the secret vault and imported it — retrying apply...'));
+                                log.message(color.yellow('  Live values could not be adopted: run secrets audit after apply and re-push if they look wrong.'));
+                            }
                         } else {
                             log.message(color.cyan('Force-deleted the secret vault — retrying apply...'));
                             log.message(color.dim('  Re-push your secrets after apply (secrets push): the vault is recreated empty.'));
