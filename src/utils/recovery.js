@@ -3,7 +3,41 @@ import path from 'path';
 import { confirm, isCancel } from '@clack/prompts';
 import { ensureStateBucketExists } from './aws.js';
 import { parseStateBucketBackend } from './terraform-metadata.js';
-import { refuseIfNonInteractive } from './command.js';
+import { refuseIfNonInteractive, shouldAutoApprove } from './command.js';
+
+// confirm() with the recovery defaults: preselected yes, cancel-safe,
+// resolving to a plain boolean.
+export async function confirmRecoveryAction(message) {
+    const confirmed = await confirm({ message, initialValue: true });
+    return !isCancel(confirmed) && confirmed === true;
+}
+
+// Runs one in-flow recovery round — refuse-if-headless, approve (auto or
+// prompt), act — and reports a discriminated outcome so callers keep owning
+// their own retry + runbook rendering:
+//
+// - { status: 'refused', refusal } — propagate the refusal result as-is.
+// - { status: 'recovered', method } — act succeeded; retry the command.
+// - { status: 'declined' } — user declined/dismissed; show manual guidance.
+// - { status: 'failed', method, error } — act threw; show guidance + cause.
+//
+// `approve` runs only when --auto-approve is off and resolves to a truthy
+// method (confirm) or a method string (select), falsy on decline.
+// `autoMethod` is the method taken non-interactively. `act` receives the
+// resolved method; anything it needs beyond that (flags for the fallthrough
+// notes) it sets through the caller's own scope.
+export async function offerInFlowRecovery({ options, refusal, approve, autoMethod = true, act }) {
+    const refused = await refuseIfNonInteractive(options, refusal);
+    if (refused) return { status: 'refused', refusal: refused };
+    const method = shouldAutoApprove(options) ? autoMethod : await approve();
+    if (!method) return { status: 'declined' };
+    try {
+        await act(method);
+        return { status: 'recovered', method };
+    } catch (error) {
+        return { status: 'failed', method, error };
+    }
+}
 
 // Asks whether to recreate a missing state bucket and resume
 // provisioning. Returns true when approved. Has no side effects

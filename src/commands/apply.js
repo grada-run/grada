@@ -15,7 +15,7 @@ import { readInitManifest, recordAppliedTarget } from '../utils/backup.js';
 import { requireManagedTree, parseStateBucketBackend, upsertAutoTfvar } from '../utils/terraform-metadata.js';
 import { readTerraformComputeTarget, resolveRegion, readRenderedContainerEnvNames } from '../utils/resolvers.js';
 import { requireAwakeEnvironment, resolveSleepTarget, guardSleepingEnv } from '../utils/sleep-state.js';
-import { promptStateBucketRecovery, recreateStateBucket } from '../utils/recovery.js';
+import { promptStateBucketRecovery, recreateStateBucket, offerInFlowRecovery, confirmRecoveryAction } from '../utils/recovery.js';
 import { resolveProjectName, readResourceSuffix } from '../utils/resolvers.js';
 import { ensureLambdaSeedImage } from '../utils/lambda-ecr.js';
 import { checkAwsCredentials, ensureStateBucketExists, isAuthError, printAwsAuthGuidance, resolveClient } from '../utils/aws.js';
@@ -821,36 +821,31 @@ async function applyStackMain(input = {}) {
                 const pairs = parseCollisionImports(errString)
                     .filter((pair) => !pair.address.startsWith('aws_secretsmanager_secret.'));
                 if (pairs.length > 0) {
-                    const refused = await refuseIfNonInteractive(options, {
-                        message: '\n✖ apply needs approval to import collided resources into state.',
-                        hint: '  Re-run with --auto-approve to import non-interactively.\n',
-                        event: 'infrastructure_applied',
-                        telemetry: { projectName: actualProjectName },
-                        errorCode: 'COLLISION_IMPORT_NON_INTERACTIVE',
-                    });
-                    if (refused) return refused;
-                    let proceed = shouldAutoApprove(options);
-                    if (!proceed) {
-                        const confirmed = await confirm({
-                            message: `Import ${pairs.length} collided resource${pairs.length === 1 ? '' : 's'} into state and retry?`,
-                            initialValue: true,
-                        });
-                        proceed = !isCancel(confirmed) && confirmed === true;
-                    }
-                    if (proceed) {
-                        try {
+                    const recovery = await offerInFlowRecovery({
+                        options,
+                        refusal: {
+                            message: '\n✖ apply needs approval to import collided resources into state.',
+                            hint: '  Re-run with --auto-approve to import non-interactively.\n',
+                            event: 'infrastructure_applied',
+                            telemetry: { projectName: actualProjectName },
+                            errorCode: 'COLLISION_IMPORT_NON_INTERACTIVE',
+                        },
+                        approve: () => confirmRecoveryAction(
+                            `Import ${pairs.length} collided resource${pairs.length === 1 ? '' : 's'} into state and retry?`
+                        ),
+                        act: async () => {
                             for (const pair of pairs) {
                                 await runTerraform(['import', pair.address, pair.id], tfDir, null, `Importing ${pair.address}`);
                             }
-                        } catch (error) {
-                            collisionImportError = error;
-                        }
-                        if (collisionImportError === null) {
-                            trackEvent('collision_resources_imported', { projectName: actualProjectName, count: pairs.length });
-                            log.message(color.cyan('Imported collided resources — retrying apply...'));
-                            return applyStack({ ...options, _skipPreview: true, _collisionImported: true });
-                        }
+                        },
+                    });
+                    if (recovery.status === 'refused') return recovery.refusal;
+                    if (recovery.status === 'recovered') {
+                        trackEvent('collision_resources_imported', { projectName: actualProjectName, count: pairs.length });
+                        log.message(color.cyan('Imported collided resources — retrying apply...'));
+                        return applyStack({ ...options, _skipPreview: true, _collisionImported: true });
                     }
+                    if (recovery.status === 'failed') collisionImportError = recovery.error;
                 }
             }
             trackEvent('bucket_recovery_probed', { projectName: actualProjectName, collisions });
@@ -872,38 +867,32 @@ async function applyStackMain(input = {}) {
             // Adopt the shared provider instead of hand-editing: the
             // GitHub provider URL is account-singleton, so the existing
             // provider IS the match — flip the var and retry.
-            const refused = await refuseIfNonInteractive(options, {
-                message: '\n✖ apply needs approval to adopt the existing GitHub OIDC provider.',
-                hint: '  Re-run with --auto-approve to adopt non-interactively.\n',
-                event: 'infrastructure_applied',
-                telemetry: { projectName: actualProjectName },
-                errorCode: 'OIDC_ADOPT_NON_INTERACTIVE',
-            });
-            if (refused) return refused;
-            let adopt = shouldAutoApprove(options);
-            if (!adopt) {
-                const confirmed = await confirm({
-                    message: 'Adopt the existing GitHub OIDC provider (writes create_oidc_provider = false) and retry?',
-                    initialValue: true,
-                });
-                adopt = !isCancel(confirmed) && confirmed === true;
-            }
-            if (adopt) {
-                try {
+            const recovery = await offerInFlowRecovery({
+                options,
+                refusal: {
+                    message: '\n✖ apply needs approval to adopt the existing GitHub OIDC provider.',
+                    hint: '  Re-run with --auto-approve to adopt non-interactively.\n',
+                    event: 'infrastructure_applied',
+                    telemetry: { projectName: actualProjectName },
+                    errorCode: 'OIDC_ADOPT_NON_INTERACTIVE',
+                },
+                approve: () => confirmRecoveryAction(
+                    'Adopt the existing GitHub OIDC provider (writes create_oidc_provider = false) and retry?'
+                ),
+                act: async () => {
                     upsertAutoTfvar(tfDir, 'create_oidc_provider', false);
-                } catch (error) {
-                    // A failed write must not crash inside the error
-                    // handler: fall through to the manual guidance with
-                    // the write error appended.
-                    adoptUpsertError = error;
-                }
-                if (adoptUpsertError === null) {
-                    trackEvent('oidc_provider_adopted', { projectName: actualProjectName });
-                    log.message(color.cyan('Adopted the existing OIDC provider — retrying apply...'));
-                    return applyStack({ ...options, _skipPreview: true, _oidcAdopted: true });
-                }
+                },
+            });
+            if (recovery.status === 'refused') return recovery.refusal;
+            if (recovery.status === 'recovered') {
+                trackEvent('oidc_provider_adopted', { projectName: actualProjectName });
+                log.message(color.cyan('Adopted the existing OIDC provider — retrying apply...'));
+                return applyStack({ ...options, _skipPreview: true, _oidcAdopted: true });
             }
-            // Declined (or unwritable): fall through to the manual guidance below.
+            // A failed write must not crash inside the error handler:
+            // fall through to the manual guidance with the write error
+            // appended. Declined runs fall through the same way.
+            if (recovery.status === 'failed') adoptUpsertError = recovery.error;
         }
 
         if (code === 'OIDC_PROVIDER_CONFLICT') {
@@ -928,36 +917,32 @@ async function applyStackMain(input = {}) {
                 // Offer the reconfigure in-flow instead of shelling the
                 // user out to raw terraform; declined or failed runs
                 // fall through to the runbook below.
-                const refused = await refuseIfNonInteractive(options, {
-                    message: '\n✖ apply needs approval to reconfigure the Terraform backend.',
-                    hint: '  Re-run with --auto-approve to reconfigure non-interactively.\n',
-                    event: 'infrastructure_applied',
-                    telemetry: { projectName: actualProjectName },
-                    errorCode: 'BACKEND_RECONFIGURE_NON_INTERACTIVE',
-                });
-                if (refused) return refused;
-                let proceed = shouldAutoApprove(options);
-                if (!proceed) {
-                    const confirmed = await confirm({
-                        message: 'Reconfigure the Terraform backend (init -reconfigure) and retry?',
-                        initialValue: true,
-                    });
-                    proceed = !isCancel(confirmed) && confirmed === true;
-                }
-                if (proceed) {
-                    try {
+                const recovery = await offerInFlowRecovery({
+                    options,
+                    refusal: {
+                        message: '\n✖ apply needs approval to reconfigure the Terraform backend.',
+                        hint: '  Re-run with --auto-approve to reconfigure non-interactively.\n',
+                        event: 'infrastructure_applied',
+                        telemetry: { projectName: actualProjectName },
+                        errorCode: 'BACKEND_RECONFIGURE_NON_INTERACTIVE',
+                    },
+                    approve: () => confirmRecoveryAction(
+                        'Reconfigure the Terraform backend (init -reconfigure) and retry?'
+                    ),
+                    act: async () => {
                         await runTerraform(['init', '-reconfigure'], tfDir, null, 'Reconfiguring backend');
-                    } catch (error) {
-                        reconfigureError = error;
-                    }
-                    if (reconfigureError === null) {
-                        trackEvent('backend_reconfigured', { projectName: actualProjectName });
-                        log.message(color.cyan('Reconfigured the backend — retrying apply...'));
-                        return applyStack({ ...options, _skipPreview: true, _backendReconfigured: true });
-                    }
+                    },
+                });
+                if (recovery.status === 'refused') return recovery.refusal;
+                if (recovery.status === 'recovered') {
+                    trackEvent('backend_reconfigured', { projectName: actualProjectName });
+                    log.message(color.cyan('Reconfigured the backend — retrying apply...'));
+                    return applyStack({ ...options, _skipPreview: true, _backendReconfigured: true });
                 }
+                if (recovery.status === 'failed') reconfigureError = recovery.error;
             }
             let secretRecoveryError = null;
+            let secretImported = false;
             if (code === 'SECRET_PENDING_DELETION' && secretName && options._secretRecovered !== true) {
                 // Offer the recovery in-flow instead of shelling the user
                 // out to pasted AWS CLI + raw terraform; declined, failed,
@@ -965,29 +950,30 @@ async function applyStackMain(input = {}) {
                 // runbook below. Restore is non-destructive (auto under
                 // --auto-approve); force-delete always needs an explicit
                 // interactive choice, never auto.
-                const refused = await refuseIfNonInteractive(options, {
-                    message: '\n✖ apply needs approval to recover the deleted secret vault.',
-                    hint: '  Re-run with --auto-approve to restore non-interactively.\n',
-                    event: 'infrastructure_applied',
-                    telemetry: { projectName: actualProjectName },
-                    errorCode: 'SECRET_RECOVERY_NON_INTERACTIVE',
-                });
-                if (refused) return refused;
-                let method = shouldAutoApprove(options) ? 'restore' : null;
-                if (!method) {
-                    const choice = await select({
-                        message: `Secret "${secretName}" is scheduled for deletion — recover it and retry?`,
-                        options: [
-                            { value: 'restore', label: 'Restore the vault, import, and retry' },
-                            { value: 'force-delete', label: 'Force-delete without recovery and retry' },
-                            { value: 'cancel', label: 'Cancel (show manual steps)' },
-                        ],
-                    });
-                    if (!isCancel(choice) && (choice === 'restore' || choice === 'force-delete')) method = choice;
-                }
-                if (method) {
-                    let versionAdopted = null;
-                    try {
+                let versionAdopted = null;
+                const recovery = await offerInFlowRecovery({
+                    options,
+                    refusal: {
+                        message: '\n✖ apply needs approval to recover the deleted secret vault.',
+                        hint: '  Re-run with --auto-approve to restore non-interactively.\n',
+                        event: 'infrastructure_applied',
+                        telemetry: { projectName: actualProjectName },
+                        errorCode: 'SECRET_RECOVERY_NON_INTERACTIVE',
+                    },
+                    approve: async () => {
+                        const choice = await select({
+                            message: `Secret "${secretName}" is scheduled for deletion — recover it and retry?`,
+                            options: [
+                                { value: 'restore', label: 'Restore the vault, import, and retry' },
+                                { value: 'force-delete', label: 'Force-delete without recovery and retry' },
+                                { value: 'cancel', label: 'Cancel (show manual steps)' },
+                            ],
+                        });
+                        if (!isCancel(choice) && (choice === 'restore' || choice === 'force-delete')) return choice;
+                        return null;
+                    },
+                    autoMethod: 'restore',
+                    act: async (method) => {
                         const targetRegion = detectedConfig.region || process.env.AWS_REGION || 'us-east-2';
                         const client = resolveClient(options.secretsClient, SecretsManagerClient, { region: targetRegion });
                         if (method === 'restore') {
@@ -999,6 +985,7 @@ async function applyStackMain(input = {}) {
                             // Argv-spawned (no shell), so the count index
                             // needs no quoting — unlike the printed runbook.
                             await runTerraform(['import', 'aws_secretsmanager_secret.app_secrets[0]', described.ARN], tfDir, null, `Importing ${secretName}`);
+                            secretImported = true;
                             // Adopt the live current version too: without
                             // it the retry recreates the placeholder
                             // version over the restored real values
@@ -1011,29 +998,30 @@ async function applyStackMain(input = {}) {
                         } else {
                             await client.send(new DeleteSecretCommand({ SecretId: secretName, ForceDeleteWithoutRecovery: true }));
                         }
-                    } catch (error) {
-                        secretRecoveryError = error;
-                    }
-                    if (secretRecoveryError === null) {
-                        trackEvent('secret_deletion_recovered', {
-                            projectName: actualProjectName,
-                            method,
-                            ...(method === 'restore' ? { adopted: versionAdopted === true } : {}),
-                        });
-                        if (method === 'restore') {
-                            if (versionAdopted) {
-                                log.message(color.cyan('Restored the secret vault and adopted its live values — retrying apply...'));
-                            } else {
-                                log.message(color.cyan('Restored the secret vault and imported it — retrying apply...'));
-                                log.message(color.yellow('  Live values could not be adopted: run secrets audit after apply and re-push if they look wrong.'));
-                            }
+                    },
+                });
+                if (recovery.status === 'refused') return recovery.refusal;
+                if (recovery.status === 'recovered') {
+                    const method = recovery.method;
+                    trackEvent('secret_deletion_recovered', {
+                        projectName: actualProjectName,
+                        method,
+                        ...(method === 'restore' ? { adopted: versionAdopted === true } : {}),
+                    });
+                    if (method === 'restore') {
+                        if (versionAdopted) {
+                            log.message(color.cyan('Restored the secret vault and adopted its live values — retrying apply...'));
                         } else {
-                            log.message(color.cyan('Force-deleted the secret vault — retrying apply...'));
-                            log.message(color.dim('  Re-push your secrets after apply (secrets push): the vault is recreated empty.'));
+                            log.message(color.cyan('Restored the secret vault and imported it — retrying apply...'));
+                            log.message(color.yellow('  Live values could not be adopted: run secrets audit after apply and re-push if they look wrong.'));
                         }
-                        return applyStack({ ...options, _skipPreview: true, _secretRecovered: true });
+                    } else {
+                        log.message(color.cyan('Force-deleted the secret vault — retrying apply...'));
+                        log.message(color.dim('  Re-push your secrets after apply (secrets push): the vault is recreated empty.'));
                     }
+                    return applyStack({ ...options, _skipPreview: true, _secretRecovered: true });
                 }
+                if (recovery.status === 'failed') secretRecoveryError = recovery.error;
             }
             const runbook = getRunbook(code, { headless: shouldAutoApprove(options), lockId, secretName });
             log.error(color.red(`✖ ${runbook.message}`));
@@ -1043,6 +1031,9 @@ async function applyStackMain(input = {}) {
             }
             if (secretRecoveryError) {
                 log.message(color.dim(`  (Automatic recovery failed: ${secretRecoveryError.message})`));
+            }
+            if (secretRecoveryError && secretImported) {
+                log.message(color.yellow('  The vault is already imported — run the version-adopt import from the steps above before re-applying, or the live values will be overwritten with placeholders.'));
             }
             log.message(color.dim(errString.split('\n').slice(0, 8).join('\n')));
         } else {

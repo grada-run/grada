@@ -134,6 +134,16 @@ describe('R1: terraform error taxonomy', () => {
         }
     });
 
+    it('pending-deletion runbook adopts the live version and points at audit', () => {
+        for (const headless of [true, false]) {
+            const hint = getRunbook('SECRET_PENDING_DELETION', { headless, secretName: 'myapp-secrets-ab12cd' }).hint;
+            expect(hint).toContain(`terraform import 'aws_secretsmanager_secret_version.app_secrets_initial[0]' '<arn>|<version-id>'`);
+            expect(hint).toContain('AWSCURRENT');
+            expect(hint).toContain('VersionIdsToStages');
+            expect(hint).toContain('secrets audit');
+        }
+    });
+
     it('pairs with-lines to collision markers for guided import', () => {
         const stderr = [
             'Error: creating S3 Bucket (myapp-x): BucketAlreadyExists: The requested bucket name is not available',

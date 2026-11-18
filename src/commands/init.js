@@ -76,6 +76,9 @@ export function printOfflineChecklist({ bucket, region, workflows = ['deploy', '
 // didn't resolve under global installs.
 const CLI_VERSION = getCliVersion();
 
+// Database engines init accepts (flag validation + config defaulting).
+const VALID_DB_ENGINES = ['postgres', 'mysql', 'aurora-postgresql'];
+
 // Programmatic entry wrapper: stamps cli_command for telemetry on every
 // invocation path, including direct imports that bypass bin/cli.js and MCP.
 export async function mainStack(input = {}) {
@@ -302,845 +305,89 @@ export async function resolveOidcTrust({
     return { sub: 'repo:*', source: 'fallback' };
 }
 
-async function mainStackMain(input = {}) {
-    const options = normalizeOptions(input);
-    const { isHeadless = false } = options;
-    const isPreconfigured = options.isPreconfigured === true || process.argv.includes('--preconfigured');
-    const headlessOptions = normalizeOptions(options.headlessOptions);
-    const initOptions = normalizeOptions(options.initOptions);
-    const isInteractive = !isHeadless && !isPreconfigured;
-    const startTime = Date.now();
+// Step 9. Output: framework warnings, post-init hints, ORM notice, git
+// instructions, and the offline checklist. Pure output — no state changes.
+function printInitOutput({ isPreconfigured, config, detectedFramework, isInteractive, capabilities, target, migrationGateEnabled, migrationCmdSource, migrationCmd, dirConfig, offlineScaffold, procfile, stateBucketName, driftEnabled }) {
+    let frameworkWarnings = '';
 
-    // 1. Silent Pre-flight check
-    const hasTerraform = await checkDependency('terraform');
-    if (!hasTerraform) {
-        await failCommand({
-            print: () => {
-                console.error(color.red('✖ Terraform is not installed.'));
-                console.log(color.yellow('Please run "npx grada-run doctor" to check your environment.'));
-            },
-        });
+    if (!isPreconfigured && !(config.framework === 'static' && detectedFramework?.buildDir)) {
+        frameworkWarnings = getFrameworkWarning(config.framework);
     }
 
-    if (!isHeadless) intro(color.bgCyan(color.black(' grada ☁️  ')));
-
-    // 2. Resolve Target & Scan Codebase
-    const explicitProjectName = typeof initOptions.projectName === 'string' && initOptions.projectName.trim() !== ''
-        ? initOptions.projectName.trim()
-        : null;
-    const explicitGitHubRepo = typeof initOptions.githubRepo === 'string' && initOptions.githubRepo.trim() !== ''
-        ? initOptions.githubRepo.trim()
-        : null;
-    // Non-interactive wizard gate (sync-ai precedent: bespoke, not the
-    // shared helper — approval flags cannot answer input questions, so
-    // even `init --yes` must refuse here). Without --headless the wizard
-    // always prompts (directory first), so an inferred-headless run (CI,
-    // no TTY) could only abandon — refuse loudly instead. This sits
-    // before the 2b flag validation below because the directory prompt
-    // precedes it; re-running with --headless surfaces any specific
-    // INVALID_* error. No preconfigured exemption: the parser only
-    // exposes flag values in headless mode, so standalone
-    // --preconfigured would silently ignore --framework/--region.
-    if (!isHeadless && resolveHeadless(options)) {
-        return failCommand({
-            message: '\n✖ init needs an interactive terminal to gather project configuration.',
-            hint: '  Re-run with --headless --framework <id> --target <ecs|lambda|static> (plus --region/--with as needed), or run interactively in a terminal.\n',
-            event: 'project_provisioned',
-            telemetry: { projectName: explicitProjectName ?? path.basename(process.cwd()) },
-            errorCode: 'INIT_NON_INTERACTIVE',
-            reason: 'non-interactive',
-            exitCode: 1,
-        });
-    }
-    const dirConfig = await getTargetDirectory(isHeadless, headlessOptions, { projectName: explicitProjectName });
-
-    // Re-init over an existing tree keeps the tree's project name: after a
-    // directory rename or copy, re-deriving from the basename would silently
-    // fork every singleton (state bucket, RDS, ECR…) into a parallel stack
-    // while the old one keeps billing. --project-name renames explicitly.
-    const treeProjectName = readTerraformProjectName(dirConfig.targetDir);
-    const sanitizedTreeName = treeProjectName ? sanitizeProjectName(treeProjectName) : null;
-    if (sanitizedTreeName && explicitProjectName && sanitizedTreeName !== dirConfig.actualProjectName) {
-        console.log(color.yellow(`⚠️  --project-name "${dirConfig.actualProjectName}" overrides this tree's project "${treeProjectName}" — the next apply will provision a NEW stack; the "${treeProjectName}" stack is left untouched (and still billing).`));
-        trackEvent('init_project_name_override', { projectName: dirConfig.actualProjectName });
-    } else if (sanitizedTreeName && !explicitProjectName && sanitizedTreeName !== dirConfig.actualProjectName) {
-        console.log(color.yellow(`⚠️  Directory "${path.basename(dirConfig.targetDir)}" doesn't match this tree's project "${sanitizedTreeName}" — keeping "${sanitizedTreeName}" so re-init doesn't fork your infrastructure. Pass --project-name <name> to rename explicitly.`));
-        trackEvent('init_project_name_reused', { projectName: sanitizedTreeName });
-        dirConfig.actualProjectName = sanitizedTreeName;
-    }
-
-    // 2b. Fail-fast validation of init composition flags — before any
-    // prompts, AWS calls, backups, or file writes.
-    const explicitFramework = typeof headlessOptions.framework === 'string' && headlessOptions.framework.trim() !== ''
-        ? headlessOptions.framework.trim()
-        : null;
-    if (explicitFramework !== null && !SUPPORTED_FRAMEWORKS.includes(explicitFramework)) {
-        return failCommand({
-            message: `\n✖ Unknown framework "${explicitFramework}".`,
-            hint: `  Supported frameworks: ${SUPPORTED_FRAMEWORKS.join(', ')}.\n${explicitFramework === 'express' ? '  Express apps use --framework=node.\n' : ''}`,
-            event: 'cli-error',
-            telemetry: { step: 'init_validation', error_code: 'INVALID_FRAMEWORK' },
-            reason: 'invalid-framework',
-        });
-    }
-    if (explicitGitHubRepo !== null && !isValidGitHubRepoSlug(explicitGitHubRepo)) {
-        return failCommand({
-            message: `\n✖ Invalid --github-repo "${explicitGitHubRepo}".`,
-            hint: '  Expected owner/name (e.g. --github-repo=acme/widgets).\n',
-            event: 'cli-error',
-            telemetry: { step: 'init_validation', error_code: 'INVALID_GITHUB_REPO' },
-            reason: 'invalid-github-repo',
-        });
-    }
-    const withList = Array.isArray(initOptions.with)
-        ? initOptions.with.filter((cap) => typeof cap === 'string')
-        : [];
-    const unknownCaps = withList.filter((cap) => !ADDON_REGISTRY[cap]);
-    if (unknownCaps.length > 0) {
-        return failCommand({
-            message: `\n✖ Unknown addon capabilities: ${unknownCaps.join(', ')}.`,
-            hint: `  Valid capabilities: ${Object.keys(ADDON_REGISTRY).join(', ')}.\n`,
-            event: 'cli-error',
-            telemetry: { step: 'init_validation', error_code: 'UNSUPPORTED_CAPABILITY' },
-            reason: 'unsupported-capability',
-            resultExtra: { capabilities: withList },
-        });
-    }
-    const VALID_DB_ENGINES = ['postgres', 'mysql', 'aurora-postgresql'];
-    const explicitDbEngine = typeof initOptions.dbEngine === 'string' && initOptions.dbEngine.trim() !== ''
-        ? initOptions.dbEngine.trim()
-        : null;
-    if (explicitDbEngine !== null && !VALID_DB_ENGINES.includes(explicitDbEngine)) {
-        return failCommand({
-            message: `\n✖ Invalid --db-engine "${explicitDbEngine}".`,
-            hint: `  Valid engines: ${VALID_DB_ENGINES.join(', ')}.\n`,
-            event: 'cli-error',
-            telemetry: { step: 'init_validation', error_code: 'INVALID_DB_ENGINE' },
-            reason: 'invalid-db-engine',
-        });
-    }
-    const explicitTarget = typeof initOptions.target === 'string' && initOptions.target.trim() !== ''
-        ? initOptions.target.trim()
-        : null;
-    const normalizedExplicitTarget = explicitTarget === 'fargate' ? 'ecs' : explicitTarget;
-    if (explicitTarget !== null && !COMPUTE_TARGETS.includes(normalizedExplicitTarget)) {
-        return failCommand({
-            message: `\n✖ Invalid compute target "${explicitTarget}". Supported targets: ecs, lambda, static.`,
-            hint: '  Use --target ecs (or fargate) for always-on containers, --target lambda for scale-to-zero serverless, or --target static for zero-compute S3 + CloudFront hosting.\n',
-            event: 'cli-error',
-            telemetry: { step: 'init_validation', error_code: 'INVALID_COMPUTE_TARGET' },
-            reason: 'invalid-compute-target',
-        });
-    }
-    const addonFlagOptions = {
-        model: initOptions.model ?? undefined,
-        domain: initOptions.domain ?? undefined,
-        zoneId: initOptions.zoneId ?? undefined,
-        fromEmail: initOptions.fromEmail ?? undefined,
-    };
-    for (const cap of withList) {
-        // Per-capability scoped: irrelevant flags are silently ignored.
-        const flagError = validateAddonFlags(cap, addonFlagOptions);
-        if (flagError) {
-            return failCommand({
-                message: flagError.message,
-                hint: flagError.hint ?? null,
-                event: 'cli-error',
-                telemetry: { step: 'init_validation', error_code: flagError.errorCode },
-                reason: flagError.reason,
-                resultExtra: { capability: cap },
-            });
+    // 9b. Post-init capability hints (interactive only, so headless
+    // stdout stays byte-identical).
+    if (isInteractive) {
+        const upcoming = capabilities.upcomingHints;
+        if (upcoming.vector) {
+            console.log(color.dim('  💡 Vector-search dependencies detected: managed pgvector support is coming soon.'));
         }
-    }
-    if (withList.includes('email:ses') && !isInteractive) {
-        const hasDomainFlag = typeof initOptions.domain === 'string' && initOptions.domain.trim() !== '';
-        let domainTfHasDomain = false;
-        if (!hasDomainFlag) {
-            const domainTf = readFileSafe(path.join(dirConfig.targetDir, 'terraform', 'domain.tf'));
-            domainTfHasDomain = Boolean(domainTf && parseDomainTf(domainTf)?.domain);
+        // Static targets refuse `add cron` (no compute) — don't send
+        // static users down a dead end.
+        if (upcoming.cron && target !== 'static') {
+            console.log(color.dim('  💡 Scheduled-task dependencies detected: scaffold a schedule with "grada add cron".'));
         }
-        if (!hasDomainFlag && !domainTfHasDomain) {
-            return failCommand({
-                message: '\n✖ No domain for Amazon SES. Pass --domain <domain> or run from a project with terraform/domain.tf.\n',
-                event: 'cli-error',
-                telemetry: { step: 'init_validation', error_code: 'MISSING_SES_DOMAIN' },
-                reason: 'missing-ses-domain',
-                resultExtra: { capability: 'email:ses' },
-            });
+        if (upcoming.mysql) {
+            console.log(color.dim('  💡 MySQL dependencies detected: RDS currently provisions PostgreSQL; MySQL support is coming soon.'));
         }
     }
 
-    // Collision suffix, resolved before any prompt/AWS call/write (and
-    // before backup planning moves the old tree): fresh trees mint, re-init
-    // reuses the rendered value, pre-suffix trees stay '' (zero drift).
-    const resourceSuffix = resolveInitSuffix(dirConfig.targetDir);
+    // ORM runner matrix: when the gate was auto-wired to a mapped ORM
+    // command, say which one and what the user must guarantee (the
+    // bundle path / production dependency), while the run is fresh.
+    if (migrationGateEnabled && migrationCmdSource === 'detected') {
+        const ormMapped = detectOrmMigrationCommand(dirConfig.targetDir);
+        if (ormMapped && ormMapped.command === migrationCmd) {
+            const ormWarning = ormMapped.orm === 'drizzle'
+                ? 'Detected Drizzle ORM. Configured migration gate to use \'node ./dist/migrate.cjs\'. Ensure your build script bundles your migrator to this path.'
+                : 'Detected Prisma. Configured migration gate to run via \'node_modules/prisma/build/index.js\'. Ensure Prisma is in your production dependencies.';
+            log.warn(color.yellow(`⚠️  ${ormWarning}`));
+        }
+    }
 
-    // Compute target: explicit flag wins (headless defaults to ECS);
-    // interactive runs prompt when the flag was not passed.
-    let target = normalizedExplicitTarget || 'ecs';
-    if (isInteractive && normalizedExplicitTarget === null) {
-        log.info(`${color.gray('📖 Compare tradeoffs (cost crossover, cold starts, DB connections):')} ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/architecture.md')}`);
-        const targetAnswer = await select({
-            message: 'Select your AWS compute target:',
-            options: [
-                { value: 'ecs', label: 'ECS Fargate + ALB', hint: 'Always-on, persistent DB connections, zero cold starts (Starts at ~$31/mo)' },
-                { value: 'lambda', label: 'AWS Lambda + API Gateway v2', hint: 'Scale-to-zero, usage-based compute, 3-5s VPC cold starts ($0/mo idle)' },
-                { value: 'static', label: 'Static site (S3 + CloudFront)', hint: 'Zero-compute hosting for SPAs/SSGs ($0/mo idle)' },
+    const isGitInitialized = fsSync.existsSync(path.join(dirConfig.targetDir, '.git'));
+    const needsCd = dirConfig.projectName && dirConfig.projectName !== '.';
+    const applyStep = needsCd ? `cd ${dirConfig.projectName} && npx --yes grada-run apply` : 'npx --yes grada-run apply';
+    const gitInstructions = isGitInitialized
+        ? `git add . && git commit -m "chore: add AWS infrastructure and CI/CD" && git push`
+        : `git init && git add . && git commit -m "chore: add AWS infrastructure and CI/CD" && git branch -M ${config.branch} && git remote add origin https://github.com/your-username/your-repo.git && git push -u origin ${config.branch}`;
+
+    let docsTip = '';
+    if (procfile) {
+        docsTip = `\n  ${color.blue('📘 Read the Heroku Migration Guide:')} ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/heroku-procfile-to-aws.md')}`;
+    } else if (config.needsDatabase) {
+        docsTip = `\n  ${color.blue('📘 Read the Database Connections Guide:')} ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/database-connections.md')}`;
+    }
+
+    outro(`${color.green('✅ Templates generated!')} ${color.blue('🛡️ DevSecOps scanning enabled.')}
+    ${frameworkWarnings ? `\n  ${frameworkWarnings}` : ''}
+    ${color.yellow('Next steps:')}
+    1. ${color.cyan(applyStep)}
+    2. ${color.cyan(gitInstructions)}
+    ${color.magenta('🚀 Need help?')} ${color.underline('https://calendly.com/anton-codes-iac/15min')}${docsTip}`);
+
+    if (offlineScaffold) {
+        // Pass the exact backend bucket (suffix included) — recomputing
+        // from the bare project name prints a bucket terraform never uses.
+        // Step 2 names only emitted workflows: preview/teardown render
+        // with PR previews, drift only when enabled.
+        printOfflineChecklist({
+            bucket: stateBucketName,
+            region: config.region,
+            workflows: [
+                'deploy',
+                ...(config.enablePrPreviews ? ['preview', 'teardown'] : []),
+                ...(driftEnabled ? ['drift'] : []),
             ],
         });
-        if (typeof targetAnswer === 'symbol') process.exit(0);
-        target = targetAnswer;
     }
+}
 
-    // Capability-vs-target policy for --with: refuse fast when
-    // the requested capability cannot render on this target (static has
-    // no task role or VPC), before any prompt/AWS call/write. Interactive
-    // multiselect offers only compatible targets' caps; this covers --with.
-    for (const cap of withList) {
-        if (!ADDON_REGISTRY[cap]) continue;
-        if (addonTargetDisposition(cap, target) === 'refuse') {
-            const targetGuard = guardComputeTarget({
-                actual: target,
-                command: `init --with ${cap}`,
-                supported: addonSupportedTargets(cap),
-                hint: 'Static sites run no containers — this capability needs a compute target (--target ecs or lambda).',
-            });
-            return failCommand({
-                message: targetGuard.message,
-                hint: targetGuard.hint,
-                event: 'cli-error',
-                telemetry: { step: 'init_validation', error_code: targetGuard.errorCode },
-                reason: targetGuard.reason,
-                resultExtra: { capability: cap },
-            });
-        }
-    }
-
-    const detectedFramework = detectFramework(dirConfig.targetDir);
-    const procfile = parseProcfile(dirConfig.targetDir);
-    const vercelRules = parseVercelConfig(dirConfig.targetDir);
-    const dockerCompose = parseDockerCompose(dirConfig.targetDir);
-    const capabilities = detectProjectCapabilities(dirConfig.targetDir);
-
-    if (!isHeadless) {
-        if (detectedFramework) log.success(`Auto-detected framework: ${detectedFramework.name}`);
-        if (procfile && procfile.web) log.success(`Auto-detected Procfile (web command: ${procfile.web.join(' ')})`);
-        if (vercelRules) log.success(`Auto-detected vercel.json (Migrating edge network rules)`);
-        if (dockerCompose) log.success(`Auto-detected docker-compose.yml (${dockerCompose.length} services mapped)`);
-    }
-
-    if (isHeadless) console.log(color.cyan(`🤖 Running grada in headless mode`));
-
-    // 3. Gather Configuration & Framework Quirks
-    const config = await getProjectConfig(isHeadless, headlessOptions, dirConfig.targetDir, detectedFramework, { capabilities, dbEngine: explicitDbEngine, target });
-    config.target = target;
-
-    // 3a. Scope the GitHub OIDC trust (see resolveOidcTrust): explicit flag
-    // wins, then the tree's rendered trust, then the git remote, then one
-    // skippable prompt; headless falls through to the open trust — unless
-    // that would widen a non-trivial existing claim, which refuses
-    // (headless) or confirms (interactive). Telemetry records the mode
-    // only — never the owner/repo.
-    const oidcResolution = await resolveOidcTrust({
-        explicitSlug: explicitGitHubRepo,
-        treeClaim: readTerraformOidcTrust(dirConfig.targetDir),
-        targetDir: dirConfig.targetDir,
-        isInteractive,
-    });
-    if (oidcResolution.refusal) {
-        return failCommand({ ...oidcResolution.refusal });
-    }
-    if (oidcResolution.cancelled) {
-        cancel('Operation cancelled. Re-run with --github-repo owner/name to scope the trust explicitly.');
-        process.exit(0);
-    }
-    const { sub: oidcTrustSub, source: oidcTrustSource } = oidcResolution;
-    trackEvent('init_oidc_trust', {
-        projectName: dirConfig.actualProjectName,
-        mode: oidcTrustSub === 'repo:*' ? 'fallback' : 'scoped',
-        source: oidcTrustSource,
-    });
-    // Explicit flag wins everywhere (headless defaults to postgres, the
-    // interactive prompt is skipped); anything else falls back to postgres.
-    if (explicitDbEngine) {
-        config.dbEngine = explicitDbEngine;
-    } else if (!VALID_DB_ENGINES.includes(config.dbEngine)) {
-        config.dbEngine = 'postgres';
-    }
-    const djangoWsgi = await resolveDjangoWsgi(dirConfig.targetDir, procfile, config.framework, isHeadless);
-    const disableDefaultCI = await handleRailsCI(dirConfig.targetDir, config.framework, isHeadless, { force: initOptions.force === true });
-
-    // 3b. Dependency-aware composition (worker, migration gate, addons).
-    // Everything here resolves before backups, AWS calls, or file writes.
-    const isStaticSite = config.framework === 'static';
-    // Static exports (Next.js output:'export', SvelteKit adapter-static)
-    // carry no server, so --target static admits them like static presets.
-    // This extends only the gate — prompts.js still resolves the container
-    // preset from the detected id on ecs/lambda.
-    const isStaticExport = detectedFramework?.isStaticExport === true;
-    if (target === 'static' && !isStaticSite && !isStaticExport) {
-        return failCommand({
-            message: `\n✖ --target static only supports static-site frameworks (detected: ${config.framework}).\n`,
-            hint: '  Use --target ecs for containerized apps or --target lambda for scale-to-zero serverless.\n',
-            event: 'cli-error',
-            telemetry: { step: 'init_validation', error_code: 'STATIC_TARGET_FRAMEWORK_MISMATCH' },
-            reason: 'static-target-framework-mismatch',
-            resultExtra: { framework: config.framework },
-        });
-    }
-    if (target === 'static' && (procfile?.worker || capabilities.worker.detected)) {
-        log.warn(color.yellow('⚠️  Skipping the background worker: static targets serve files from S3 + CloudFront with no compute to run it on.'));
-    }
-    if (target === 'static' && config.needsDatabase) {
-        log.warn(color.yellow('⚠️  Skipping the database: static targets have no compute to connect from. Provision data separately if the site needs an API.'));
-        config.needsDatabase = false;
-    }
-    const failAddonResolution = (cap, resolved) => {
-        if (!resolved.ok && resolved.cancelled) {
-            return failCommand({
-                print: () => cancel('Selection cancelled.'),
-                event: 'cli-error',
-                telemetry: { step: 'init_addons', reason: 'cancelled' },
-                reason: 'cancelled',
-                exitCode: null,
-            });
-        }
-        return failCommand({
-            message: resolved.message,
-            hint: resolved.hint ?? null,
-            event: 'cli-error',
-            telemetry: { step: 'init_addons', error_code: resolved.errorCode },
-            reason: resolved.reason,
-            resultExtra: { capability: cap },
-        });
-    };
-
-    // Worker command: Procfile-driven as before, plus detection-driven.
-    // Lambda targets have no ECS worker service, so the prompt is skipped
-    // and any Procfile worker process is left out of the generated stack.
-    let workerCommandHcl = '';
-    if (isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && (procfile?.worker || capabilities.worker.detected)) {
-        const workerAnswer = await promptWorkerCommand(procfile, capabilities);
-        if (workerAnswer.trim() !== '') {
-            workerCommandHcl = `command = ${toHclStringArray(splitProcfileCommand(workerAnswer.trim()))}`;
-        }
-    }
-    if (!isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && !procfile?.worker && capabilities.worker.detected) {
-        // The suggested command is an npm shim (broken on stripped
-        // runners), so headless never scaffolds it blindly — but the
-        // detection must not vanish silently either.
-        const evidence = (capabilities.worker.evidence || []).join(', ') || 'worker signals';
-        const suggested = capabilities.worker.suggestedCommand || 'none';
-        log.warn(color.yellow(`⚠️  Skipping the background worker: detection found ${evidence} but no Procfile worker process, and the suggested command ("${suggested}") needs interactive confirmation. Re-run init interactively to configure the worker command.`));
-    }
-    if (target === 'lambda' && (procfile?.worker || capabilities.worker.detected)) {
-        log.warn(color.yellow('⚠️  Skipping the background worker: Lambda targets run a single scale-to-zero function with no ECS worker service.'));
-    }
-    if (target === 'lambda' && config.needsDatabase) {
-        log.warn(color.yellow('⚠️  Lambda opens a database connection per concurrent execution with no proxy in between — bursts can exhaust RDS limits. Keep pools tiny (tradeoffs: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/architecture.md#fargate-vs-lambda-tradeoffs).'));
-    }
-    const willHaveWorker = target !== 'lambda' && target !== 'static' && (Boolean(procfile?.worker) || workerCommandHcl !== '');
-
-    // Pre-deploy migration gate: explicit flag wins, else prompt. An
-    // explicit --setup-ci-migrate=<cmd> overrides detection, which is the
-    // escape hatch when detection yields an npm shim on a stripped runner.
-    const setupCiMigrateOpt = initOptions.setupCiMigrate;
-    const explicitMigrationCmd = typeof setupCiMigrateOpt === 'string' && setupCiMigrateOpt.trim() !== ''
-        ? setupCiMigrateOpt.trim()
-        : null;
-    const setupCiMigrateFlag = setupCiMigrateOpt === true || typeof setupCiMigrateOpt === 'string';
-    const migrationCmd = explicitMigrationCmd || capabilities.migration.command;
-    const migrationCmdSource = explicitMigrationCmd ? 'explicit' : 'detected';
-    let migrationGateEnabled = false;
-    if ((target === 'lambda' || target === 'static') && (setupCiMigrateFlag || (config.needsDatabase && migrationCmd))) {
-        log.warn(color.yellow(`⚠️  Skipping the pre-deploy migration gate: it runs migrations as an ephemeral ECS task, which ${target === 'static' ? 'static' : 'Lambda'} targets don't provision. Run migrations from CI against your database endpoint instead.`));
-    } else if (config.needsDatabase && migrationCmd) {
-        if (setupCiMigrateFlag) {
-            migrationGateEnabled = true;
-        } else if (isInteractive) {
-            const gateAnswer = await confirm({
-                message: `Enable pre-deploy database migration gate in GitHub Actions? (${migrationCmdSource}: ${migrationCmd})`,
-                initialValue: true,
-            });
-            if (typeof gateAnswer === 'symbol') process.exit(0);
-            migrationGateEnabled = gateAnswer === true;
-        }
-    } else if (setupCiMigrateFlag) {
-        log.warn(color.yellow('⚠️  --setup-ci-migrate was passed but no database is configured or no migration command was given; skipping the migration gate.'));
-    }
-
-    // Stripped-runner guard: init is about to generate a node
-    // Dockerfile without npm/npx, so wiring an npm-shim command into the
-    // gate would fail 100% of deploys. Fail fast headless (re-run with an
-    // explicit node command); warn loudly interactively and continue.
-    if (migrationGateEnabled && isNpmShimCommand(migrationCmd) && target === 'ecs' && frameworkUsesStrippedRunner(config.framework)) {
-        const ormHint = ormMappedHintSegment(dirConfig.targetDir, '--setup-ci-migrate=');
-        if (!isInteractive) {
-            return failCommand({
-                message: `\n✖ Refusing to wire the pre-deploy migration gate with "${migrationCmd}": the generated ${config.framework} Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" on every deploy.\n`,
-                hint: `  Re-run with an explicit node-based command, e.g. \`--setup-ci-migrate="node ./dist/migrate.cjs"\`, or wire the gate later with \`grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci\`. Ensure your Dockerfile builds the bundle and copies it into the runner image${ormHint}.\n`,
-                event: 'cli-error',
-                telemetry: { step: 'init_setup', cmd_source: migrationCmdSource, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
-                errorCode: 'NPM_CMD_STRIPPED_RUNNER',
-                reason: 'npm-cmd-stripped-runner',
-            });
-        }
-        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${config.framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.${ormHint}`));
-        trackEvent('npm_cmd_stripped_runner', { projectName: dirConfig.actualProjectName, cmd_source: migrationCmdSource, ci_setup: true });
-    }
-
-    // Scheduled IaC drift detection: explicit flag wins, else offer.
-    // Opt-in by default — the workflow opens GitHub Issues on its own.
-    const setupCiDriftFlag = initOptions.setupCiDrift === true;
-    let driftEnabled = false;
-    if (setupCiDriftFlag) {
-        driftEnabled = true;
-    } else if (isInteractive) {
-        const driftAnswer = await confirm({
-            message: 'Set up scheduled IaC drift detection (daily terraform plan + GitHub Issues)?',
-            initialValue: false,
-        });
-        if (typeof driftAnswer === 'symbol') process.exit(0);
-        driftEnabled = driftAnswer === true;
-    }
-
-    // Plan-on-PR: explicit flag wins, else offer. Defaults ON —
-    // reviewing infra changes before merge is the safe default.
-    const setupCiPlanFlag = initOptions.setupCiPlan === true;
-    let planEnabled = false;
-    if (setupCiPlanFlag) {
-        planEnabled = true;
-    } else if (isInteractive) {
-        const planAnswer = await confirm({
-            message: 'Post Terraform plans as PR comments (review infra changes before merge)?',
-            initialValue: true,
-        });
-        if (typeof planAnswer === 'symbol') process.exit(0);
-        planEnabled = planAnswer === true;
-    }
-
-    // Addon selection: interactive multiselect, or explicit --with.
-    let selectedAddons;
-    if (isInteractive && !isStaticSite) {
-        const addonOptions = Object.keys(ADDON_REGISTRY).map((cap) => {
-            const entry = ADDON_REGISTRY[cap];
-            const addonState = capabilities.addons[cap];
-            const detected = addonState?.detected === true;
-            const evidence = detected ? (addonState.evidence || []).join(', ') : '';
-            const monthlyFixed = entry.cost.monthlyFixed || 0;
-            const costLabel = monthlyFixed > 0 ? `~$${monthlyFixed}/mo` : '$0/mo + usage';
-            return {
-                value: cap,
-                label: `${cap} — ${entry.label}`,
-                hint: detected ? `detected: ${evidence} · ${costLabel}` : costLabel,
-            };
-        });
-        const initialValues = Object.keys(ADDON_REGISTRY).filter((cap) =>
-            withList.includes(cap) || capabilities.addons[cap]?.detected === true
-        );
-        const selection = await multiselect({
-            message: 'Select cloud addons to scaffold (Space to toggle, Enter to confirm):',
-            options: addonOptions,
-            initialValues,
-            required: false,
-        });
-        if (typeof selection === 'symbol') {
-            cancel('Operation cancelled.');
-            process.exit(0);
-        }
-        selectedAddons = Array.isArray(selection) ? selection : [];
-    } else {
-        selectedAddons = [...withList];
-    }
-    const selectedSet = new Set(selectedAddons);
-    selectedAddons = Object.keys(ADDON_REGISTRY).filter((cap) => selectedSet.has(cap));
-
-    // Resolve per-addon options (template vars, env, follow-up prompts).
-    const resolvedByCap = {};
-    const explicitModel = typeof initOptions.model === 'string' && initOptions.model !== '' ? initOptions.model : null;
-    for (const cap of selectedAddons) {
-        if (cap === 'ai:bedrock' && isInteractive && !explicitModel) {
-            const useDefault = await confirm({
-                message: `Use recommended Bedrock model (${DEFAULT_BEDROCK_MODEL})?`,
-                initialValue: true,
-            });
-            if (typeof useDefault === 'symbol') process.exit(0);
-            const resolved = await resolveAddonOptions(cap, {}, {
-                cwd: dirConfig.targetDir, region: config.region, isInteractive: !useDefault,
-            });
-            if (!resolved.ok) return failAddonResolution(cap, resolved);
-            resolvedByCap[cap] = resolved;
-            continue;
-        }
-        const opts = cap === 'ai:bedrock'
-            ? { model: explicitModel ?? undefined, modelProvided: explicitModel !== null }
-            : cap === 'email:ses'
-                ? { domain: initOptions.domain ?? undefined, zoneId: initOptions.zoneId ?? undefined, fromEmail: initOptions.fromEmail ?? undefined }
-                : {};
-        const resolved = await resolveAddonOptions(cap, opts, {
-            cwd: dirConfig.targetDir,
-            region: config.region,
-            isInteractive: isInteractive && cap === 'email:ses',
-        });
-        if (!resolved.ok) return failAddonResolution(cap, resolved);
-        resolvedByCap[cap] = resolved;
-    }
-
-    // 3.5 Docker Compose Overrides. The web service is the `build:`
-    // service first, then the framework-port match, then the first
-    // non-datastore service — never an anointed database. A
-    // datastore-only file skips the merge (and the port override) with a
-    // loud warning in both modes; the selection passes through to the
-    // generator so it merges without re-warning.
-    let composeForMerge = dockerCompose;
-    let composeWebName = null;
-    if (dockerCompose && dockerCompose.length > 0) {
-        const selection = selectComposeWebService(dockerCompose, {
-            frameworkPort: frameworkDefaultPort(config.framework),
-        });
-        if (!selection.service) {
-            console.log(color.yellow('⚠️  No app service detected in your compose file (every service looks like a datastore) — skipping the compose merge. Give your app service a `build:` key and re-run to merge it.'));
-            trackEvent('compose_merge_skipped', { projectName: dirConfig.actualProjectName, reason: selection.skipped });
-            composeForMerge = null;
-        } else {
-            composeWebName = selection.service.name;
-            if (selection.datastoreImage) {
-                console.log(color.yellow(`⚠️  Compose service "${selection.service.name}" looks like a datastore but was selected as the web service — verify the merged port and env vars before applying.`));
-                trackEvent('compose_datastore_web_warned', { projectName: dirConfig.actualProjectName, service: selection.service.name });
-            }
-            if (selection.service.port) {
-                // Override the config port with the one from Docker Compose
-                config.port = selection.service.port.toString();
-                if (!isHeadless) {
-                    console.log(color.cyan(`   🐳 Docker Compose overrides: Port set to ${config.port} via service "${selection.service.name}"`));
-                }
-            }
-        }
-    }
-
-    // 4. Framework Migration Checks (Vercel Escape Hatch)
-    if ((target === 'lambda' || target === 'static') && vercelRules?.redirects?.length > 0) {
-        const remedy = target === 'static'
-            ? 'Recreate them as CloudFront Functions after provisioning.'
-            : 'Recreate them as API Gateway routes after provisioning.';
-        log.warn(color.yellow(`⚠️  vercel.json redirects were detected, but ${target === 'static' ? 'static' : 'Lambda'} targets have no ALB listener rules to translate them into. ${remedy}`));
-    }
-
-    // Headers/rewrites have no translator on any target — name the dropped
-    // counts loudly, or the "Migrating edge network rules" success line
-    // reads as if everything migrated.
-    {
-        const migratedRedirects = (target === 'lambda' || target === 'static') ? 0 : (vercelRules?.redirects?.length || 0);
-        const droppedHeaders = vercelRules?.headers?.length || 0;
-        const droppedRewrites = vercelRules?.rewrites?.length || 0;
-        if (droppedHeaders > 0 || droppedRewrites > 0) {
-            const dropped = [
-                droppedHeaders > 0 ? `${droppedHeaders} header rule${droppedHeaders === 1 ? '' : 's'}` : null,
-                droppedRewrites > 0 ? `${droppedRewrites} rewrite${droppedRewrites === 1 ? '' : 's'}` : null,
-            ].filter(Boolean).join(' and ');
-            log.warn(color.yellow(`⚠️  vercel.json ${dropped} were detected but are not migrated (only redirects translate to ALB listener rules — ${migratedRedirects} migrated). Recreate them as CloudFront Functions or ALB listener rules after provisioning.`));
-        }
-    }
-
-    if (config.framework === 'nestjs') {
-        const nestAnalysis = analyzeNestApp(dirConfig.targetDir);
-        if (nestAnalysis.hasMain && !nestAnalysis.listensOnAllInterfaces) {
-            log.warn(color.yellow(`⚠️  NestJS must listen on 0.0.0.0 to receive traffic in ${target === 'lambda' ? 'AWS Lambda' : 'AWS Fargate'}.`));
-            console.log(color.cyan(`   In ${nestAnalysis.filePath}, update your bootstrap:`));
-            console.log(color.green(`   await app.listen(process.env.PORT ?? 3000, '0.0.0.0');\n`));
-        }
-    } else if (config.framework === 'nextjs') {
-        const nextConfig = analyzeNextConfig(dirConfig.targetDir);
-        // Static exports need no container, so the standalone warning
-        // (container-image slimming) does not apply to them.
-        if (nextConfig.hasConfig && !nextConfig.isStandalone && !nextConfig.isExport) {
-            log.warn(color.yellow('⚠️ Next.js config is missing "output: \'standalone\'".'));
-            console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/nextjs-vercel-to-aws.md'));
-        }
-    } else if (detectedFramework?.id === 'svelte') {
-        const svelteConfig = analyzeSvelteConfig(dirConfig.targetDir);
-        if (svelteConfig.adapter === 'vercel' || svelteConfig.adapter === 'auto') {
-            log.warn(color.yellow('⚠️ SvelteKit is locked into the Vercel/Auto adapter.'));
-            console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/sveltekit-vercel-to-aws.md'));
-        }
-    } else if (detectedFramework?.name === 'Astro') {
-        const astroConfig = analyzeAstroConfig(dirConfig.targetDir);
-        if (astroConfig.adapter === 'vercel') {
-            log.warn(color.yellow('⚠️ Astro is locked into the Vercel adapter.'));
-            console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/astro-vercel-to-aws.md'));
-        }
-    }
-
-    // 5. Calculate Derived Values
-    const cpu = config.size === 'small' ? '512' : '256';
-    const memory = config.size === 'small' ? '1024' : '512';
-    const computeTier = config.size === 'small' ? 'Small (0.5 vCPU, 1GB RAM)' : 'Micro (0.25 vCPU, 512MB RAM)';
-
-    const costs = estimateMonthlyCost({
-        cpu: parseInt(cpu),
-        memory: parseInt(memory),
-        hasDb: config.needsDatabase,
-        dbEngine: config.dbEngine,
-        hasWorker: willHaveWorker,
-        hasSecrets: target !== 'static',
-        addons: selectedAddons,
-        computeTarget: target,
-    });
-    const estimatedCost = costs.totalMonthly;
-    const buildDir = detectedFramework?.buildDir || 'dist';
-
-    // 6. Plan existing-file handling BEFORE provisioning: headless fail
-    // paths fire here while the tree is still intact, and the actual
-    // renames wait until provisioning succeeds.
-    const existingFilesPlan = await planExistingFiles(dirConfig.targetDir, { isHeadless, force: initOptions.force });
-    const existingFilesRefusal = await refusalResultForPlan(existingFilesPlan);
-    if (existingFilesRefusal) return existingFilesRefusal;
-    // Stash preserved files before anything mutates the tree; the stash is
-    // discarded untouched when provisioning fails below.
-    const preservedStash = preserveManagedFiles(dirConfig.targetDir);
-
-    const s = spinner();
-    s.start('Provisioning infrastructure...');
-
-    let awsAccountId, stateBucketName;
-    let adoptionRefusal = null;
-    const offlineScaffold = initOptions.offline === true;
-    try {
-        if (offlineScaffold) {
-            // Scaffold-only mode for template development and CI
-            // fixtures — no AWS calls. Placeholders are greppable and
-            // invalid as real values (uppercase), so an unreconciled tree
-            // fails loud at `terraform init` instead of half-working.
-            awsAccountId = OFFLINE_ACCOUNT_PLACEHOLDER;
-            stateBucketName = formatStateBucketName(`${dirConfig.actualProjectName}${resourceSuffix}`, OFFLINE_ACCOUNT_PLACEHOLDER);
-            s.stop('Offline mode: skipping state bucket provisioning.');
-            trackEvent('init_offline_scaffold', { projectName: dirConfig.actualProjectName });
-        } else {
-            const bucketData = await provisionStateBucket(config.region, `${dirConfig.actualProjectName}${resourceSuffix}`);
-            awsAccountId = bucketData.awsAccountId;
-            stateBucketName = bucketData.stateBucketName;
-            // Adoption gate: a fresh tree pointing at a bucket that already
-            // holds state needs an explicit adopt/rename/wipe choice before
-            // anything touches the tree. Probe failures fail closed through
-            // the provisioning catch below.
-            const isFreshTree = existingFilesPlan.decision === 'clean' && existingFilesPlan.foundFiles.length === 0;
-            // An interactive prompt may fire below: park the spinner first
-            // so it doesn't scribble over the choice (precedent: apply's
-            // recovery prompt). Headless runs never prompt.
-            const mayPromptAdoption = !isHeadless && initOptions.adoptState !== true && isFreshTree;
-            if (mayPromptAdoption) s.stop('State bucket ready.');
-            adoptionRefusal = await checkStateAdoption({
-                s3: bucketData.s3Client ?? null,
-                bucket: stateBucketName,
-                isFreshTree,
-                isHeadless,
-                adoptState: initOptions.adoptState === true,
-            });
-            if (mayPromptAdoption && !adoptionRefusal) s.start('Provisioning infrastructure...');
-        }
-    } catch (error) {
-        s.stop('❌ Failed to provision remote state or authenticate with AWS.');
-        trackEvent('init_backup_deferred', {
-            projectName: dirConfig.actualProjectName,
-            plan: existingFilesPlan.decision,
-        });
-        // Auth failures print the shared credential-recovery guidance;
-        // init keeps its own telemetry + exit path through failCommand.
-        if (isAuthError(error)) printAwsAuthGuidance(initOptions);
-        return failCommand({
-            message: `AWS Error: ${error.message}`,
-            useErrorStream: true,
-            event: 'cli-error',
-            telemetry: { step: 'aws_provisioning', error_code: error.name || 'UNKNOWN', error_message: error.message },
-        });
-    }
-    if (adoptionRefusal) return failCommand(adoptionRefusal);
-
-    // Provisioning succeeded: move the old tree aside (no-op on a clean
-    // slate), then regenerate over the cleared ground.
-    await executeBackup(dirConfig.targetDir, existingFilesPlan);
-
-    // 7. Synthesize Templates
-    s.message('Synthesizing Terraform templates...');
-    // Live origin/HEAD wins when it names a real branch; when
-    // detection falls back, a re-init keeps the tree's own default branch
-    // so dual trust never narrows silently.
-    const treeDefaultBranch = oidcResolution.treeBranches?.[1] ?? null;
-    const detectedDefaultBranch = resolveDefaultBranch(dirConfig.targetDir, config.branch);
-    const defaultBranch = detectedDefaultBranch !== config.branch
-        ? detectedDefaultBranch
-        : (treeDefaultBranch ?? config.branch);
-    if (defaultBranch !== config.branch && treeDefaultBranch === null) {
-        log(color.yellow(`⚠️  Trusting default branch "${defaultBranch}" alongside deploy branch "${config.branch}" so scheduled drift can assume the deploy role.`));
-    }
-    const { deploySub, previewSub } = renderOidcRoleSubs(oidcTrustSub, config.branch, defaultBranch);
-    const renderConfig = {
-        PROJECT_NAME: dirConfig.actualProjectName,
-        RESOURCE_SUFFIX: resourceSuffix,
-        REGION: config.region,
-        PORT: config.port,
-        CPU: cpu,
-        MEMORY: memory,
-        COMPUTE_TIER: computeTier,
-        ESTIMATED_COST: estimatedCost,
-        STATE_BUCKET: stateBucketName,
-        AWS_ACCOUNT_ID: awsAccountId,
-        HEALTH_CHECK_PATH: config.healthCheckPath,
-        DESIRED_COUNT: config.desiredCount,
-        DEPLOY_BRANCH: config.branch,
-        DEPLOY_ROLE_NAME: buildDeployRoleName(dirConfig.actualProjectName, resourceSuffix),
-        PREVIEW_ROLE_NAME: buildPreviewRoleName(dirConfig.actualProjectName, resourceSuffix),
-        GITHUB_DEPLOY_SUB: deploySub,
-        GITHUB_PREVIEW_SUB: previewSub,
-        BUILD_DIR: buildDir,
-        finalFramework: config.framework,
-        NEEDS_DATABASE: config.needsDatabase,
-        DB_ENGINE: config.dbEngine,
-        DJANGO_WSGI: djangoWsgi,
-        DISABLE_DEFAULT_CI: disableDefaultCI,
-        PROCFILE: procfile,
-        VERCEL_RULES: vercelRules,
-        DOCKER_COMPOSE: composeForMerge,
-        DOCKER_COMPOSE_WEB: composeWebName,
-        ENABLE_PR_PREVIEWS: config.enablePrPreviews,
-        WORKER_COMMAND: workerCommandHcl,
-        TARGET: target
-    };
-    await generateTemplates(dirConfig.targetDir, renderConfig);
-    if (Array.isArray(renderConfig.COMPOSE_SECRETS_FILTERED) && renderConfig.COMPOSE_SECRETS_FILTERED.length > 0) {
-        trackEvent('compose_secrets_filtered', {
-            projectName: dirConfig.actualProjectName,
-            count: renderConfig.COMPOSE_SECRETS_FILTERED.length,
-            names: renderConfig.COMPOSE_SECRETS_FILTERED,
-        });
-    }
-
-    // 7b. Scaffold selected addons (registry order), then wire the
-    // pre-deploy migration gate into the generated workflow.
-    for (const cap of selectedAddons) {
-        const scaffolded = await scaffoldAddon(cap, resolvedByCap[cap], { cwd: dirConfig.targetDir, region: config.region });
-        console.log(color.green(`✅ Scaffolded terraform/${scaffolded.file} (${cap})`));
-    }
-
-    if (migrationGateEnabled && migrationCmd) {
-        const deployYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'deploy.yml');
-        const workflowContent = readFileSafe(deployYmlPath);
-        // Scope the gate's snapshot id to the database (aurora
-        // takes the cluster prefix) so guardrails and gc can name it.
-        const gateDbRefs = resolveDbEngineRefs(config.dbEngine);
-        const gateDbIdentifier = `${dirConfig.actualProjectName}${resourceSuffix}-db${gateDbRefs.isCluster ? '-cluster' : ''}`;
-        const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION, dbIdentifier: gateDbIdentifier }) : null;
-        if (gated) {
-            atomicWriteFileSync(deployYmlPath, gated);
-            console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml (snapshot first, then migrate)'));
-        } else {
-            log.warn(color.yellow('⚠️  Could not wire the migration gate: the deploy workflow anchor was not found.'));
-        }
-        if (target === 'ecs') {
-            const previewYmlPath = path.join(dirConfig.targetDir, '.github', 'workflows', 'preview.yml');
-            const previewContent = readFileSafe(previewYmlPath);
-            if (previewContent) {
-                const previewGated = injectPreviewMigrationGate(previewContent, { cmd: migrationCmd, cliVersion: CLI_VERSION });
-                if (previewGated) {
-                    atomicWriteFileSync(previewYmlPath, previewGated);
-                    console.log(color.green('✅ Wired the preview database migration gate into .github/workflows/preview.yml'));
-                } else {
-                    log.warn(color.yellow('⚠️  Could not wire the preview migration gate: the Comment PR anchor was not found.'));
-                }
-            }
-        }
-    }
-
-    if (driftEnabled) {
-        // drift.yml rides the manifest + backup like deploy.yml now
-        // Re-init backs the old file up and regenerates fresh
-        // (current role ARN) instead of silently keeping a stale copy.
-        // Hand edits trip refuse-dirty before this point; --force regenerates.
-        const drifted = scaffoldDriftWorkflow(dirConfig.targetDir, {
-            region: config.region,
-            roleArn: buildRoleArn(awsAccountId, buildDeployRoleName(dirConfig.actualProjectName, resourceSuffix)),
-            force: initOptions.force,
-        });
-        if (drifted.ok) {
-            console.log(color.green('✅ Scaffolded .github/workflows/drift.yml (scheduled IaC drift detection)'));
-        }
-    }
-
-    if (planEnabled) {
-        // plan.yml rides the manifest + backup like drift.yml (R1):
-        // re-init backs the old file up and regenerates fresh (current
-        // role ARN) instead of silently keeping a stale copy.
-        const planned = scaffoldPlanWorkflow(dirConfig.targetDir, {
-            region: config.region,
-            roleArn: buildRoleArn(awsAccountId, buildPreviewRoleName(dirConfig.actualProjectName, resourceSuffix)),
-            force: initOptions.force,
-        });
-        if (planned.ok) {
-            console.log(color.green('✅ Scaffolded .github/workflows/plan.yml (Terraform plan on PR)'));
-        }
-    }
-
-    // 7b2. Restore preserved files over the fresh output, then record
-    // content hashes of everything generated above so a later re-run can
-    // distinguish pristine output from hand edits (F3), plus the intended
-    // compute target (R5) for the target-switch gate. The manifest lands
-    // after the restore so secret_keys.json hashes the carried content.
-    restoreManagedFiles(dirConfig.targetDir, preservedStash);
-    writeInitManifest(dirConfig.targetDir, { target });
-
-    // 7c. Print-only stack preview when addons were scaffolded (default
-    // no-addon output is untouched).
-    if (selectedAddons.length > 0) {
-        const parsed = parseTerraformConfig(path.join(dirConfig.targetDir, 'terraform'));
-        parsed.projectName = dirConfig.actualProjectName;
-        parsed.framework = detectedFramework?.name || config.framework;
-        await renderDryRunPreview(parsed, true);
-    }
-
-    // 8. Telemetry
-    trackEvent('project_provisioned', {
-        // 1. Core & Context
-        projectName: dirConfig.actualProjectName,
-        success: true, // funnel outcome: failures emit success:false via failCommand
-        cli_version: CLI_VERSION,
-        is_headless: isHeadless,
-        setup_mode: config.setupType,
-        duration_ms: Date.now() - startTime,
-
-        // 2. Infrastructure Shape
-        target,
-        framework: config.framework,
-        resource_suffix_present: resourceSuffix !== '',
-        specific_framework: detectedFramework?.name || config.framework,
-        region: config.region,
-        size: config.size,
-        desired_count: parseInt(config.desiredCount),
-        has_database: config.needsDatabase,
-        db_engine: config.needsDatabase ? config.dbEngine : 'none',
-        has_custom_health_check: config.healthCheckPath !== '/',
-
-        // 3. Advanced Features & PaaS Context
-        has_worker: willHaveWorker,
-        is_heroku_migration: !!procfile,
-        is_vercel_migration: !!vercelRules,
-        is_docker_compose: !!dockerCompose,
-        has_pr_previews: config.enablePrPreviews,
-        ai_assistants_configured: config.aiAssistants || [],
-
-        // 4. Dependency-aware composition
-        selected_addons: selectedAddons,
-        detected_addons: Object.keys(ADDON_REGISTRY).filter((cap) => capabilities.addons[cap]?.detected === true),
-        migration_gate_enabled: migrationGateEnabled,
-        drift_detection_enabled: driftEnabled,
-        plan_on_pr_enabled: planEnabled,
-    });
-
-    s.stop('Infrastructure provisioned successfully!');
-
-    // 8.5 Configure AI Context
-    s.start('Configuring AI workspace rules...');
+// Step 8.5. Configure AI Context: per-assistant workspace rules. Advanced
+// mode respects the explicit selection; quickstart auto-detects from the
+// tree. Sync file writes only.
+function configureAiRules({ targetDir, config }) {
     const aiContext = { region: config.region, port: config.port, target: config.target };
-    const cwd = dirConfig.targetDir;
+    const cwd = targetDir;
 
     if (config.setupType === 'advanced') {
         // --- ADVANCED MODE: Explicitly respect user choices ---
@@ -1218,81 +465,1023 @@ async function mainStackMain(input = {}) {
             injectManagedBlock(path.join(cwd, '.aider.model.settings.yml'), getBaseRules(aiContext), false);
         }
     }
+}
+
+// Step 8. Telemetry: the project_provisioned funnel event. Identifiers
+// stay out — names, counts, and modes only.
+function trackProvisionedTelemetry({ projectName, isHeadless, startTime, target, config, resourceSuffix, detectedFramework, willHaveWorker, procfile, vercelRules, dockerCompose, capabilities, selectedAddons, migrationGateEnabled, driftEnabled, planEnabled }) {
+    trackEvent('project_provisioned', {
+        // 1. Core & Context
+        projectName,
+        success: true, // funnel outcome: failures emit success:false via failCommand
+        cli_version: CLI_VERSION,
+        is_headless: isHeadless,
+        setup_mode: config.setupType,
+        duration_ms: Date.now() - startTime,
+
+        // 2. Infrastructure Shape
+        target,
+        framework: config.framework,
+        resource_suffix_present: resourceSuffix !== '',
+        specific_framework: detectedFramework?.name || config.framework,
+        region: config.region,
+        size: config.size,
+        desired_count: parseInt(config.desiredCount),
+        has_database: config.needsDatabase,
+        db_engine: config.needsDatabase ? config.dbEngine : 'none',
+        has_custom_health_check: config.healthCheckPath !== '/',
+
+        // 3. Advanced Features & PaaS Context
+        has_worker: willHaveWorker,
+        is_heroku_migration: !!procfile,
+        is_vercel_migration: !!vercelRules,
+        is_docker_compose: !!dockerCompose,
+        has_pr_previews: config.enablePrPreviews,
+        ai_assistants_configured: config.aiAssistants || [],
+
+        // 4. Dependency-aware composition
+        selected_addons: selectedAddons,
+        detected_addons: Object.keys(ADDON_REGISTRY).filter((cap) => capabilities.addons[cap]?.detected === true),
+        migration_gate_enabled: migrationGateEnabled,
+        drift_detection_enabled: driftEnabled,
+        plan_on_pr_enabled: planEnabled,
+    });
+}
+
+// Steps 7b2 + 7c. Restore preserved files over the fresh output, record
+// the init manifest, and print the addon stack preview. Runs after every
+// generator above so hashes cover the final tree.
+async function finalizeInitTree({ dirConfig, target, preservedStash, selectedAddons, detectedFramework, config }) {
+    // 7b2. Restore preserved files over the fresh output, then record
+    // content hashes of everything generated above so a later re-run can
+    // distinguish pristine output from hand edits (F3), plus the intended
+    // compute target (R5) for the target-switch gate. The manifest lands
+    // after the restore so secret_keys.json hashes the carried content.
+    restoreManagedFiles(dirConfig.targetDir, preservedStash);
+    writeInitManifest(dirConfig.targetDir, { target });
+
+    // 7c. Print-only stack preview when addons were scaffolded (default
+    // no-addon output is untouched).
+    if (selectedAddons.length > 0) {
+        const parsed = parseTerraformConfig(path.join(dirConfig.targetDir, 'terraform'));
+        parsed.projectName = dirConfig.actualProjectName;
+        parsed.framework = detectedFramework?.name || config.framework;
+        await renderDryRunPreview(parsed, true);
+    }
+}
+
+// Step 7b. Scaffold selected addons (registry order), then wire the
+// pre-deploy migration gate plus the drift + plan workflows.
+async function wireInitWorkflows({ targetDir, projectName, resourceSuffix, region, dbEngine, awsAccountId, selectedAddons, resolvedByCap, migrationGateEnabled, migrationCmd, target, driftEnabled, planEnabled, force }) {
+    for (const cap of selectedAddons) {
+        const scaffolded = await scaffoldAddon(cap, resolvedByCap[cap], { cwd: targetDir, region });
+        console.log(color.green(`✅ Scaffolded terraform/${scaffolded.file} (${cap})`));
+    }
+
+    if (migrationGateEnabled && migrationCmd) {
+        const deployYmlPath = path.join(targetDir, '.github', 'workflows', 'deploy.yml');
+        const workflowContent = readFileSafe(deployYmlPath);
+        // Scope the gate's snapshot id to the database (aurora
+        // takes the cluster prefix) so guardrails and gc can name it.
+        const gateDbRefs = resolveDbEngineRefs(dbEngine);
+        const gateDbIdentifier = `${projectName}${resourceSuffix}-db${gateDbRefs.isCluster ? '-cluster' : ''}`;
+        const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION, dbIdentifier: gateDbIdentifier }) : null;
+        if (gated) {
+            atomicWriteFileSync(deployYmlPath, gated);
+            console.log(color.green('✅ Wired the pre-deploy database migration gate into .github/workflows/deploy.yml (snapshot first, then migrate)'));
+        } else {
+            log.warn(color.yellow('⚠️  Could not wire the migration gate: the deploy workflow anchor was not found.'));
+        }
+        if (target === 'ecs') {
+            const previewYmlPath = path.join(targetDir, '.github', 'workflows', 'preview.yml');
+            const previewContent = readFileSafe(previewYmlPath);
+            if (previewContent) {
+                const previewGated = injectPreviewMigrationGate(previewContent, { cmd: migrationCmd, cliVersion: CLI_VERSION });
+                if (previewGated) {
+                    atomicWriteFileSync(previewYmlPath, previewGated);
+                    console.log(color.green('✅ Wired the preview database migration gate into .github/workflows/preview.yml'));
+                } else {
+                    log.warn(color.yellow('⚠️  Could not wire the preview migration gate: the Comment PR anchor was not found.'));
+                }
+            }
+        }
+    }
+
+    if (driftEnabled) {
+        // drift.yml rides the manifest + backup like deploy.yml now
+        // Re-init backs the old file up and regenerates fresh
+        // (current role ARN) instead of silently keeping a stale copy.
+        // Hand edits trip refuse-dirty before this point; --force regenerates.
+        const drifted = scaffoldDriftWorkflow(targetDir, {
+            region,
+            roleArn: buildRoleArn(awsAccountId, buildDeployRoleName(projectName, resourceSuffix)),
+            force,
+        });
+        if (drifted.ok) {
+            console.log(color.green('✅ Scaffolded .github/workflows/drift.yml (scheduled IaC drift detection)'));
+        }
+    }
+
+    if (planEnabled) {
+        // plan.yml rides the manifest + backup like drift.yml (R1):
+        // re-init backs the old file up and regenerates fresh (current
+        // role ARN) instead of silently keeping a stale copy.
+        const planned = scaffoldPlanWorkflow(targetDir, {
+            region,
+            roleArn: buildRoleArn(awsAccountId, buildPreviewRoleName(projectName, resourceSuffix)),
+            force,
+        });
+        if (planned.ok) {
+            console.log(color.green('✅ Scaffolded .github/workflows/plan.yml (Terraform plan on PR)'));
+        }
+    }
+}
+
+// Step 7. Synthesize Templates: branch resolution, render-config assembly,
+// template generation, and the compose-secrets telemetry note.
+async function synthesizeInitTemplates({ dirConfig, config, target, resourceSuffix, cpu, memory, computeTier, estimatedCost, buildDir, stateBucketName, awsAccountId, djangoWsgi, disableDefaultCI, procfile, vercelRules, composeForMerge, composeWebName, workerCommandHcl, oidcTrustSub, oidcTreeBranches }) {
+    // Live origin/HEAD wins when it names a real branch; when
+    // detection falls back, a re-init keeps the tree's own default branch
+    // so dual trust never narrows silently.
+    const treeDefaultBranch = oidcTreeBranches?.[1] ?? null;
+    const detectedDefaultBranch = resolveDefaultBranch(dirConfig.targetDir, config.branch);
+    const defaultBranch = detectedDefaultBranch !== config.branch
+        ? detectedDefaultBranch
+        : (treeDefaultBranch ?? config.branch);
+    if (defaultBranch !== config.branch && treeDefaultBranch === null) {
+        log(color.yellow(`⚠️  Trusting default branch "${defaultBranch}" alongside deploy branch "${config.branch}" so scheduled drift can assume the deploy role.`));
+    }
+    const { deploySub, previewSub } = renderOidcRoleSubs(oidcTrustSub, config.branch, defaultBranch);
+    const renderConfig = {
+        PROJECT_NAME: dirConfig.actualProjectName,
+        RESOURCE_SUFFIX: resourceSuffix,
+        REGION: config.region,
+        PORT: config.port,
+        CPU: cpu,
+        MEMORY: memory,
+        COMPUTE_TIER: computeTier,
+        ESTIMATED_COST: estimatedCost,
+        STATE_BUCKET: stateBucketName,
+        AWS_ACCOUNT_ID: awsAccountId,
+        HEALTH_CHECK_PATH: config.healthCheckPath,
+        DESIRED_COUNT: config.desiredCount,
+        DEPLOY_BRANCH: config.branch,
+        DEPLOY_ROLE_NAME: buildDeployRoleName(dirConfig.actualProjectName, resourceSuffix),
+        PREVIEW_ROLE_NAME: buildPreviewRoleName(dirConfig.actualProjectName, resourceSuffix),
+        GITHUB_DEPLOY_SUB: deploySub,
+        GITHUB_PREVIEW_SUB: previewSub,
+        BUILD_DIR: buildDir,
+        finalFramework: config.framework,
+        NEEDS_DATABASE: config.needsDatabase,
+        DB_ENGINE: config.dbEngine,
+        DJANGO_WSGI: djangoWsgi,
+        DISABLE_DEFAULT_CI: disableDefaultCI,
+        PROCFILE: procfile,
+        VERCEL_RULES: vercelRules,
+        DOCKER_COMPOSE: composeForMerge,
+        DOCKER_COMPOSE_WEB: composeWebName,
+        ENABLE_PR_PREVIEWS: config.enablePrPreviews,
+        WORKER_COMMAND: workerCommandHcl,
+        TARGET: target
+    };
+    await generateTemplates(dirConfig.targetDir, renderConfig);
+    if (Array.isArray(renderConfig.COMPOSE_SECRETS_FILTERED) && renderConfig.COMPOSE_SECRETS_FILTERED.length > 0) {
+        trackEvent('compose_secrets_filtered', {
+            projectName: dirConfig.actualProjectName,
+            count: renderConfig.COMPOSE_SECRETS_FILTERED.length,
+            names: renderConfig.COMPOSE_SECRETS_FILTERED,
+        });
+    }
+}
+
+// Step 6a. Plan existing-file handling BEFORE provisioning: headless
+// fail paths fire here while the tree is still intact, and the actual
+// renames wait until provisioning succeeds. Returns the plan plus the
+// preserved-files stash, or { refusal }.
+async function planInitFileHandling({ targetDir, isHeadless, force }) {
+    const existingFilesPlan = await planExistingFiles(targetDir, { isHeadless, force });
+    const existingFilesRefusal = await refusalResultForPlan(existingFilesPlan);
+    if (existingFilesRefusal) return { refusal: existingFilesRefusal };
+    // Stash preserved files before anything mutates the tree; the stash is
+    // discarded untouched when provisioning fails below.
+    const preservedStash = preserveManagedFiles(targetDir);
+    return { existingFilesPlan, preservedStash };
+}
+
+// Step 6b. Provision remote state (or scaffold offline placeholders),
+// run the state-adoption gate, and move the old tree aside. Returns the
+// bucket ids, or { refusal }.
+async function provisionInitState({ s, initOptions, isHeadless, targetDir, projectName, resourceSuffix, region, existingFilesPlan, offlineScaffold }) {
+    let awsAccountId;
+    let stateBucketName;
+    let adoptionRefusal = null;
+    try {
+        if (offlineScaffold) {
+            // Scaffold-only mode for template development and CI
+            // fixtures — no AWS calls. Placeholders are greppable and
+            // invalid as real values (uppercase), so an unreconciled tree
+            // fails loud at `terraform init` instead of half-working.
+            awsAccountId = OFFLINE_ACCOUNT_PLACEHOLDER;
+            stateBucketName = formatStateBucketName(`${projectName}${resourceSuffix}`, OFFLINE_ACCOUNT_PLACEHOLDER);
+            s.stop('Offline mode: skipping state bucket provisioning.');
+            trackEvent('init_offline_scaffold', { projectName });
+        } else {
+            const bucketData = await provisionStateBucket(region, `${projectName}${resourceSuffix}`);
+            awsAccountId = bucketData.awsAccountId;
+            stateBucketName = bucketData.stateBucketName;
+            // Adoption gate: a fresh tree pointing at a bucket that already
+            // holds state needs an explicit adopt/rename/wipe choice before
+            // anything touches the tree. Probe failures fail closed through
+            // the provisioning catch below.
+            const isFreshTree = existingFilesPlan.decision === 'clean' && existingFilesPlan.foundFiles.length === 0;
+            // An interactive prompt may fire below: park the spinner first
+            // so it doesn't scribble over the choice (precedent: apply's
+            // recovery prompt). Headless runs never prompt.
+            const mayPromptAdoption = !isHeadless && initOptions.adoptState !== true && isFreshTree;
+            if (mayPromptAdoption) s.stop('State bucket ready.');
+            adoptionRefusal = await checkStateAdoption({
+                s3: bucketData.s3Client ?? null,
+                bucket: stateBucketName,
+                isFreshTree,
+                isHeadless,
+                adoptState: initOptions.adoptState === true,
+            });
+            if (mayPromptAdoption && !adoptionRefusal) s.start('Provisioning infrastructure...');
+        }
+    } catch (error) {
+        s.stop('❌ Failed to provision remote state or authenticate with AWS.');
+        trackEvent('init_backup_deferred', {
+            projectName,
+            plan: existingFilesPlan.decision,
+        });
+        // Auth failures print the shared credential-recovery guidance;
+        // init keeps its own telemetry + exit path through failCommand.
+        if (isAuthError(error)) printAwsAuthGuidance(initOptions);
+        return {
+            refusal: await failCommand({
+                message: `AWS Error: ${error.message}`,
+                useErrorStream: true,
+                event: 'cli-error',
+                telemetry: { step: 'aws_provisioning', error_code: error.name || 'UNKNOWN', error_message: error.message },
+            }),
+        };
+    }
+    if (adoptionRefusal) return { refusal: await failCommand(adoptionRefusal) };
+
+    // Provisioning succeeded: move the old tree aside (no-op on a clean
+    // slate), then regenerate over the cleared ground.
+    await executeBackup(targetDir, existingFilesPlan);
+    return { awsAccountId, stateBucketName };
+}
+
+// Step 5. Calculate Derived Values: sizing, cost estimate, build dir.
+// Pure computation over the resolved config.
+function deriveInitValues({ config, willHaveWorker, target, selectedAddons, detectedFramework }) {
+    const cpu = config.size === 'small' ? '512' : '256';
+    const memory = config.size === 'small' ? '1024' : '512';
+    const computeTier = config.size === 'small' ? 'Small (0.5 vCPU, 1GB RAM)' : 'Micro (0.25 vCPU, 512MB RAM)';
+
+    const costs = estimateMonthlyCost({
+        cpu: parseInt(cpu),
+        memory: parseInt(memory),
+        hasDb: config.needsDatabase,
+        dbEngine: config.dbEngine,
+        hasWorker: willHaveWorker,
+        hasSecrets: target !== 'static',
+        addons: selectedAddons,
+        computeTarget: target,
+    });
+    const estimatedCost = costs.totalMonthly;
+    const buildDir = detectedFramework?.buildDir || 'dist';
+    return { cpu, memory, computeTier, estimatedCost, buildDir };
+}
+
+// Step 4. Framework Migration Checks (Vercel Escape Hatch): dropped
+// edge rules plus per-framework adapter warnings. Pure output.
+function warnMigrationMismatches({ target, vercelRules, config, detectedFramework, targetDir }) {
+    if ((target === 'lambda' || target === 'static') && vercelRules?.redirects?.length > 0) {
+        const remedy = target === 'static'
+            ? 'Recreate them as CloudFront Functions after provisioning.'
+            : 'Recreate them as API Gateway routes after provisioning.';
+        log.warn(color.yellow(`⚠️  vercel.json redirects were detected, but ${target === 'static' ? 'static' : 'Lambda'} targets have no ALB listener rules to translate them into. ${remedy}`));
+    }
+
+    // Headers/rewrites have no translator on any target — name the dropped
+    // counts loudly, or the "Migrating edge network rules" success line
+    // reads as if everything migrated.
+    {
+        const migratedRedirects = (target === 'lambda' || target === 'static') ? 0 : (vercelRules?.redirects?.length || 0);
+        const droppedHeaders = vercelRules?.headers?.length || 0;
+        const droppedRewrites = vercelRules?.rewrites?.length || 0;
+        if (droppedHeaders > 0 || droppedRewrites > 0) {
+            const dropped = [
+                droppedHeaders > 0 ? `${droppedHeaders} header rule${droppedHeaders === 1 ? '' : 's'}` : null,
+                droppedRewrites > 0 ? `${droppedRewrites} rewrite${droppedRewrites === 1 ? '' : 's'}` : null,
+            ].filter(Boolean).join(' and ');
+            log.warn(color.yellow(`⚠️  vercel.json ${dropped} were detected but are not migrated (only redirects translate to ALB listener rules — ${migratedRedirects} migrated). Recreate them as CloudFront Functions or ALB listener rules after provisioning.`));
+        }
+    }
+
+    if (config.framework === 'nestjs') {
+        const nestAnalysis = analyzeNestApp(targetDir);
+        if (nestAnalysis.hasMain && !nestAnalysis.listensOnAllInterfaces) {
+            log.warn(color.yellow(`⚠️  NestJS must listen on 0.0.0.0 to receive traffic in ${target === 'lambda' ? 'AWS Lambda' : 'AWS Fargate'}.`));
+            console.log(color.cyan(`   In ${nestAnalysis.filePath}, update your bootstrap:`));
+            console.log(color.green(`   await app.listen(process.env.PORT ?? 3000, '0.0.0.0');\n`));
+        }
+    } else if (config.framework === 'nextjs') {
+        const nextConfig = analyzeNextConfig(targetDir);
+        // Static exports need no container, so the standalone warning
+        // (container-image slimming) does not apply to them.
+        if (nextConfig.hasConfig && !nextConfig.isStandalone && !nextConfig.isExport) {
+            log.warn(color.yellow('⚠️ Next.js config is missing "output: \'standalone\'".'));
+            console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/nextjs-vercel-to-aws.md'));
+        }
+    } else if (detectedFramework?.id === 'svelte') {
+        const svelteConfig = analyzeSvelteConfig(targetDir);
+        if (svelteConfig.adapter === 'vercel' || svelteConfig.adapter === 'auto') {
+            log.warn(color.yellow('⚠️ SvelteKit is locked into the Vercel/Auto adapter.'));
+            console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/sveltekit-vercel-to-aws.md'));
+        }
+    } else if (detectedFramework?.name === 'Astro') {
+        const astroConfig = analyzeAstroConfig(targetDir);
+        if (astroConfig.adapter === 'vercel') {
+            log.warn(color.yellow('⚠️ Astro is locked into the Vercel adapter.'));
+            console.log(color.cyan('   Fix it here: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/astro-vercel-to-aws.md'));
+        }
+    }
+}
+
+// Step 3.5. Docker Compose Overrides. The web service is the `build:`
+// service first, then the framework-port match, then the first
+// non-datastore service — never an anointed database. A
+// datastore-only file skips the merge (and the port override) with a
+// loud warning in both modes; the selection passes through to the
+// generator so it merges without re-warning. May override config.port.
+function mergeComposeOverrides({ dockerCompose, config, projectName, isHeadless }) {
+    let composeForMerge = dockerCompose;
+    let composeWebName = null;
+    if (dockerCompose && dockerCompose.length > 0) {
+        const selection = selectComposeWebService(dockerCompose, {
+            frameworkPort: frameworkDefaultPort(config.framework),
+        });
+        if (!selection.service) {
+            console.log(color.yellow('⚠️  No app service detected in your compose file (every service looks like a datastore) — skipping the compose merge. Give your app service a `build:` key and re-run to merge it.'));
+            trackEvent('compose_merge_skipped', { projectName, reason: selection.skipped });
+            composeForMerge = null;
+        } else {
+            composeWebName = selection.service.name;
+            if (selection.datastoreImage) {
+                console.log(color.yellow(`⚠️  Compose service "${selection.service.name}" looks like a datastore but was selected as the web service — verify the merged port and env vars before applying.`));
+                trackEvent('compose_datastore_web_warned', { projectName, service: selection.service.name });
+            }
+            if (selection.service.port) {
+                // Override the config port with the one from Docker Compose
+                config.port = selection.service.port.toString();
+                if (!isHeadless) {
+                    console.log(color.cyan(`   🐳 Docker Compose overrides: Port set to ${config.port} via service "${selection.service.name}"`));
+                }
+            }
+        }
+    }
+    return { composeForMerge, composeWebName };
+}
+
+// Step 3b (addons). Addon selection (interactive multiselect or explicit
+// --with) plus per-addon option resolution. Returns the registry-ordered
+// selection with resolved configs, or { refusal }.
+async function resolveInitAddons({ isInteractive, isStaticSite, withList, capabilities, initOptions, targetDir, region }) {
+    const failAddonResolution = (cap, resolved) => {
+        if (!resolved.ok && resolved.cancelled) {
+            return failCommand({
+                print: () => cancel('Selection cancelled.'),
+                event: 'cli-error',
+                telemetry: { step: 'init_addons', reason: 'cancelled' },
+                reason: 'cancelled',
+                exitCode: null,
+            });
+        }
+        return failCommand({
+            message: resolved.message,
+            hint: resolved.hint ?? null,
+            event: 'cli-error',
+            telemetry: { step: 'init_addons', error_code: resolved.errorCode },
+            reason: resolved.reason,
+            resultExtra: { capability: cap },
+        });
+    };
+
+    // Addon selection: interactive multiselect, or explicit --with.
+    let selectedAddons;
+    if (isInteractive && !isStaticSite) {
+        const addonOptions = Object.keys(ADDON_REGISTRY).map((cap) => {
+            const entry = ADDON_REGISTRY[cap];
+            const addonState = capabilities.addons[cap];
+            const detected = addonState?.detected === true;
+            const evidence = detected ? (addonState.evidence || []).join(', ') : '';
+            const monthlyFixed = entry.cost.monthlyFixed || 0;
+            const costLabel = monthlyFixed > 0 ? `~$${monthlyFixed}/mo` : '$0/mo + usage';
+            return {
+                value: cap,
+                label: `${cap} — ${entry.label}`,
+                hint: detected ? `detected: ${evidence} · ${costLabel}` : costLabel,
+            };
+        });
+        const initialValues = Object.keys(ADDON_REGISTRY).filter((cap) =>
+            withList.includes(cap) || capabilities.addons[cap]?.detected === true
+        );
+        const selection = await multiselect({
+            message: 'Select cloud addons to scaffold (Space to toggle, Enter to confirm):',
+            options: addonOptions,
+            initialValues,
+            required: false,
+        });
+        if (typeof selection === 'symbol') {
+            cancel('Operation cancelled.');
+            process.exit(0);
+        }
+        selectedAddons = Array.isArray(selection) ? selection : [];
+    } else {
+        selectedAddons = [...withList];
+    }
+    const selectedSet = new Set(selectedAddons);
+    selectedAddons = Object.keys(ADDON_REGISTRY).filter((cap) => selectedSet.has(cap));
+
+    // Resolve per-addon options (template vars, env, follow-up prompts).
+    const resolvedByCap = {};
+    const explicitModel = typeof initOptions.model === 'string' && initOptions.model !== '' ? initOptions.model : null;
+    for (const cap of selectedAddons) {
+        if (cap === 'ai:bedrock' && isInteractive && !explicitModel) {
+            const useDefault = await confirm({
+                message: `Use recommended Bedrock model (${DEFAULT_BEDROCK_MODEL})?`,
+                initialValue: true,
+            });
+            if (typeof useDefault === 'symbol') process.exit(0);
+            const resolved = await resolveAddonOptions(cap, {}, {
+                cwd: targetDir, region, isInteractive: !useDefault,
+            });
+            if (!resolved.ok) return { refusal: await failAddonResolution(cap, resolved) };
+            resolvedByCap[cap] = resolved;
+            continue;
+        }
+        const opts = cap === 'ai:bedrock'
+            ? { model: explicitModel ?? undefined, modelProvided: explicitModel !== null }
+            : cap === 'email:ses'
+                ? { domain: initOptions.domain ?? undefined, zoneId: initOptions.zoneId ?? undefined, fromEmail: initOptions.fromEmail ?? undefined }
+                : {};
+        const resolved = await resolveAddonOptions(cap, opts, {
+            cwd: targetDir,
+            region,
+            isInteractive: isInteractive && cap === 'email:ses',
+        });
+        if (!resolved.ok) return { refusal: await failAddonResolution(cap, resolved) };
+        resolvedByCap[cap] = resolved;
+    }
+    return { selectedAddons, resolvedByCap };
+}
+
+// Step 3b (CI opt-ins). Drift detection and plan-on-PR: explicit flag
+// wins, else offer interactively.
+async function resolveCiOptIns({ initOptions, isInteractive }) {
+    // Scheduled IaC drift detection: explicit flag wins, else offer.
+    // Opt-in by default — the workflow opens GitHub Issues on its own.
+    const setupCiDriftFlag = initOptions.setupCiDrift === true;
+    let driftEnabled = false;
+    if (setupCiDriftFlag) {
+        driftEnabled = true;
+    } else if (isInteractive) {
+        const driftAnswer = await confirm({
+            message: 'Set up scheduled IaC drift detection (daily terraform plan + GitHub Issues)?',
+            initialValue: false,
+        });
+        if (typeof driftAnswer === 'symbol') process.exit(0);
+        driftEnabled = driftAnswer === true;
+    }
+
+    // Plan-on-PR: explicit flag wins, else offer. Defaults ON —
+    // reviewing infra changes before merge is the safe default.
+    const setupCiPlanFlag = initOptions.setupCiPlan === true;
+    let planEnabled = false;
+    if (setupCiPlanFlag) {
+        planEnabled = true;
+    } else if (isInteractive) {
+        const planAnswer = await confirm({
+            message: 'Post Terraform plans as PR comments (review infra changes before merge)?',
+            initialValue: true,
+        });
+        if (typeof planAnswer === 'symbol') process.exit(0);
+        planEnabled = planAnswer === true;
+    }
+    return { driftEnabled, planEnabled };
+}
+
+// Step 3b (migration gate). Pre-deploy migration command + gate toggle
+// plus the stripped-runner guard. Returns the command, its source, and
+// the toggle — or { refusal }.
+async function resolveMigrationGate({ initOptions, capabilities, target, needsDatabase, framework, isInteractive, targetDir, projectName }) {
+    // Pre-deploy migration gate: explicit flag wins, else prompt. An
+    // explicit --setup-ci-migrate=<cmd> overrides detection, which is the
+    // escape hatch when detection yields an npm shim on a stripped runner.
+    const setupCiMigrateOpt = initOptions.setupCiMigrate;
+    const explicitMigrationCmd = typeof setupCiMigrateOpt === 'string' && setupCiMigrateOpt.trim() !== ''
+        ? setupCiMigrateOpt.trim()
+        : null;
+    const setupCiMigrateFlag = setupCiMigrateOpt === true || typeof setupCiMigrateOpt === 'string';
+    const migrationCmd = explicitMigrationCmd || capabilities.migration.command;
+    const migrationCmdSource = explicitMigrationCmd ? 'explicit' : 'detected';
+    let migrationGateEnabled = false;
+    if ((target === 'lambda' || target === 'static') && (setupCiMigrateFlag || (needsDatabase && migrationCmd))) {
+        log.warn(color.yellow(`⚠️  Skipping the pre-deploy migration gate: it runs migrations as an ephemeral ECS task, which ${target === 'static' ? 'static' : 'Lambda'} targets don't provision. Run migrations from CI against your database endpoint instead.`));
+    } else if (needsDatabase && migrationCmd) {
+        if (setupCiMigrateFlag) {
+            migrationGateEnabled = true;
+        } else if (isInteractive) {
+            const gateAnswer = await confirm({
+                message: `Enable pre-deploy database migration gate in GitHub Actions? (${migrationCmdSource}: ${migrationCmd})`,
+                initialValue: true,
+            });
+            if (typeof gateAnswer === 'symbol') process.exit(0);
+            migrationGateEnabled = gateAnswer === true;
+        }
+    } else if (setupCiMigrateFlag) {
+        log.warn(color.yellow('⚠️  --setup-ci-migrate was passed but no database is configured or no migration command was given; skipping the migration gate.'));
+    }
+
+    // Stripped-runner guard: init is about to generate a node
+    // Dockerfile without npm/npx, so wiring an npm-shim command into the
+    // gate would fail 100% of deploys. Fail fast headless (re-run with an
+    // explicit node command); warn loudly interactively and continue.
+    if (migrationGateEnabled && isNpmShimCommand(migrationCmd) && target === 'ecs' && frameworkUsesStrippedRunner(framework)) {
+        const ormHint = ormMappedHintSegment(targetDir, '--setup-ci-migrate=');
+        if (!isInteractive) {
+            return {
+                refusal: await failCommand({
+                    message: `\n✖ Refusing to wire the pre-deploy migration gate with "${migrationCmd}": the generated ${framework} Dockerfile strips npm/npx from the runner image, so this command would fail with "command not found" on every deploy.\n`,
+                    hint: `  Re-run with an explicit node-based command, e.g. \`--setup-ci-migrate="node ./dist/migrate.cjs"\`, or wire the gate later with \`grada db migrate --cmd "node ./dist/migrate.cjs" --setup-ci\`. Ensure your Dockerfile builds the bundle and copies it into the runner image${ormHint}.\n`,
+                    event: 'cli-error',
+                    telemetry: { step: 'init_setup', cmd_source: migrationCmdSource, error_code: 'NPM_CMD_STRIPPED_RUNNER' },
+                    errorCode: 'NPM_CMD_STRIPPED_RUNNER',
+                    reason: 'npm-cmd-stripped-runner',
+                }),
+            };
+        }
+        console.log(color.yellow(`⚠️  The ${migrationCmdSource} migration command ("${migrationCmd}") starts with npm/npx but the generated ${framework} Dockerfile strips those binaries from the runner image — the gate will fail unless you switch to a node-based command (e.g. "node ./dist/migrate.cjs"). Ensure your Dockerfile builds the bundle and copies it into the runner image.${ormHint}`));
+        trackEvent('npm_cmd_stripped_runner', { projectName, cmd_source: migrationCmdSource, ci_setup: true });
+    }
+    return { migrationCmd, migrationCmdSource, migrationGateEnabled };
+}
+
+// Step 3b (worker). Background worker command: Procfile-driven as before,
+// plus detection-driven. Lambda targets have no ECS worker service, so the
+// prompt is skipped and any Procfile worker process is left out of the
+// generated stack.
+async function resolveWorkerCommand({ isInteractive, isStaticSite, target, procfile, capabilities, needsDatabase }) {
+    let workerCommandHcl = '';
+    if (isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && (procfile?.worker || capabilities.worker.detected)) {
+        const workerAnswer = await promptWorkerCommand(procfile, capabilities);
+        if (workerAnswer.trim() !== '') {
+            workerCommandHcl = `command = ${toHclStringArray(splitProcfileCommand(workerAnswer.trim()))}`;
+        }
+    }
+    if (!isInteractive && !isStaticSite && target !== 'lambda' && target !== 'static' && !procfile?.worker && capabilities.worker.detected) {
+        // The suggested command is an npm shim (broken on stripped
+        // runners), so headless never scaffolds it blindly — but the
+        // detection must not vanish silently either.
+        const evidence = (capabilities.worker.evidence || []).join(', ') || 'worker signals';
+        const suggested = capabilities.worker.suggestedCommand || 'none';
+        log.warn(color.yellow(`⚠️  Skipping the background worker: detection found ${evidence} but no Procfile worker process, and the suggested command ("${suggested}") needs interactive confirmation. Re-run init interactively to configure the worker command.`));
+    }
+    if (target === 'lambda' && (procfile?.worker || capabilities.worker.detected)) {
+        log.warn(color.yellow('⚠️  Skipping the background worker: Lambda targets run a single scale-to-zero function with no ECS worker service.'));
+    }
+    if (target === 'lambda' && needsDatabase) {
+        log.warn(color.yellow('⚠️  Lambda opens a database connection per concurrent execution with no proxy in between — bursts can exhaust RDS limits. Keep pools tiny (tradeoffs: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/architecture.md#fargate-vs-lambda-tradeoffs).'));
+    }
+    const willHaveWorker = target !== 'lambda' && target !== 'static' && (Boolean(procfile?.worker) || workerCommandHcl !== '');
+    return { workerCommandHcl, willHaveWorker };
+}
+
+// Step 3b (static limits). Static targets serve files with no compute:
+// refuse mismatched frameworks, skip worker + database with warnings.
+// Mutates config.needsDatabase. Returns { isStaticSite } or { refusal }.
+async function applyStaticCompositionLimits({ target, config, detectedFramework, procfile, capabilities }) {
+    const isStaticSite = config.framework === 'static';
+    // Static exports (Next.js output:'export', SvelteKit adapter-static)
+    // carry no server, so --target static admits them like static presets.
+    // This extends only the gate — prompts.js still resolves the container
+    // preset from the detected id on ecs/lambda.
+    const isStaticExport = detectedFramework?.isStaticExport === true;
+    if (target === 'static' && !isStaticSite && !isStaticExport) {
+        return {
+            refusal: await failCommand({
+                message: `\n✖ --target static only supports static-site frameworks (detected: ${config.framework}).\n`,
+                hint: '  Use --target ecs for containerized apps or --target lambda for scale-to-zero serverless.\n',
+                event: 'cli-error',
+                telemetry: { step: 'init_validation', error_code: 'STATIC_TARGET_FRAMEWORK_MISMATCH' },
+                reason: 'static-target-framework-mismatch',
+                resultExtra: { framework: config.framework },
+            }),
+        };
+    }
+    if (target === 'static' && (procfile?.worker || capabilities.worker.detected)) {
+        log.warn(color.yellow('⚠️  Skipping the background worker: static targets serve files from S3 + CloudFront with no compute to run it on.'));
+    }
+    if (target === 'static' && config.needsDatabase) {
+        log.warn(color.yellow('⚠️  Skipping the database: static targets have no compute to connect from. Provision data separately if the site needs an API.'));
+        config.needsDatabase = false;
+    }
+    return { isStaticSite };
+}
+
+// Step 3. Gather Configuration & Framework Quirks: project config,
+// OIDC trust scoping, db-engine defaulting, and framework quirks.
+// Returns the config bundle, or { refusal }.
+async function gatherInitConfig({ isHeadless, headlessOptions, targetDir, detectedFramework, capabilities, explicitDbEngine, target, explicitGitHubRepo, projectName, procfile, force, isInteractive }) {
+    const config = await getProjectConfig(isHeadless, headlessOptions, targetDir, detectedFramework, { capabilities, dbEngine: explicitDbEngine, target });
+    config.target = target;
+
+    // 3a. Scope the GitHub OIDC trust (see resolveOidcTrust): explicit flag
+    // wins, then the tree's rendered trust, then the git remote, then one
+    // skippable prompt; headless falls through to the open trust — unless
+    // that would widen a non-trivial existing claim, which refuses
+    // (headless) or confirms (interactive). Telemetry records the mode
+    // only — never the owner/repo.
+    const oidcResolution = await resolveOidcTrust({
+        explicitSlug: explicitGitHubRepo,
+        treeClaim: readTerraformOidcTrust(targetDir),
+        targetDir,
+        isInteractive,
+    });
+    if (oidcResolution.refusal) {
+        return { refusal: await failCommand({ ...oidcResolution.refusal }) };
+    }
+    if (oidcResolution.cancelled) {
+        cancel('Operation cancelled. Re-run with --github-repo owner/name to scope the trust explicitly.');
+        process.exit(0);
+    }
+    const { sub: oidcTrustSub, source: oidcTrustSource } = oidcResolution;
+    trackEvent('init_oidc_trust', {
+        projectName,
+        mode: oidcTrustSub === 'repo:*' ? 'fallback' : 'scoped',
+        source: oidcTrustSource,
+    });
+    // Explicit flag wins everywhere (headless defaults to postgres, the
+    // interactive prompt is skipped); anything else falls back to postgres.
+    if (explicitDbEngine) {
+        config.dbEngine = explicitDbEngine;
+    } else if (!VALID_DB_ENGINES.includes(config.dbEngine)) {
+        config.dbEngine = 'postgres';
+    }
+    const djangoWsgi = await resolveDjangoWsgi(targetDir, procfile, config.framework, isHeadless);
+    const disableDefaultCI = await handleRailsCI(targetDir, config.framework, isHeadless, { force });
+    return { config, oidcResolution, oidcTrustSub, djangoWsgi, disableDefaultCI };
+}
+
+// Step 2d. Codebase scans: framework, Procfile, vercel.json,
+// docker-compose, and capability detection, plus the detection log lines.
+function scanInitCodebase({ targetDir, isHeadless }) {
+    const detectedFramework = detectFramework(targetDir);
+    const procfile = parseProcfile(targetDir);
+    const vercelRules = parseVercelConfig(targetDir);
+    const dockerCompose = parseDockerCompose(targetDir);
+    const capabilities = detectProjectCapabilities(targetDir);
+
+    if (!isHeadless) {
+        if (detectedFramework) log.success(`Auto-detected framework: ${detectedFramework.name}`);
+        if (procfile && procfile.web) log.success(`Auto-detected Procfile (web command: ${procfile.web.join(' ')})`);
+        if (vercelRules) log.success(`Auto-detected vercel.json (Migrating edge network rules)`);
+        if (dockerCompose) log.success(`Auto-detected docker-compose.yml (${dockerCompose.length} services mapped)`);
+    }
+
+    if (isHeadless) console.log(color.cyan(`🤖 Running grada in headless mode`));
+    return { detectedFramework, procfile, vercelRules, dockerCompose, capabilities };
+}
+
+// Step 2c. Compute target (explicit flag wins, headless defaults to ECS,
+// interactive runs prompt) plus the capability-vs-target policy for
+// --with. Returns { target } or { refusal }.
+async function resolveInitTarget({ isInteractive, normalizedExplicitTarget, withList }) {
+    let target = normalizedExplicitTarget || 'ecs';
+    if (isInteractive && normalizedExplicitTarget === null) {
+        log.info(`${color.gray('📖 Compare tradeoffs (cost crossover, cold starts, DB connections):')} ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/architecture.md')}`);
+        const targetAnswer = await select({
+            message: 'Select your AWS compute target:',
+            options: [
+                { value: 'ecs', label: 'ECS Fargate + ALB', hint: 'Always-on, persistent DB connections, zero cold starts (Starts at ~$31/mo)' },
+                { value: 'lambda', label: 'AWS Lambda + API Gateway v2', hint: 'Scale-to-zero, usage-based compute, 3-5s VPC cold starts ($0/mo idle)' },
+                { value: 'static', label: 'Static site (S3 + CloudFront)', hint: 'Zero-compute hosting for SPAs/SSGs ($0/mo idle)' },
+            ],
+        });
+        if (typeof targetAnswer === 'symbol') process.exit(0);
+        target = targetAnswer;
+    }
+
+    // Capability-vs-target policy for --with: refuse fast when
+    // the requested capability cannot render on this target (static has
+    // no task role or VPC), before any prompt/AWS call/write. Interactive
+    // multiselect offers only compatible targets' caps; this covers --with.
+    for (const cap of withList) {
+        if (!ADDON_REGISTRY[cap]) continue;
+        if (addonTargetDisposition(cap, target) === 'refuse') {
+            const targetGuard = guardComputeTarget({
+                actual: target,
+                command: `init --with ${cap}`,
+                supported: addonSupportedTargets(cap),
+                hint: 'Static sites run no containers — this capability needs a compute target (--target ecs or lambda).',
+            });
+            return {
+                refusal: await failCommand({
+                    message: targetGuard.message,
+                    hint: targetGuard.hint,
+                    event: 'cli-error',
+                    telemetry: { step: 'init_validation', error_code: targetGuard.errorCode },
+                    reason: targetGuard.reason,
+                    resultExtra: { capability: cap },
+                }),
+            };
+        }
+    }
+    return { target };
+}
+
+// Step 2b. Fail-fast validation of init composition flags — before any
+// prompts, AWS calls, backups, or file writes. Returns the parsed flag
+// values, or { refusal }.
+async function validateInitFlags({ initOptions, headlessOptions, isInteractive, explicitGitHubRepo, targetDir }) {
+    const refuse = async (args) => ({ refusal: await failCommand(args) });
+    const explicitFramework = typeof headlessOptions.framework === 'string' && headlessOptions.framework.trim() !== ''
+        ? headlessOptions.framework.trim()
+        : null;
+    if (explicitFramework !== null && !SUPPORTED_FRAMEWORKS.includes(explicitFramework)) {
+        return refuse({
+            message: `\n✖ Unknown framework "${explicitFramework}".`,
+            hint: `  Supported frameworks: ${SUPPORTED_FRAMEWORKS.join(', ')}.\n${explicitFramework === 'express' ? '  Express apps use --framework=node.\n' : ''}`,
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'INVALID_FRAMEWORK' },
+            reason: 'invalid-framework',
+        });
+    }
+    if (explicitGitHubRepo !== null && !isValidGitHubRepoSlug(explicitGitHubRepo)) {
+        return refuse({
+            message: `\n✖ Invalid --github-repo "${explicitGitHubRepo}".`,
+            hint: '  Expected owner/name (e.g. --github-repo=acme/widgets).\n',
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'INVALID_GITHUB_REPO' },
+            reason: 'invalid-github-repo',
+        });
+    }
+    const withList = Array.isArray(initOptions.with)
+        ? initOptions.with.filter((cap) => typeof cap === 'string')
+        : [];
+    const unknownCaps = withList.filter((cap) => !ADDON_REGISTRY[cap]);
+    if (unknownCaps.length > 0) {
+        return refuse({
+            message: `\n✖ Unknown addon capabilities: ${unknownCaps.join(', ')}.`,
+            hint: `  Valid capabilities: ${Object.keys(ADDON_REGISTRY).join(', ')}.\n`,
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'UNSUPPORTED_CAPABILITY' },
+            reason: 'unsupported-capability',
+            resultExtra: { capabilities: withList },
+        });
+    }
+    const explicitDbEngine = typeof initOptions.dbEngine === 'string' && initOptions.dbEngine.trim() !== ''
+        ? initOptions.dbEngine.trim()
+        : null;
+    if (explicitDbEngine !== null && !VALID_DB_ENGINES.includes(explicitDbEngine)) {
+        return refuse({
+            message: `\n✖ Invalid --db-engine "${explicitDbEngine}".`,
+            hint: `  Valid engines: ${VALID_DB_ENGINES.join(', ')}.\n`,
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'INVALID_DB_ENGINE' },
+            reason: 'invalid-db-engine',
+        });
+    }
+    const explicitTarget = typeof initOptions.target === 'string' && initOptions.target.trim() !== ''
+        ? initOptions.target.trim()
+        : null;
+    const normalizedExplicitTarget = explicitTarget === 'fargate' ? 'ecs' : explicitTarget;
+    if (explicitTarget !== null && !COMPUTE_TARGETS.includes(normalizedExplicitTarget)) {
+        return refuse({
+            message: `\n✖ Invalid compute target "${explicitTarget}". Supported targets: ecs, lambda, static.`,
+            hint: '  Use --target ecs (or fargate) for always-on containers, --target lambda for scale-to-zero serverless, or --target static for zero-compute S3 + CloudFront hosting.\n',
+            event: 'cli-error',
+            telemetry: { step: 'init_validation', error_code: 'INVALID_COMPUTE_TARGET' },
+            reason: 'invalid-compute-target',
+        });
+    }
+    const addonFlagOptions = {
+        model: initOptions.model ?? undefined,
+        domain: initOptions.domain ?? undefined,
+        zoneId: initOptions.zoneId ?? undefined,
+        fromEmail: initOptions.fromEmail ?? undefined,
+    };
+    for (const cap of withList) {
+        // Per-capability scoped: irrelevant flags are silently ignored.
+        const flagError = validateAddonFlags(cap, addonFlagOptions);
+        if (flagError) {
+            return refuse({
+                message: flagError.message,
+                hint: flagError.hint ?? null,
+                event: 'cli-error',
+                telemetry: { step: 'init_validation', error_code: flagError.errorCode },
+                reason: flagError.reason,
+                resultExtra: { capability: cap },
+            });
+        }
+    }
+    if (withList.includes('email:ses') && !isInteractive) {
+        const hasDomainFlag = typeof initOptions.domain === 'string' && initOptions.domain.trim() !== '';
+        let domainTfHasDomain = false;
+        if (!hasDomainFlag) {
+            const domainTf = readFileSafe(path.join(targetDir, 'terraform', 'domain.tf'));
+            domainTfHasDomain = Boolean(domainTf && parseDomainTf(domainTf)?.domain);
+        }
+        if (!hasDomainFlag && !domainTfHasDomain) {
+            return refuse({
+                message: '\n✖ No domain for Amazon SES. Pass --domain <domain> or run from a project with terraform/domain.tf.\n',
+                event: 'cli-error',
+                telemetry: { step: 'init_validation', error_code: 'MISSING_SES_DOMAIN' },
+                reason: 'missing-ses-domain',
+                resultExtra: { capability: 'email:ses' },
+            });
+        }
+    }
+    return { withList, explicitDbEngine, normalizedExplicitTarget };
+}
+
+// Step 2a. Headless wizard gate, target directory resolution, and
+// existing-tree project-name reuse. Returns { dirConfig } or { refusal }.
+async function resolveInitWorkdir({ options, isHeadless, headlessOptions, explicitProjectName }) {
+    // Non-interactive wizard gate (sync-ai precedent: bespoke, not the
+    // shared helper — approval flags cannot answer input questions, so
+    // even `init --yes` must refuse here). Without --headless the wizard
+    // always prompts (directory first), so an inferred-headless run (CI,
+    // no TTY) could only abandon — refuse loudly instead. This sits
+    // before the 2b flag validation below because the directory prompt
+    // precedes it; re-running with --headless surfaces any specific
+    // INVALID_* error. No preconfigured exemption: the parser only
+    // exposes flag values in headless mode, so standalone
+    // --preconfigured would silently ignore --framework/--region.
+    if (!isHeadless && resolveHeadless(options)) {
+        return {
+            refusal: await failCommand({
+                message: '\n✖ init needs an interactive terminal to gather project configuration.',
+                hint: '  Re-run with --headless --framework <id> --target <ecs|lambda|static> (plus --region/--with as needed), or run interactively in a terminal.\n',
+                event: 'project_provisioned',
+                telemetry: { projectName: explicitProjectName ?? path.basename(process.cwd()) },
+                errorCode: 'INIT_NON_INTERACTIVE',
+                reason: 'non-interactive',
+                exitCode: 1,
+            }),
+        };
+    }
+    const dirConfig = await getTargetDirectory(isHeadless, headlessOptions, { projectName: explicitProjectName });
+
+    // Re-init over an existing tree keeps the tree's project name: after a
+    // directory rename or copy, re-deriving from the basename would silently
+    // fork every singleton (state bucket, RDS, ECR…) into a parallel stack
+    // while the old one keeps billing. --project-name renames explicitly.
+    const treeProjectName = readTerraformProjectName(dirConfig.targetDir);
+    const sanitizedTreeName = treeProjectName ? sanitizeProjectName(treeProjectName) : null;
+    if (sanitizedTreeName && explicitProjectName && sanitizedTreeName !== dirConfig.actualProjectName) {
+        console.log(color.yellow(`⚠️  --project-name "${dirConfig.actualProjectName}" overrides this tree's project "${treeProjectName}" — the next apply will provision a NEW stack; the "${treeProjectName}" stack is left untouched (and still billing).`));
+        trackEvent('init_project_name_override', { projectName: dirConfig.actualProjectName });
+    } else if (sanitizedTreeName && !explicitProjectName && sanitizedTreeName !== dirConfig.actualProjectName) {
+        console.log(color.yellow(`⚠️  Directory "${path.basename(dirConfig.targetDir)}" doesn't match this tree's project "${sanitizedTreeName}" — keeping "${sanitizedTreeName}" so re-init doesn't fork your infrastructure. Pass --project-name <name> to rename explicitly.`));
+        trackEvent('init_project_name_reused', { projectName: sanitizedTreeName });
+        dirConfig.actualProjectName = sanitizedTreeName;
+    }
+    return { dirConfig };
+}
+
+// Step 1. Silent Pre-flight check: terraform must exist. Keeps the
+// original fall-through shape (failCommand exits in CLI mode).
+async function ensureTerraformInstalled() {
+    const hasTerraform = await checkDependency('terraform');
+    if (!hasTerraform) {
+        await failCommand({
+            print: () => {
+                console.error(color.red('✖ Terraform is not installed.'));
+                console.log(color.yellow('Please run "npx grada-run doctor" to check your environment.'));
+            },
+        });
+    }
+}
+
+async function mainStackMain(input = {}) {
+    const options = normalizeOptions(input);
+    const { isHeadless = false } = options;
+    const isPreconfigured = options.isPreconfigured === true || process.argv.includes('--preconfigured');
+    const headlessOptions = normalizeOptions(options.headlessOptions);
+    const initOptions = normalizeOptions(options.initOptions);
+    const isInteractive = !isHeadless && !isPreconfigured;
+    const startTime = Date.now();
+
+    // 1. Silent Pre-flight check
+    await ensureTerraformInstalled();
+
+    if (!isHeadless) intro(color.bgCyan(color.black(' grada ☁️  ')));
+
+    // 2. Resolve Target & Scan Codebase
+    const explicitProjectName = typeof initOptions.projectName === 'string' && initOptions.projectName.trim() !== ''
+        ? initOptions.projectName.trim()
+        : null;
+    const explicitGitHubRepo = typeof initOptions.githubRepo === 'string' && initOptions.githubRepo.trim() !== ''
+        ? initOptions.githubRepo.trim()
+        : null;
+    // 2a. Headless gate, target directory, tree-name reuse.
+    const workdir = await resolveInitWorkdir({ options, isHeadless, headlessOptions, explicitProjectName });
+    if (workdir.refusal) return workdir.refusal;
+    const { dirConfig } = workdir;
+
+    // 2b. Fail-fast validation of init composition flags.
+    const validated = await validateInitFlags({ initOptions, headlessOptions, isInteractive, explicitGitHubRepo, targetDir: dirConfig.targetDir });
+    if (validated.refusal) return validated.refusal;
+    const { withList, explicitDbEngine, normalizedExplicitTarget } = validated;
+
+    // Collision suffix, resolved before any prompt/AWS call/write (and
+    // before backup planning moves the old tree): fresh trees mint, re-init
+    // reuses the rendered value, pre-suffix trees stay '' (zero drift).
+    const resourceSuffix = resolveInitSuffix(dirConfig.targetDir);
+
+    // Compute target + capability-vs-target policy.
+    const targetResolved = await resolveInitTarget({ isInteractive, normalizedExplicitTarget, withList });
+    if (targetResolved.refusal) return targetResolved.refusal;
+    const { target } = targetResolved;
+
+    // 2d. Codebase scans.
+    const { detectedFramework, procfile, vercelRules, dockerCompose, capabilities } = scanInitCodebase({ targetDir: dirConfig.targetDir, isHeadless });
+
+    // 3. Gather Configuration & Framework Quirks.
+    const gathered = await gatherInitConfig({ isHeadless, headlessOptions, targetDir: dirConfig.targetDir, detectedFramework, capabilities, explicitDbEngine, target, explicitGitHubRepo, projectName: dirConfig.actualProjectName, procfile, force: initOptions.force === true, isInteractive });
+    if (gathered.refusal) return gathered.refusal;
+    const { config, oidcResolution, oidcTrustSub, djangoWsgi, disableDefaultCI } = gathered;
+
+    // 3b. Dependency-aware composition (worker, migration gate, addons).
+    // Everything here resolves before backups, AWS calls, or file writes.
+    const staticLimits = await applyStaticCompositionLimits({ target, config, detectedFramework, procfile, capabilities });
+    if (staticLimits.refusal) return staticLimits.refusal;
+    const { isStaticSite } = staticLimits;
+    // Worker command.
+    const { workerCommandHcl, willHaveWorker } = await resolveWorkerCommand({ isInteractive, isStaticSite, target, procfile, capabilities, needsDatabase: config.needsDatabase });
+
+    // Pre-deploy migration gate.
+    const migrationResolved = await resolveMigrationGate({ initOptions, capabilities, target, needsDatabase: config.needsDatabase, framework: config.framework, isInteractive, targetDir: dirConfig.targetDir, projectName: dirConfig.actualProjectName });
+    if (migrationResolved.refusal) return migrationResolved.refusal;
+    const { migrationCmd, migrationCmdSource, migrationGateEnabled } = migrationResolved;
+
+    // CI opt-ins: drift detection + plan-on-PR.
+    const { driftEnabled, planEnabled } = await resolveCiOptIns({ initOptions, isInteractive });
+
+    // Addon selection + per-addon options.
+    const addonsResolved = await resolveInitAddons({ isInteractive, isStaticSite, withList, capabilities, initOptions, targetDir: dirConfig.targetDir, region: config.region });
+    if (addonsResolved.refusal) return addonsResolved.refusal;
+    const { selectedAddons, resolvedByCap } = addonsResolved;
+
+    // 3.5 Docker Compose Overrides.
+    const { composeForMerge, composeWebName } = mergeComposeOverrides({ dockerCompose, config, projectName: dirConfig.actualProjectName, isHeadless });
+
+    // 4. Framework Migration Checks (Vercel Escape Hatch)
+    warnMigrationMismatches({ target, vercelRules, config, detectedFramework, targetDir: dirConfig.targetDir });
+
+    // 5. Calculate Derived Values
+    const { cpu, memory, computeTier, estimatedCost, buildDir } = deriveInitValues({ config, willHaveWorker, target, selectedAddons, detectedFramework });
+
+    // 6. Existing-file plan, state provisioning, backup.
+    const fileHandling = await planInitFileHandling({ targetDir: dirConfig.targetDir, isHeadless, force: initOptions.force });
+    if (fileHandling.refusal) return fileHandling.refusal;
+    const { existingFilesPlan, preservedStash } = fileHandling;
+
+    const s = spinner();
+    s.start('Provisioning infrastructure...');
+
+    const offlineScaffold = initOptions.offline === true;
+    const provisioned = await provisionInitState({ s, initOptions, isHeadless, targetDir: dirConfig.targetDir, projectName: dirConfig.actualProjectName, resourceSuffix, region: config.region, existingFilesPlan, offlineScaffold });
+    if (provisioned.refusal) return provisioned.refusal;
+    const { awsAccountId, stateBucketName } = provisioned;
+
+    // 7. Synthesize Templates
+    s.message('Synthesizing Terraform templates...');
+    await synthesizeInitTemplates({ dirConfig, config, target, resourceSuffix, cpu, memory, computeTier, estimatedCost, buildDir, stateBucketName, awsAccountId, djangoWsgi, disableDefaultCI, procfile, vercelRules, composeForMerge, composeWebName, workerCommandHcl, oidcTrustSub, oidcTreeBranches: oidcResolution.treeBranches });
+
+    // 7b. Addons, migration gate, drift + plan workflows.
+    await wireInitWorkflows({ targetDir: dirConfig.targetDir, projectName: dirConfig.actualProjectName, resourceSuffix, region: config.region, dbEngine: config.dbEngine, awsAccountId, selectedAddons, resolvedByCap, migrationGateEnabled, migrationCmd, target, driftEnabled, planEnabled, force: initOptions.force });
+
+    // 7b2 + 7c. Restore, manifest, addon preview.
+    await finalizeInitTree({ dirConfig, target, preservedStash, selectedAddons, detectedFramework, config });
+
+    // 8. Telemetry
+    trackProvisionedTelemetry({ projectName: dirConfig.actualProjectName, isHeadless, startTime, target, config, resourceSuffix, detectedFramework, willHaveWorker, procfile, vercelRules, dockerCompose, capabilities, selectedAddons, migrationGateEnabled, driftEnabled, planEnabled });
+
+    s.stop('Infrastructure provisioned successfully!');
+
+    // 8.5 Configure AI Context
+    s.start('Configuring AI workspace rules...');
+    configureAiRules({ targetDir: dirConfig.targetDir, config });
     s.stop('AI rules configured successfully!');
 
     // 9. Output
-    let frameworkWarnings = '';
-
-    if (!isPreconfigured && !(config.framework === 'static' && detectedFramework?.buildDir)) {
-        frameworkWarnings = getFrameworkWarning(config.framework);
-    }
-
-    // 9b. Post-init capability hints (interactive only, so headless
-    // stdout stays byte-identical).
-    if (isInteractive) {
-        const upcoming = capabilities.upcomingHints;
-        if (upcoming.vector) {
-            console.log(color.dim('  💡 Vector-search dependencies detected: managed pgvector support is coming soon.'));
-        }
-        // Static targets refuse `add cron` (no compute) — don't send
-        // static users down a dead end.
-        if (upcoming.cron && target !== 'static') {
-            console.log(color.dim('  💡 Scheduled-task dependencies detected: scaffold a schedule with "grada add cron".'));
-        }
-        if (upcoming.mysql) {
-            console.log(color.dim('  💡 MySQL dependencies detected: RDS currently provisions PostgreSQL; MySQL support is coming soon.'));
-        }
-    }
-
-    // ORM runner matrix: when the gate was auto-wired to a mapped ORM
-    // command, say which one and what the user must guarantee (the
-    // bundle path / production dependency), while the run is fresh.
-    if (migrationGateEnabled && migrationCmdSource === 'detected') {
-        const ormMapped = detectOrmMigrationCommand(dirConfig.targetDir);
-        if (ormMapped && ormMapped.command === migrationCmd) {
-            const ormWarning = ormMapped.orm === 'drizzle'
-                ? 'Detected Drizzle ORM. Configured migration gate to use \'node ./dist/migrate.cjs\'. Ensure your build script bundles your migrator to this path.'
-                : 'Detected Prisma. Configured migration gate to run via \'node_modules/prisma/build/index.js\'. Ensure Prisma is in your production dependencies.';
-            log.warn(color.yellow(`⚠️  ${ormWarning}`));
-        }
-    }
-
-    const isGitInitialized = fsSync.existsSync(path.join(dirConfig.targetDir, '.git'));
-    const needsCd = dirConfig.projectName && dirConfig.projectName !== '.';
-    const applyStep = needsCd ? `cd ${dirConfig.projectName} && npx --yes grada-run apply` : 'npx --yes grada-run apply';
-    const gitInstructions = isGitInitialized
-        ? `git add . && git commit -m "chore: add AWS infrastructure and CI/CD" && git push`
-        : `git init && git add . && git commit -m "chore: add AWS infrastructure and CI/CD" && git branch -M ${config.branch} && git remote add origin https://github.com/your-username/your-repo.git && git push -u origin ${config.branch}`;
-
-    let docsTip = '';
-    if (procfile) {
-        docsTip = `\n  ${color.blue('📘 Read the Heroku Migration Guide:')} ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/migrations/heroku-procfile-to-aws.md')}`;
-    } else if (config.needsDatabase) {
-        docsTip = `\n  ${color.blue('📘 Read the Database Connections Guide:')} ${color.underline('https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/database-connections.md')}`;
-    }
-
-    outro(`${color.green('✅ Templates generated!')} ${color.blue('🛡️ DevSecOps scanning enabled.')}
-    ${frameworkWarnings ? `\n  ${frameworkWarnings}` : ''}
-    ${color.yellow('Next steps:')}
-    1. ${color.cyan(applyStep)}
-    2. ${color.cyan(gitInstructions)}
-    ${color.magenta('🚀 Need help?')} ${color.underline('https://calendly.com/anton-codes-iac/15min')}`);
-
-    if (offlineScaffold) {
-        // Pass the exact backend bucket (suffix included) — recomputing
-        // from the bare project name prints a bucket terraform never uses.
-        // Step 2 names only emitted workflows: preview/teardown render
-        // with PR previews, drift only when enabled.
-        printOfflineChecklist({
-            bucket: stateBucketName,
-            region: config.region,
-            workflows: [
-                'deploy',
-                ...(config.enablePrPreviews ? ['preview', 'teardown'] : []),
-                ...(driftEnabled ? ['drift'] : []),
-            ],
-        });
-    }
+    printInitOutput({ isPreconfigured, config, detectedFramework, isInteractive, capabilities, target, migrationGateEnabled, migrationCmdSource, migrationCmd, dirConfig, offlineScaffold, procfile, stateBucketName, driftEnabled });
 
     await flushTelemetry();
 }

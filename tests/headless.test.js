@@ -225,6 +225,31 @@ describe('Headless contract (automation-safe)', () => {
         expectNoInteractivePrompts();
     });
 
+    it('prints the Heroku migration guide tip after scaffolding a Procfile project', async () => {
+        process.chdir(tmpDir);
+        await fs.writeFile(path.join(tmpDir, 'Procfile'), 'web: node index.js\n');
+        const { exitCalls } = await runHeadlessInit([
+            '--headless', '--preconfigured', '--framework=node', '--port=3000', '--region=eu-west-1',
+        ]);
+        expect(exitCalls).toEqual([]);
+        expect(clack.mockOutro).toHaveBeenCalled();
+        const outroText = clack.mockOutro.mock.calls.map(([message]) => String(message)).join('\n');
+        expect(outroText).toContain('Heroku Migration Guide');
+        expectNoInteractivePrompts();
+    });
+
+    it('prints no migration guide tip for a plain project', async () => {
+        process.chdir(tmpDir);
+        const { exitCalls } = await runHeadlessInit([
+            '--headless', '--preconfigured', '--framework=node', '--port=3000', '--region=eu-west-1',
+        ]);
+        expect(exitCalls).toEqual([]);
+        expect(clack.mockOutro).toHaveBeenCalled();
+        const outroText = clack.mockOutro.mock.calls.map(([message]) => String(message)).join('\n');
+        expect(outroText).not.toContain('Migration Guide');
+        expectNoInteractivePrompts();
+    });
+
     it('refuses loudly when inferred-headless without --headless instead of abandoning the wizard', async () => {
         // Simulate: bare `init` in CI (no TTY, no mode flags). Under vitest
         // resolveHeadless is true via the environment, matching CI.

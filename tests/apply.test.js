@@ -901,6 +901,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     const messages = clack.mockLogMessage.mock.calls.map((call) => stripVTControlCharacters(String(call[0])));
     expect(messages.some((message) => message.includes('Automatic recovery failed'))).toBe(true);
     expect(messages.some((message) => message.includes('terraform import'))).toBe(true);
+    expect(messages.some((message) => message.includes('already imported'))).toBe(true);
   });
 
   it('refuses secret recovery headless without approval and touches nothing', async () => {
@@ -989,6 +990,7 @@ describe('Command: apply (mocked terraform spawn)', () => {
     const messages = clack.mockLogMessage.mock.calls.map((call) => stripVTControlCharacters(String(call[0])));
     expect(messages.some((message) => message.includes('Automatic recovery failed'))).toBe(true);
     expect(messages.some((message) => message.includes('terraform import'))).toBe(true);
+    expect(messages.some((message) => message.includes('already imported'))).toBe(false);
   });
 
   it('does not re-offer recovery after a recovered retry fails again', async () => {
