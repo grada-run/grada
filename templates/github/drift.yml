@@ -48,6 +48,9 @@ jobs:
           terraform_wrapper: false
 
       - name: Terraform Init
+        # Without creds there is nothing to init against: skip with the
+        # notice above instead of failing red on the S3 backend.
+        if: steps.aws-creds.outcome == 'success'
         working-directory: ./terraform
         run: terraform init -input=false
 

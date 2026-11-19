@@ -80,6 +80,9 @@ jobs:
       # start tasks on an unpushed tag), but the repository itself is
       # Terraform-managed — so it is bootstrapped with a targeted apply
       # first. Idempotent on existing stacks.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+
       - name: Bootstrap ECR repository
         working-directory: ./terraform
         run: |

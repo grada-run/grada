@@ -9,8 +9,12 @@ const TEMPLATES_DIR = path.resolve('templates/github');
 // GitHub expressions (${{ ... }}) are valid plain scalars — leave them.
 const PLACEHOLDER_RE = /(?<!\$)\{\{[^}]+\}\}/g;
 
+function readTemplate(filename) {
+    return fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+}
+
 function parseTemplate(filename) {
-    const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+    const raw = readTemplate(filename);
     return yamlLoad(raw.replace(PLACEHOLDER_RE, 'dummy'), { schema: CORE_SCHEMA });
 }
 
@@ -51,7 +55,7 @@ describe('github workflow templates', () => {
 
     it('deploy.yml and deploy-lambda.yml invalidate the app CDN after deploy', () => {
         for (const filename of ['deploy.yml', 'deploy-lambda.yml']) {
-            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            const raw = readTemplate(filename);
             // Same lookup convention as the static workflow: the distro
             // carries comment "${local.app_name}-cdn".
             expect(raw).toContain('CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn');
@@ -66,7 +70,7 @@ describe('github workflow templates', () => {
     // a targeted repo bootstrap (the repo itself is TF-managed) and
     // job-level AWS credentials (previously only grada-action had them).
     it.each(['deploy.yml', 'deploy-lambda.yml'])('%s pushes the image before applying infrastructure', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         expect(raw).toContain('Bootstrap ECR repository');
         expect(raw).toContain('-target=aws_ecr_repository.app');
         expect(raw).toContain('aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4');
@@ -78,12 +82,23 @@ describe('github workflow templates', () => {
         expect(apply).toBeGreaterThan(push);
     });
 
+    // The bootstrap step shells terraform directly — without the setup
+    // step every first push fails exit 127 (live-proven).
+    it.each(['deploy.yml', 'deploy-lambda.yml'])('%s installs Terraform before bootstrapping', (filename) => {
+        const raw = readTemplate(filename);
+        expect(raw).toContain('hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3');
+        const setup = raw.indexOf('- name: Setup Terraform');
+        const bootstrap = raw.indexOf('- name: Bootstrap ECR repository');
+        expect(setup).toBeGreaterThanOrEqual(0);
+        expect(bootstrap).toBeGreaterThan(setup);
+    });
+
     // `update-service` returns before the rollout finishes —
     // wait for stability and verify the PRIMARY deployment actually
     // runs the registered revision (a breaker rollback re-stabilizes on
     // the OLD revision, which the wait alone would report green).
     it('deploy.yml waits for rollout stability before invalidating', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
+        const raw = readTemplate('deploy.yml');
         expect(raw).toContain('aws ecs wait services-stable');
         expect(raw).toContain('deployments[?status==`PRIMARY`].taskDefinition');
         expect(raw).toContain('steps.register-task-def.outputs.task-arn');
@@ -97,7 +112,7 @@ describe('github workflow templates', () => {
     });
 
     it('deploy.yml redeploys the worker service alongside web', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
+        const raw = readTemplate('deploy.yml');
         // Worker identity (mirrors the ECS_SERVICE/ECS_TASK_FAMILY pair).
         expect(raw).toContain('ECS_WORKER_SERVICE: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-service');
         expect(raw).toContain('ECS_WORKER_TASK_FAMILY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-worker-task');
@@ -112,7 +127,7 @@ describe('github workflow templates', () => {
 
     it('preview.yml still parses after preview-gate injection', async () => {
         const { injectPreviewMigrationGate } = await import('../src/commands/db/migrate.js');
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview.yml'), 'utf8');
+        const raw = readTemplate('preview.yml');
         const injected = injectPreviewMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs' });
         expect(injected).toContain('# grada:db-migrate-start');
         const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
@@ -143,7 +158,7 @@ describe('github workflow templates', () => {
     // match), no exit 1 in the interpret block. Deploy never skips
     // (fails with the bootstrap pointer).
     it.each(['drift.yml', 'teardown.yml', 'preview.yml', 'preview-lambda.yml'])('%s skips loud with guidance on any assume failure', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         expect(raw).toContain('id: aws-creds');
         expect(raw).toContain('continue-on-error: true');
         expect(raw).toContain('- name: Interpret credential failure');
@@ -165,7 +180,7 @@ describe('github workflow templates', () => {
     // runner forever.
     it('pins -input=false on every raw terraform apply/destroy/plan/init', () => {
         for (const filename of ['deploy.yml', 'deploy-lambda.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml', 'drift.yml']) {
-            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            const raw = readTemplate(filename);
             for (const line of raw.split('\n')) {
                 if (line.trim().startsWith('#')) continue;
                 if (/\bterraform\s+(init|apply|destroy|plan)\b/.test(line)) {
@@ -187,7 +202,7 @@ describe('github workflow templates', () => {
     // Every preview push appends a new PR comment (noise), and
     // a failed preview leaves the last green URL standing as truth.
     it.each(['preview.yml', 'preview-lambda.yml'])('%s keeps one sticky comment and reports failures', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         expect(raw).toContain('grada-preview');
         expect(raw).toContain('updateComment');
         expect(raw).toContain('if: failure()');
@@ -202,7 +217,7 @@ describe('github workflow templates', () => {
 
     // The scan step claims SARIF output but emits a table.
     it.each(['deploy.yml', 'deploy-lambda.yml'])('%s labels the container scan honestly', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         expect(raw).not.toContain('SARIF');
         expect(raw).toContain('Scan Container for Vulnerabilities (table summary)');
     });
@@ -210,7 +225,7 @@ describe('github workflow templates', () => {
     // Cancelling mid-apply strands the S3 lockfile with no
     // recovery pointer — annotate every apply/destroy workflow.
     it.each(['deploy.yml', 'deploy-lambda.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml'])('%s annotates cancellation recovery', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         expect(raw).toContain('if: cancelled()');
         expect(raw).toContain('force-unlock');
         expect(raw).toContain('.tflock');
@@ -218,7 +233,7 @@ describe('github workflow templates', () => {
 
     it('deploy.yml fails loud (never skips) on credential failure', () => {
         for (const filename of ['deploy.yml', 'deploy-lambda.yml']) {
-            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            const raw = readTemplate(filename);
             expect(raw, filename).toContain('id: aws-creds');
             expect(raw, filename).toContain('- name: Interpret credential failure');
             expect(raw, filename).toContain('npx grada-run apply');
@@ -231,7 +246,7 @@ describe('github workflow templates', () => {
     // shape as deploy.yml: job-level assume + fail loud with the
     // bootstrap pointer naming the missing role.
     it('deploy-static.yml fails loud with the bootstrap pointer on credential failure', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy-static.yml'), 'utf8');
+        const raw = readTemplate('deploy-static.yml');
         expect(raw).toContain('id: aws-creds');
         expect(raw).toContain('continue-on-error: true');
         expect(raw).toContain('- name: Interpret credential failure');
@@ -244,7 +259,7 @@ describe('github workflow templates', () => {
     // destroy` never applies var updates, so teardown lifts protection
     // out-of-band (instance + cluster) before destroying.
     it('teardown.yml lifts preview deletion protection before destroy', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        const raw = readTemplate('teardown.yml');
         expect(raw).toContain('modify-db-instance');
         expect(raw).toContain('--no-deletion-protection');
         expect(raw).toContain('modify-db-cluster');
@@ -259,7 +274,7 @@ describe('github workflow templates', () => {
     // Previews rebuild and redeploy but never invalidate —
     // every push re-caches stale HTML until TTL expiry.
     it.each(['preview.yml', 'preview-lambda.yml'])('%s invalidates its preview distribution after deploy', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         // Workspace-suffixed comment (matches ${local.app_name}-cdn).
         expect(raw).toContain('CF_COMMENT: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-cdn');
         expect(raw).toContain('- name: Invalidate CloudFront');
@@ -274,8 +289,8 @@ describe('github workflow templates', () => {
     // a PR cancels the in-flight destroy. Separate group + lock timeouts
     // (the state lock now serializes the destroy/apply race instead).
     it('teardown runs in its own non-cancellable group', () => {
-        const preview = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview.yml'), 'utf8');
-        const teardown = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        const preview = readTemplate('preview.yml');
+        const teardown = readTemplate('teardown.yml');
         const previewGroup = preview.match(/group:\s*(.+)/)[1].trim();
         const teardownGroup = teardown.match(/group:\s*(.+)/)[1].trim();
         expect(teardownGroup).not.toBe(previewGroup);
@@ -287,11 +302,19 @@ describe('github workflow templates', () => {
     // The drift plan step exits 0 on every path (exit 1 errors
     // go green and silent) — errors must fail the run and file an issue.
     it('drift.yml fails loud on plan errors', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'drift.yml'), 'utf8');
+        const raw = readTemplate('drift.yml');
         const planStep = raw.slice(raw.indexOf('- name: Terraform Plan'), raw.indexOf('- name: Check provisioned state'));
         expect(planStep).toContain('EXITCODE');
         expect(planStep).toMatch(/if \[ "\$EXITCODE" = "1" \]; then exit 1; fi/);
         expect(raw).toContain('iac-drift-check-failed');
+    });
+
+    // Bare Init fails red on the S3 backend during a creds outage
+    // instead of skipping loud-green with the notice above.
+    it('drift.yml guards Terraform Init on credential success', () => {
+        const doc = parseTemplate('drift.yml');
+        const init = doc.jobs.drift.steps.find((s) => s?.name === 'Terraform Init');
+        expect(init?.if).toBe("steps.aws-creds.outcome == 'success'");
     });
 
     it('plan.yml gates PR plans behind the same-repo guard with a fork notice', () => {
@@ -310,7 +333,7 @@ describe('github workflow templates', () => {
     });
 
     it('plan.yml fails loud (never skips) on credential failure', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'plan.yml'), 'utf8');
+        const raw = readTemplate('plan.yml');
         expect(raw).toContain('id: aws-creds');
         expect(raw).toContain('continue-on-error: true');
         expect(raw).toContain('- name: Interpret credential failure');
@@ -319,7 +342,7 @@ describe('github workflow templates', () => {
     });
 
     it('plan.yml posts a sticky diff-highlighted comment with truncation', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'plan.yml'), 'utf8');
+        const raw = readTemplate('plan.yml');
         expect(raw).toContain('<!-- grada-plan -->');
         expect(raw).toContain('<details><summary>Show Plan</summary>');
         // Fence is backslash-escaped in source (it sits inside a JS template literal).
@@ -339,14 +362,14 @@ describe('github workflow templates', () => {
         ['preview-lambda.yml', 'PREVIEW_ROLE_NAME'],
         ['teardown.yml', 'PREVIEW_ROLE_NAME'],
     ])('%s assumes the {{%s}} role', (filename, placeholder) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         expect(raw).toContain(`role/{{${placeholder}}}`);
         expect(raw).not.toMatch(/-github-actions-role["'\s]/);
     });
 
     it('drift.yml and plan.yml keep the scaffolded {{ROLE_ARN}} placeholder', () => {
         for (const filename of ['drift.yml', 'plan.yml']) {
-            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            const raw = readTemplate(filename);
             expect(raw).toContain('role-to-assume: {{ROLE_ARN}}');
         }
     });
@@ -452,28 +475,28 @@ describe('github workflow templates', () => {
     });
 
     it('teardown exits green when the preview workspace is absent', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        const raw = readTemplate('teardown.yml');
         expect(raw).toContain('terraform workspace list');
         expect(raw).toContain('nothing to tear down');
     });
 
     it('teardown stays red when the workspace listing itself fails', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'teardown.yml'), 'utf8');
+        const raw = readTemplate('teardown.yml');
         expect(raw).toContain('WORKSPACES=$(terraform workspace list 2>&1) || { echo "$WORKSPACES"; exit 1; }');
         expect(raw).not.toMatch(/workspace list 2>\/dev\/null/);
     });
 
     it('preview posts the CloudFront URL, never the blocked direct ALB URL', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview.yml'), 'utf8');
+        const raw = readTemplate('preview.yml');
         expect(raw).toContain('terraform output -raw cloudfront_url');
         expect(raw).not.toContain('alb_direct_url');
-        const lambdaRaw = fs.readFileSync(path.join(TEMPLATES_DIR, 'preview-lambda.yml'), 'utf8');
+        const lambdaRaw = readTemplate('preview-lambda.yml');
         expect(lambdaRaw).toContain('terraform output -raw api_gateway_url');
     });
 
     it('every template terraform init is non-interactive', () => {
         for (const filename of templates) {
-            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            const raw = readTemplate(filename);
             for (const match of raw.matchAll(/^\s*terraform init(.*)$/gm)) {
                 expect(match[1], `${filename}: bare 'terraform init' prompts mid-CI`).toContain('-input=false');
             }
@@ -481,7 +504,7 @@ describe('github workflow templates', () => {
     });
 
     it('deploy.yml still parses after migration-gate injection', () => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, 'deploy.yml'), 'utf8');
+        const raw = readTemplate('deploy.yml');
         const injected = injectMigrationGate(raw.replace(PLACEHOLDER_RE, 'dummy'), { cmd: 'node ./dist/migrate.cjs', dbIdentifier: 'dummy-db' });
         expect(injected).toContain('# grada:db-migrate-start');
         const doc = yamlLoad(injected, { schema: CORE_SCHEMA });
@@ -494,7 +517,7 @@ describe('workflow supply-chain pins', () => {
     const templates = fs.readdirSync(TEMPLATES_DIR).filter((f) => f.endsWith('.yml'));
 
     it.each(templates)('%s pins every action to a full commit SHA', (filename) => {
-        const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+        const raw = readTemplate(filename);
         const refs = [...raw.matchAll(/uses:\s*(\S+)/g)].map((match) => match[1]);
         expect(refs.length).toBeGreaterThan(0);
         for (const ref of refs) {
@@ -505,7 +528,7 @@ describe('workflow supply-chain pins', () => {
     it('matches the ACTION_PINS single source (no drifted template)', async () => {
         const { ACTION_PINS } = await import('../src/data/action-pins.js');
         for (const filename of templates) {
-            const raw = fs.readFileSync(path.join(TEMPLATES_DIR, filename), 'utf8');
+            const raw = readTemplate(filename);
             for (const [, action, sha] of raw.matchAll(/uses:\s*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@([0-9a-f]{40})/g)) {
                 expect(ACTION_PINS[action], `${filename}: unknown action ${action}`).toBeDefined();
                 expect(sha, `${filename}: ${action} drifted from ACTION_PINS`).toBe(ACTION_PINS[action].sha);
