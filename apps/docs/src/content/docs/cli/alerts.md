@@ -38,7 +38,7 @@ npx grada-run apply
 | ---- | ----------- |
 | `--email <address>` | Bake an SNS email subscription into `alerts.tf` (confirmation click still required). |
 | `--webhook <url>` | Add a forwarding Lambda posting to this `https://` Slack/Discord/generic webhook. |
-| `--threshold <number>` | Alarm threshold override. Counts for ECS/Lambda, percent (0–100) for static. |
+| `--threshold <number>` | Primary-alarm threshold override. Counts for ECS/Lambda, percent (0–100) for static. Addon alarms (DLQ depth) use baked defaults. |
 | `--force` | Overwrite an existing `terraform/alerts.tf`. |
 | `--region <region>` | Explicit AWS region override. |
 

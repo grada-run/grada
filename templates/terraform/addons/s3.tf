@@ -12,6 +12,12 @@ resource "aws_s3_bucket" "storage" {
   # within S3's 63-character limit. Underscores are replaced because S3 names
   # must be DNS-compatible (lowercase, hyphens only).
   bucket = "${trimsuffix(substr(replace(lower(local.app_name), "_", "-"), 0, 42), "-")}-storage-${data.aws_caller_identity.current.account_id}"
+  # Preview teardowns destroy raw (no CLI drain step runs there), so
+  # preview buckets self-clean — versions and lone delete markers
+  # included. Prod (default workspace) stays protected. Caveat: manual
+  # `terraform workspace new <name>` workspaces match too (accepted —
+  # manual-name hazards are tracked separately).
+  force_destroy = terraform.workspace != "default"
 }
 
 resource "aws_s3_bucket_public_access_block" "storage" {

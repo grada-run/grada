@@ -4,7 +4,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { runStatus, runLambdaStatus, runStaticStatus, parseStatusArgs, getServiceHealth, getLambdaHealth, DEGRADED_MESSAGE, STATUS_WATCH_INTERVAL_MS } from '../src/commands/status.js';
+import { runStatus, runLambdaStatus, runStaticStatus, parseStatusArgs, getServiceHealth, getLambdaHealth, fetchCronHealth, DEGRADED_MESSAGE, STATUS_WATCH_INTERVAL_MS } from '../src/commands/status.js';
+import { safeSuffixedName } from '../src/utils/resolvers.js';
 import { runDiagnose } from '../src/commands/diagnose.js';
 import { trackEvent } from '../src/core/telemetry.js';
 
@@ -58,6 +59,45 @@ const healthyService = {
     runningCount: 2,
     pendingCount: 0,
 };
+
+describe('fetchCronHealth', () => {
+    function metricClient(results) {
+        return { send: vi.fn(async () => ({ MetricDataResults: results })) };
+    }
+
+    it('reports last attempt plus 24h error/drop sums', async () => {
+        const cloudWatchClient = metricClient([
+            { Id: 'cronAttempts', Timestamps: ['2026-11-20T11:00:00Z', '2026-11-20T12:00:00Z'], Values: [2, 1] },
+            { Id: 'cronErrors', Timestamps: ['2026-11-20T12:00:00Z'], Values: [1] },
+            { Id: 'cronDropped', Timestamps: [], Values: [] },
+        ]);
+        const health = await fetchCronHealth({ cloudWatchClient, scheduleGroup: 'myapp-crons' });
+        expect(health).toEqual({ lastAttemptAt: '2026-11-20T12:00:00.000Z', targetErrors24h: 1, dropped24h: 0 });
+        const [command] = cloudWatchClient.send.mock.calls[0];
+        expect(command.constructor.name).toBe('GetMetricDataCommand');
+        const queries = command.input.MetricDataQueries;
+        expect(queries).toHaveLength(3);
+        for (const query of queries) {
+            expect(query.MetricStat.Metric.Namespace).toBe('AWS/Scheduler');
+            expect(query.MetricStat.Metric.Dimensions).toEqual([{ Name: 'ScheduleGroup', Value: 'myapp-crons' }]);
+        }
+        expect(queries.map((q) => q.MetricStat.Metric.MetricName).sort()).toEqual([
+            'InvocationAttemptCount',
+            'InvocationDroppedCount',
+            'TargetErrorCount',
+        ]);
+    });
+
+    it('returns nulls when the schedule never fired', async () => {
+        const health = await fetchCronHealth({ cloudWatchClient: metricClient([]), scheduleGroup: 'myapp-crons' });
+        expect(health).toEqual({ lastAttemptAt: null, targetErrors24h: 0, dropped24h: 0 });
+    });
+
+    it('propagates client failures for best-effort callers', async () => {
+        const cloudWatchClient = { send: vi.fn(async () => { throw new Error('nope'); }) };
+        await expect(fetchCronHealth({ cloudWatchClient, scheduleGroup: 'myapp-crons' })).rejects.toThrow('nope');
+    });
+});
 
 describe('status: CLI args', () => {
     it('parses --region and --json', () => {
@@ -210,6 +250,100 @@ describe('Command: status (mocked ECS + CloudWatch)', () => {
             } finally {
                 consoleSpy.mockRestore();
             }
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('surfaces cron health when the tree schedules jobs', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-cron-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = ""\n}\n');
+            fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), 'resource "aws_scheduler_schedule" "cron" {}\n');
+            const ecsClient = mockEcsClient(healthyService);
+            const cloudWatchClient = mockCloudWatchClient([], [
+                { Id: 'cronAttempts', Timestamps: ['2026-11-20T12:00:00Z'], Values: [1] },
+                { Id: 'cronErrors', Timestamps: ['2026-11-20T12:00:00Z'], Values: [2] },
+                { Id: 'cronDropped', Timestamps: [], Values: [] },
+            ]);
+            const output = [];
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+                output.push(args.join(' '));
+            });
+            try {
+                const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients(), cwd: dir });
+                expect(result.cron).toEqual({ lastAttemptAt: '2026-11-20T12:00:00.000Z', targetErrors24h: 2, dropped24h: 0 });
+                expect(output.join('\n')).toContain('Cron:');
+                expect(exitSpy).not.toHaveBeenCalled();
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('omits cron when the tree has no schedules', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-cron-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = ""\n}\n');
+            const ecsClient = mockEcsClient(healthyService);
+            const cloudWatchClient = mockCloudWatchClient([]);
+            const output = [];
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+                output.push(args.join(' '));
+            });
+            try {
+                const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients(), cwd: dir });
+                expect(result.cron).toBeNull();
+                expect(output.join('\n')).not.toContain('Cron:');
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('derives the schedule group with the length-safe helper', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-cron-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = ""\n}\n');
+            fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), 'resource "aws_scheduler_schedule" "cron" {}\n');
+            const ecsClient = mockEcsClient(healthyService);
+            const cloudWatchClient = mockCloudWatchClient([]);
+            const longName = 'a'.repeat(60);
+            await runStatus({ projectName: longName, region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients(), cwd: dir });
+            const metricCall = cloudWatchClient.send.mock.calls.map(([c]) => c).find((c) =>
+                c.constructor.name === 'GetMetricDataCommand' &&
+                c.input.MetricDataQueries.some((q) => q.MetricStat.Metric.Namespace === 'AWS/Scheduler'));
+            const group = metricCall.input.MetricDataQueries[0].MetricStat.Metric.Dimensions[0].Value;
+            expect(group).toBe(safeSuffixedName(longName, '-crons', 64));
+            expect(group.length).toBeLessThanOrEqual(64);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('degrades cron to null when scheduler metrics fail', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-cron-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'main.tf'), 'locals {\n  grada_resource_suffix = ""\n}\n');
+            fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), 'resource "aws_scheduler_schedule" "cron" {}\n');
+            const ecsClient = mockEcsClient(healthyService);
+            const cloudWatchClient = {
+                send: vi.fn(async (command) => {
+                    if (command.constructor.name === 'GetMetricDataCommand') throw new Error('nope');
+                    return { MetricAlarms: [], CompositeAlarms: [] };
+                }),
+            };
+            const result = await runStatus({ projectName: 'myapp', region: 'us-east-2', ecsClient, cloudWatchClient, ...mockSignalClients(), cwd: dir });
+            expect(result.cron).toBeNull();
+            expect(result.healthy).toBe(true);
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
@@ -599,6 +733,38 @@ describe('status: lambda target (mocked AWS CLI)', () => {
             expect.anything()
         );
         expect(trackEvent).toHaveBeenCalledWith('status_run', expect.objectContaining({ healthy: true, success: true }));
+    });
+
+    it('surfaces cron health when the lambda tree schedules jobs', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-cron-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), 'resource "aws_scheduler_schedule" "cron" {}\n');
+            const spawnSyncImpl = cliWith(ACTIVE);
+            const cloudWatchClient = mockCloudWatchClient([], [
+                { Id: 'cronAttempts', Timestamps: ['2026-11-20T12:00:00Z'], Values: [1] },
+                { Id: 'cronErrors', Timestamps: [], Values: [] },
+                { Id: 'cronDropped', Timestamps: [], Values: [] },
+            ]);
+            const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', spawnSyncImpl, cloudWatchClient, cwd: dir });
+            expect(result.cron).toEqual({ lastAttemptAt: '2026-11-20T12:00:00.000Z', targetErrors24h: 0, dropped24h: 0 });
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('omits cron on lambda trees without schedules', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-cron-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+            const spawnSyncImpl = cliWith(ACTIVE);
+            const cloudWatchClient = mockCloudWatchClient([]);
+            const result = await runLambdaStatus({ projectName: 'myapp', region: 'us-east-2', spawnSyncImpl, cloudWatchClient, cwd: dir });
+            expect(result.cron).toBeNull();
+            expect(cloudWatchClient.send).not.toHaveBeenCalled();
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it('supports --json and explicit function names', async () => {

@@ -696,9 +696,10 @@ describe('ai:bedrock generated terraform', () => {
         expect(rendered).toContain('"bedrock:InvokeModel"');
         expect(rendered).toContain('"bedrock:InvokeModelWithResponseStream"');
         expect(rendered).toContain(`"arn:aws:bedrock:us-east-2::foundation-model/${DEFAULT_BEDROCK_MODEL}"`);
-        expect(rendered).toContain('"arn:aws:bedrock:us-east-2:*:inference-profile/*"');
+        expect(rendered).toContain('"arn:aws:bedrock:us-east-2:${data.aws_caller_identity.current.account_id}:inference-profile/*"');
         expect(rendered).not.toContain('bedrock:*::foundation-model/*');
         expect(rendered).not.toContain('bedrock:*:*:inference-profile/*');
+        expect(rendered).not.toContain(':*:inference-profile/*');
         expect(rendered).toContain(`value = "${DEFAULT_BEDROCK_MODEL}"`);
         expect(rendered).not.toContain('{{BEDROCK_MODEL_ID}}');
         const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
@@ -1695,6 +1696,11 @@ describe('email:ses generated terraform', () => {
         expect(rendered).toContain('output "ses_domain_identity_arn"');
         expect(rendered).toContain('output "ses_verification_token"');
         expect(rendered).toContain('output "ses_dkim_tokens"');
+        expect(rendered).toContain('resource "aws_ses_configuration_set" "main"');
+        expect(rendered).toContain('reputation_metrics_enabled = true');
+        expect(rendered).toContain('resource "aws_ses_event_destination" "cloudwatch"');
+        expect(rendered).toContain('resource "aws_sesv2_email_identity" "sender"');
+        expect(rendered).toContain('output "ses_configuration_set_name"');
         expect(rendered).not.toContain('aws_caller_identity');
         expect(rendered).not.toContain('{{SES_DOMAIN}}');
         expect(rendered).not.toContain('{{SES_FROM_EMAIL}}');
@@ -1790,7 +1796,7 @@ describe('email:ses generated terraform', () => {
         await runAdd({ cwd: dir, capability: 'email:ses', domain: 'example.com', region: 'us-east-2' });
         const rendered = fs.readFileSync(path.join(dir, 'terraform', 'ses.tf'), 'utf-8');
         const guards = rendered.split('= terraform.workspace == "default" ? 1 : 0').length - 1;
-        expect(guards).toBe(3);
+        expect(guards).toBe(6);
         expect(rendered).toContain('aws_ses_domain_identity.ses[0].domain');
         expect(rendered).toContain('value = terraform.workspace == "default" ? aws_ses_domain_identity.ses[0].arn : null');
         expect(rendered).toContain('value = terraform.workspace == "default" ? aws_ses_domain_identity.ses[0].verification_token : null');
@@ -1894,6 +1900,8 @@ describe('cron generated terraform', () => {
         expect(rendered).not.toContain('{{');
         // Bare single references keep tflint clean (no "${...}" wrappers).
         expect(rendered).toContain('role = aws_iam_role.scheduler_cron_role.id');
+        expect(rendered).toContain('resource "aws_scheduler_schedule_group" "crons"');
+        expect(rendered).toMatch(/group_name\s+= aws_scheduler_schedule_group\.crons\.name/);
         expect(rendered).toContain('arn      = aws_ecs_cluster.main.arn');
         expect(rendered).toContain('task_definition_arn = aws_ecs_task_definition.app.arn');
         // Revision-proof RunTask grant: pinned ARN plus family wildcard.
@@ -2234,6 +2242,8 @@ describe('lambda generated terraform', () => {
         expect(result.file).toBe('terraform/cron.tf');
         const rendered = fs.readFileSync(path.join(dir, 'terraform', 'cron.tf'), 'utf-8');
         expect(rendered).toContain('arn      = aws_lambda_function.app.arn');
+        expect(rendered).toContain('resource "aws_scheduler_schedule_group" "crons"');
+        expect(rendered).toMatch(/group_name\s+= aws_scheduler_schedule_group\.crons\.name/);
         expect(rendered).toContain('"lambda:InvokeFunction"');
         expect(rendered).toContain(`command = ${JSON.stringify(DEFAULT_CRON_COMMAND)}`);
         expect(rendered).not.toContain('{{');

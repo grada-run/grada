@@ -27,6 +27,38 @@ resource "aws_ses_domain_mail_from" "ses" {
   behavior_on_mx_failure = "UseDefaultValue"
 }
 
+# --- Feedback channel ---
+# Bounces and complaints publish to CloudWatch (dashboard + alarms)
+# instead of vanishing. The v2 sender identity sets this set as its
+# default, so app mail needs no per-send configuration; addresses
+# under the verified domain above verify automatically.
+resource "aws_ses_configuration_set" "main" {
+  count                      = terraform.workspace == "default" ? 1 : 0
+  name                       = "${local.app_name}-ses-events"
+  reputation_metrics_enabled = true
+  sending_enabled            = true
+}
+
+resource "aws_ses_event_destination" "cloudwatch" {
+  count                  = terraform.workspace == "default" ? 1 : 0
+  name                   = "cloudwatch"
+  configuration_set_name = aws_ses_configuration_set.main[0].name
+  enabled                = true
+  matching_types         = ["bounce", "complaint", "send"]
+
+  cloudwatch_destination {
+    default_value  = "default"
+    dimension_name = "ses:configuration-set"
+    value_source   = "messageTag"
+  }
+}
+
+resource "aws_sesv2_email_identity" "sender" {
+  count                  = terraform.workspace == "default" ? 1 : 0
+  email_identity         = "{{SES_FROM_EMAIL}}"
+  configuration_set_name = aws_ses_configuration_set.main[0].name
+}
+
 {{SES_ROUTE53_RECORDS_BLOCK}}
 # --- Least-Privilege IAM Policy for the ECS Task Role ---
 resource "aws_iam_role_policy" "ses_send" {
@@ -62,6 +94,10 @@ output "ses_verification_token" {
 
 output "ses_dkim_tokens" {
   value = terraform.workspace == "default" ? aws_ses_domain_dkim.ses[0].dkim_tokens : []
+}
+
+output "ses_configuration_set_name" {
+  value = terraform.workspace == "default" ? aws_ses_configuration_set.main[0].name : null
 }
 
 output "ses_spf_record" {

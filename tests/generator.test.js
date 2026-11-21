@@ -1631,6 +1631,30 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(content).toMatch(/preferred_maintenance_window\s*=\s*"[a-z]{3}:[0-9]{2}:[0-9]{2}-[a-z]{3}:[0-9]{2}:[0-9]{2}"/);
     });
 
+    it.each([
+        ['database.tf', 'postgres16', 'rds.force_ssl', '"1"'],
+        ['database-mysql.tf', 'mysql8.0', 'require_secure_transport', '"ON"'],
+    ])('%s enforces TLS via its own parameter group', async (file, family, parameter, value) => {
+        const content = await readTf(file);
+        expect(content).toContain('resource "aws_db_parameter_group" "ssl"');
+        expect(content).toMatch(new RegExp(`family\\s*=\\s*"${family.replace('.', '\\.')}"`));
+        expect(content).toMatch(new RegExp(`name\\s*=\\s*"${parameter.replace('.', '\\.')}"`));
+        expect(content).toMatch(new RegExp(`value\\s*=\\s*${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+        // Pending reboot: enforcement lands at the next reboot, never as
+        // a surprise mid-apply restart.
+        expect(content).toMatch(/apply_method\s*=\s*"pending-reboot"/);
+        expect(content).toMatch(/parameter_group_name\s*=\s*aws_db_parameter_group\.ssl\.name/);
+    });
+
+    // Aurora floats its engine version by design, and a cluster parameter
+    // group family must match it exactly — forcing a family would pin the
+    // engine by side effect. Deferred until the engine-version decision.
+    it('aurora documents why it carries no SSL parameter group yet', async () => {
+        const content = await readTf('database-aurora-postgresql.tf');
+        expect(content).not.toContain('aws_rds_cluster_parameter_group');
+        expect(content).toContain('engine-version decision');
+    });
+
     it('storage addon versions the bucket and expires old versions', async () => {
         const s3 = await readTf('addons', 's3.tf');
         expect(s3).toContain('aws_s3_bucket_versioning');
@@ -1639,10 +1663,58 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(s3).toContain('noncurrent_version_expiration');
     });
 
+    // Preview teardowns destroy raw (no CLI drain step runs there): preview
+    // buckets self-clean while prod stays protected.
+    it('storage bucket self-cleans outside the default workspace only', async () => {
+        const s3 = await readTf('addons', 's3.tf');
+        expect(s3).toMatch(/force_destroy\s*=\s*terraform\.workspace\s*!=\s*"default"/);
+    });
+
     it('storage CDN declares its price class and logging decision', async () => {
         const s3 = await readTf('addons', 's3.tf');
         expect(s3).toMatch(/price_class\s*=\s*"PriceClass_All"/);
         expect(s3).toMatch(/logging.*disabled|disabled.*logging/i);
+    });
+
+    // Over-cap names hash-suffix (deterministic md5 stem) instead of
+    // truncating into collisions (ALB/TG) or failing validation (IAM);
+    // short names render byte-identically (mirrors safeSuffixedName).
+    it.each([
+        ['main.tf', 'alb_safe_name'],
+        ['main.tf', 'tg_safe_name'],
+        ['main.tf', 'task_role_safe_name'],
+        ['main.tf', 'execution_role_safe_name'],
+    ])('%s conditionalizes %s', async (file, local) => {
+        const content = await readTf(file);
+        expect(content).toMatch(new RegExp(`${local}\\s*=\\s*length\\(`));
+        expect(content).toContain('md5(local.app_name)');
+        expect(content).toMatch(new RegExp(`name\\s*=\\s*local\\.${local}`));
+    });
+
+    it.each([
+        ['main-lambda.tf', 'task_role_safe_name'],
+        ['main-lambda.tf', 'execution_role_safe_name'],
+    ])('%s conditionalizes %s', async (file, local) => {
+        const content = await readTf(file);
+        expect(content).toMatch(new RegExp(`${local}\\s*=\\s*length\\(`));
+        expect(content).toContain('md5(local.app_name)');
+        expect(content).toMatch(new RegExp(`name\\s*=\\s*local\\.${local}`));
+    });
+
+    it.each(['cron.tf', 'cron-lambda.tf'])('%s conditionalizes scheduler names', async (file) => {
+        const content = await readTf('addons', file);
+        for (const local of ['scheduler_role_safe_name', 'schedule_safe_name', 'schedule_group_safe_name']) {
+            expect(content, local).toMatch(new RegExp(`${local}\\s*=\\s*length\\(`));
+            expect(content, local).toMatch(new RegExp(`=\\s*local\\.${local}`));
+        }
+        expect(content).toContain('md5(local.app_name)');
+        expect(content).toContain('group_name                   = aws_scheduler_schedule_group.crons.name');
+    });
+
+    it('drops the bare ALB/TG truncation', async () => {
+        const content = await readTf('main.tf');
+        expect(content).not.toContain('substr("${local.app_name}-alb", 0, 32)');
+        expect(content).not.toContain('substr("${local.app_name}-tg", 0, 32)');
     });
 });
 

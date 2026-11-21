@@ -195,3 +195,71 @@ jobs:
             --arg summary "$SUMMARY" \
             '{text: (":warning: Infrastructure drift detected in " + $repo + "\n" + $url + "\n```" + $summary + "```")}' > /tmp/drift-slack.json
           curl -sS -X POST -H 'Content-Type: application/json' -d @/tmp/drift-slack.json "$SLACK_WEBHOOK_URL"
+
+  # Pre-deploy snapshots accumulate per push with no retention: collect
+  # them (plus orphaned images, log groups, and EIPs) on the same daily
+  # schedule. A separate job so its failures can't trip the drift
+  # check-failed logic (that keys on the plan job's outputs) — gc gets
+  # its own failure label instead.
+  gc:
+    name: Collect garbage snapshots and orphans
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configure AWS Credentials
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
+        with:
+          role-to-assume: {{ROLE_ARN}}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Interpret credential failure
+        if: steps.aws-creds.outcome == 'failure'
+        run: |
+          echo "::notice::AWS credential assumption failed — skipping garbage collection this run."
+
+      - name: Collect garbage
+        id: gc
+        if: steps.aws-creds.outcome == 'success'
+        run: npx --yes grada-run gc --headless --yes --region ${{ env.AWS_REGION }}
+
+      # gc failures need a human (a stuck snapshot pattern rots silently),
+      # but under their own label — never the drift labels above. A green
+      # run closes the stale issue; cancelled/skipped runs stay silent.
+      - name: Report gc result
+        if: always() && steps.aws-creds.outcome == 'success'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const label = 'grada-gc-failed';
+            const outcome = '${{ steps.gc.outcome }}';
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({ owner, repo, name: label, color: 'd93f0b', description: 'Scheduled garbage collection failed' });
+              } else {
+                throw error;
+              }
+            }
+            const { data: open } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: label });
+            const existing = open[0];
+            if (outcome === 'failure') {
+              const body = `## 🧹 Garbage Collection Failed\n\nThe scheduled gc run errored on \`${new Date().toISOString()}\` ([workflow run](${runUrl})) — snapshots and orphans are accumulating.\n\nFix the run (credentials, permissions, gc output above) and the issue closes on the next green run.`;
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `gc still failing on \`${new Date().toISOString()}\` ([run](${runUrl})).` });
+                await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+              } else {
+                await github.rest.issues.create({ owner, repo, title: '🧹 Garbage Collection Failed', labels: [label], body });
+              }
+            } else if (outcome === 'success' && existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `✅ Garbage collection healthy again on \`${new Date().toISOString()}\` ([run](${runUrl})); closing.` });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+            }

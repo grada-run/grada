@@ -40,6 +40,12 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "{{PROJECT_NAME}}${local.env_suffix}${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix instead of failing IAM validation. Mirrors
+  # safeSuffixedName in resolvers.js.
+  task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"
+  execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -85,7 +91,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -110,7 +116,7 @@ data "aws_iam_policy_document" "lambda_task_trust" {
 }
 
 resource "aws_iam_role" "task_role" {
-  name                 = "${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.lambda_task_trust.json
   permissions_boundary = local.preview_boundary_arn
 }

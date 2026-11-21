@@ -19,6 +19,21 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. TLS enforcement: clients connect with TLS (see the
+# database-connections guide), so require it server-side. Pending
+# reboot: existing trees enforce at the next reboot, never as a
+# surprise mid-apply restart (see the SSL upgrade runbook).
+resource "aws_db_parameter_group" "ssl" {
+  name   = "${local.app_name}-mysql80"
+  family = "mysql8.0"
+
+  parameter {
+    name         = "require_secure_transport"
+    value        = "ON"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The MySQL Instance
 resource "aws_db_instance" "postgres" {
   identifier        = "${local.app_name}-db"
@@ -35,6 +50,9 @@ resource "aws_db_instance" "postgres" {
   backup_window      = "03:00-04:00"
   maintenance_window = "sun:04:00-sun:05:00"
   storage_encrypted  = true
+
+  # TLS enforcement (see the parameter group above).
+  parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Strip dashes for the database name: RDS MySQL db_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)

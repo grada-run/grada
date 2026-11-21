@@ -63,6 +63,11 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. No SSL parameter group yet: this template floats its engine
+# version by design, and a cluster parameter group family must match
+# it exactly — forcing a family would pin the engine by side effect.
+# Deferred until the engine-version decision; the instance engines
+# already enforce TLS via their own groups.
 # 3. The Aurora PostgreSQL Serverless v2 Cluster (scale-to-zero)
 resource "aws_rds_cluster" "postgres" {
   cluster_identifier = "\${local.app_name}-db-cluster"
@@ -293,7 +298,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-aurora_serverless-github-actions-deploy-role
@@ -485,6 +490,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-aurora_serverless\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -529,7 +544,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -542,7 +557,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -646,7 +661,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -654,7 +669,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -955,6 +970,9 @@ env:
   ECR_REPOSITORY: test-aurora_serverless-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -1032,6 +1050,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -1340,6 +1424,21 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. TLS enforcement: clients connect with TLS (see the
+# database-connections guide), so require it server-side. Pending
+# reboot: existing trees enforce at the next reboot, never as a
+# surprise mid-apply restart (see the SSL upgrade runbook).
+resource "aws_db_parameter_group" "ssl" {
+  name   = "\${local.app_name}-postgres16"
+  family = "postgres16"
+
+  parameter {
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
   identifier        = "\${local.app_name}-db"
@@ -1356,6 +1455,9 @@ resource "aws_db_instance" "postgres" {
   backup_window      = "03:00-04:00"
   maintenance_window = "sun:04:00-sun:05:00"
   storage_encrypted  = true
+
+  # TLS enforcement (see the parameter group above).
+  parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")
@@ -1551,7 +1653,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-django_postgres-github-actions-deploy-role
@@ -1743,6 +1845,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-django_postgres\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -1787,7 +1899,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -1800,7 +1912,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -1903,7 +2015,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -1911,7 +2023,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -2212,6 +2324,9 @@ env:
   ECR_REPOSITORY: test-django_postgres-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-django_postgres-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-django_postgres-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-django_postgres-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-django_postgres-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -2289,6 +2404,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -2704,7 +2885,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-docker_compose_sidecars-github-actions-deploy-role
@@ -2896,6 +3077,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-docker_compose_sidecars\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -2940,7 +3131,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -2953,7 +3144,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -3068,7 +3259,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -3076,7 +3267,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -3377,6 +3568,9 @@ env:
   ECR_REPOSITORY: test-docker_compose_sidecars-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -3454,6 +3648,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -3890,7 +4150,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-fastapi_python-github-actions-deploy-role
@@ -4082,6 +4342,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-fastapi_python\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -4126,7 +4396,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -4139,7 +4409,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -4238,7 +4508,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -4246,7 +4516,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -4547,6 +4817,9 @@ env:
   ECR_REPOSITORY: test-fastapi_python-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -4624,6 +4897,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -5028,7 +5367,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-go_distroless-github-actions-deploy-role
@@ -5220,6 +5559,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-go_distroless\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -5264,7 +5613,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -5277,7 +5626,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -5376,7 +5725,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -5384,7 +5733,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -5685,6 +6034,9 @@ env:
   ECR_REPOSITORY: test-go_distroless-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-go_distroless-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-go_distroless-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-go_distroless-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-go_distroless-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -5762,6 +6114,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -6070,6 +6488,21 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. TLS enforcement: clients connect with TLS (see the
+# database-connections guide), so require it server-side. Pending
+# reboot: existing trees enforce at the next reboot, never as a
+# surprise mid-apply restart (see the SSL upgrade runbook).
+resource "aws_db_parameter_group" "ssl" {
+  name   = "\${local.app_name}-postgres16"
+  family = "postgres16"
+
+  parameter {
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
   identifier        = "\${local.app_name}-db"
@@ -6086,6 +6519,9 @@ resource "aws_db_instance" "postgres" {
   backup_window      = "03:00-04:00"
   maintenance_window = "sun:04:00-sun:05:00"
   storage_encrypted  = true
+
+  # TLS enforcement (see the parameter group above).
+  parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")
@@ -6281,7 +6717,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-heroku_procfile_migration-github-actions-deploy-role
@@ -6473,6 +6909,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-heroku_procfile_migration\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -6517,7 +6963,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -6530,7 +6976,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -6633,7 +7079,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -6641,7 +7087,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -6942,6 +7388,9 @@ env:
   ECR_REPOSITORY: test-heroku_procfile_migration-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -7019,6 +7468,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -7391,6 +7906,21 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. TLS enforcement: clients connect with TLS (see the
+# database-connections guide), so require it server-side. Pending
+# reboot: existing trees enforce at the next reboot, never as a
+# surprise mid-apply restart (see the SSL upgrade runbook).
+resource "aws_db_parameter_group" "ssl" {
+  name   = "\${local.app_name}-mysql80"
+  family = "mysql8.0"
+
+  parameter {
+    name         = "require_secure_transport"
+    value        = "ON"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The MySQL Instance
 resource "aws_db_instance" "postgres" {
   identifier        = "\${local.app_name}-db"
@@ -7407,6 +7937,9 @@ resource "aws_db_instance" "postgres" {
   backup_window      = "03:00-04:00"
   maintenance_window = "sun:04:00-sun:05:00"
   storage_encrypted  = true
+
+  # TLS enforcement (see the parameter group above).
+  parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Strip dashes for the database name: RDS MySQL db_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)
@@ -7603,7 +8136,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-mysql_rds-github-actions-deploy-role
@@ -7795,6 +8328,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-mysql_rds\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -7839,7 +8382,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -7852,7 +8395,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -7956,7 +8499,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -7964,7 +8507,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -8265,6 +8808,9 @@ env:
   ECR_REPOSITORY: test-mysql_rds-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -8342,6 +8888,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -8775,7 +9387,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-nextjs_standalone-github-actions-deploy-role
@@ -8967,6 +9579,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-nextjs_standalone\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -9011,7 +9633,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -9024,7 +9646,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -9123,7 +9745,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -9131,7 +9753,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -9432,6 +10054,9 @@ env:
   ECR_REPOSITORY: test-nextjs_standalone-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -9509,6 +10134,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -9934,7 +10625,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-nuxt_ssr-github-actions-deploy-role
@@ -10126,6 +10817,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-nuxt_ssr\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -10170,7 +10871,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -10183,7 +10884,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -10282,7 +10983,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -10290,7 +10991,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -10591,6 +11292,9 @@ env:
   ECR_REPOSITORY: test-nuxt_ssr-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -10668,6 +11372,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -10977,6 +11747,21 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. TLS enforcement: clients connect with TLS (see the
+# database-connections guide), so require it server-side. Pending
+# reboot: existing trees enforce at the next reboot, never as a
+# surprise mid-apply restart (see the SSL upgrade runbook).
+resource "aws_db_parameter_group" "ssl" {
+  name   = "\${local.app_name}-postgres16"
+  family = "postgres16"
+
+  parameter {
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
   identifier        = "\${local.app_name}-db"
@@ -10993,6 +11778,9 @@ resource "aws_db_instance" "postgres" {
   backup_window      = "03:00-04:00"
   maintenance_window = "sun:04:00-sun:05:00"
   storage_encrypted  = true
+
+  # TLS enforcement (see the parameter group above).
+  parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
   db_name  = replace(local.app_name, "-", "_")
@@ -11188,7 +11976,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-rails_postgres-github-actions-deploy-role
@@ -11380,6 +12168,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-rails_postgres\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -11424,7 +12222,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -11437,7 +12235,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -11541,7 +12339,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -11549,7 +12347,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -11850,6 +12648,9 @@ env:
   ECR_REPOSITORY: test-rails_postgres-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -11927,6 +12728,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -12358,7 +13225,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-sveltekit_node-github-actions-deploy-role
@@ -12550,6 +13417,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-sveltekit_node\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -12594,7 +13471,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -12607,7 +13484,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -12706,7 +13583,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -12714,7 +13591,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -13015,6 +13892,9 @@ env:
   ECR_REPOSITORY: test-sveltekit_node-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -13092,6 +13972,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -13525,7 +14471,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-vercel_edge_migration-github-actions-deploy-role
@@ -13717,6 +14663,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-vercel_edge_migration\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -13761,7 +14717,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -13774,7 +14730,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -13873,7 +14829,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -13881,7 +14837,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -14182,6 +15138,9 @@ env:
   ECR_REPOSITORY: test-vercel_edge_migration-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -14259,6 +15218,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.
@@ -14671,7 +15696,7 @@ jobs:
       # the tag exists. A gate failure below can therefore never strand
       # the service on an unpullable revision.
       - name: Apply Infrastructure Changes
-        uses: grada-run/grada-action@12227808ae4caafaec1041319645586a1132fc57 # v1
+        uses: grada-run/grada-action@9df2e2c12314b6165e62f0e615edb01d6a81c40b # v1
         with:
           aws-region: \${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::123456789012:role/test-vite_static_spa-github-actions-deploy-role
@@ -14863,6 +15888,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "test-vite_static_spa\${local.env_suffix}\${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("\${local.app_name}-alb") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-\${substr(md5(local.app_name), 0, 5)}-alb" : "\${local.app_name}-alb"
+  tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
+  task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
+  execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -14907,7 +15942,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "\${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -14920,7 +15955,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "\${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -15019,7 +16054,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("\${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -15027,7 +16062,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("\${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = 8000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -15328,6 +16363,9 @@ env:
   ECR_REPOSITORY: test-vite_static_spa-repo
   WORKSPACE: pr-\${{ github.event.pull_request.number }}
   CF_COMMENT: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-cdn
+  PREVIEW_CLUSTER: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-cluster
+  PREVIEW_SERVICE: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-service
+  PREVIEW_TASK_FAMILY: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-task
 
 permissions:
   id-token: write
@@ -15405,6 +16443,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.

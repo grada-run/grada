@@ -25,6 +25,16 @@ npx grada-run apply         # provisions the topic, alarm, and chat forwarder
 
 This writes `terraform/alerts.tf` (refusing to overwrite without `--force`) and prints the follow-up steps. Static alarms live in `us-east-1` — the only region CloudWatch serves CloudFront metrics from — so `alerts` pins the topic, alarm, and forwarder there and adds the provider alias to `terraform/main.tf` when it is missing.
 
+### Addon alarms
+
+When the tree carries addons, `alerts` also scaffolds their alarms: DLQ depth (any visible message within 5 minutes), scheduler target errors and dropped invocations, RDS storage/CPU/connections (instance trees) or CPU/connections (aurora), valkey evictions and engine CPU, and account bounce/complaint rates for SES trees. Re-run `grada alerts --force` + `apply` after adding an addon to pick its alarms up. `--threshold` drives the primary alarm above only — addon alarms use baked defaults.
+
+#### Redriving the DLQ
+
+1. Inspect the poison messages first (console, or `aws sqs receive-message` against the DLQ).
+2. Fix the consumer, then redrive: the console's "Start DLQ redrive" on the DLQ, or `aws sqs start-message-move-task --source-arn <dlq-arn> --destination-arn <queue-arn>`.
+3. The alarm clears once the DLQ drains. If it refires immediately, the consumer still rejects the messages — fix forward instead of redriving again.
+
 ### Email delivery
 
 `--email` bakes an SNS subscription into the file. SNS requires every subscriber to confirm, so the last step is manual — click the confirmation link in the inbox, then check the subscription shows `Confirmed` in the SNS console before relying on it. Until someone confirms, alarms publish into a topic with no listeners.

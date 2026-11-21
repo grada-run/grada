@@ -85,6 +85,10 @@ One CloudWatch log group per project (`/ecs/<project>`, 14-day retention) collec
 
 Idle environments cost nothing in compute: [`sleep` / `wake`](/grada/cli/sleep/) scales ECS services to zero and stops RDS — printing the exact hourly/monthly savings and the 7-day AWS auto-restart timestamp — then restores the exact replica counts on wake. Console click-ops never go unnoticed: the opt-in `drift.yml` workflow runs `terraform plan` daily and opens a GitHub Issue on drift, and [`drift`](/grada/cli/drift/) runs the same check locally.
 
+## Baseline limits (single points)
+
+The scaffolded baseline favors cost over redundancy: RDS runs single-AZ (no standby), the app service starts at one task (`desiredCount`, raise it when traffic needs it), and the ALB carries no deletion protection or access logging. These are explicit limits, not oversights — multi-AZ and hardened edge handling are future work, not silent gaps.
+
 ## Preview workspaces
 
 Each open pull request gets a Terraform workspace (`preview.yml`) running the same files renamed by `app_name` plus an environment suffix — a full copy of the stack that `teardown.yml` destroys on close. A few resources are deliberately shared instead of copied (the ECR repository, Secrets Manager lookups), and account-wide singletons — the custom-domain ACM certificate and aliases, the SES domain identity/DKIM/DNS — are scoped to the production (`default`) workspace via `count` guards, so previews neither duplicate them nor delete them on teardown; previews serve over their own `*.cloudfront.net` URL and inherit SES sending permission. See [Ephemeral PR Previews](/grada/guides/ephemeral-pr-previews/).

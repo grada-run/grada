@@ -12,7 +12,7 @@ export const ACTION_PINS = {
     'aquasecurity/trivy-action': { sha: 'ed142fd0673e97e23eac54620cfb913e5ce36c25', tag: 'v0.36.0' },
     'aws-actions/amazon-ecr-login': { sha: '03f1aad4c6c7ffd436567f42f9384779290529bd', tag: 'v2' },
     'aws-actions/configure-aws-credentials': { sha: '7474bc4690e29a8392af63c5b98e7449536d5c3a', tag: 'v4' },
-    'grada-run/grada-action': { sha: '12227808ae4caafaec1041319645586a1132fc57', tag: 'v1' },
+    'grada-run/grada-action': { sha: '9df2e2c12314b6165e62f0e615edb01d6a81c40b', tag: 'v1' },
     'hashicorp/setup-terraform': { sha: 'b9cd54a3c349d3f38e8881555d616ced269862dd', tag: 'v3' },
 };
 

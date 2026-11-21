@@ -19,6 +19,11 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# 2b. No SSL parameter group yet: this template floats its engine
+# version by design, and a cluster parameter group family must match
+# it exactly — forcing a family would pin the engine by side effect.
+# Deferred until the engine-version decision; the instance engines
+# already enforce TLS via their own groups.
 # 3. The Aurora PostgreSQL Serverless v2 Cluster (scale-to-zero)
 resource "aws_rds_cluster" "postgres" {
   cluster_identifier = "${local.app_name}-db-cluster"

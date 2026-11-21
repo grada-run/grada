@@ -1,6 +1,6 @@
 import fsSync from 'fs';
 import path from 'path';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { normalizeOptions } from './args.js';
 
 export const FALLBACK_REGION = 'us-east-2';
@@ -110,6 +110,21 @@ export function readTerraformRegion(cwd = process.cwd()) {
     const match = mainTf.match(/region\s*=\s*"([^"]+)"/);
     if (!match || match[1].includes('{{')) return null;
     return match[1];
+}
+
+// Length-safe AWS resource name, mirroring the template conditional
+// byte-for-byte: short names render identically; over-cap names take a
+// deterministic md5 stem (never a truncating collision). `cap` is the
+// service limit including suffix. Doubled hyphens at the cut point are
+// left alone — valid in every name pattern here, and trimming would
+// need identical semantics on both sides. Both sides must stay in
+// sync — the parity tests below pin the shared cases.
+export function safeSuffixedName(base, suffix, cap) {
+    const full = `${base}${suffix}`;
+    if (full.length <= cap) return full;
+    const stemLength = Math.max(cap - 1 - 5 - suffix.length, 1);
+    const stem = base.slice(0, stemLength);
+    return `${stem}-${createHash('md5').update(base, 'utf8').digest('hex').slice(0, 5)}${suffix}`;
 }
 
 export function resolveRegion(options = {}, cwd = process.cwd()) {

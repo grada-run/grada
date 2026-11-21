@@ -475,6 +475,8 @@ describe('Preview task-role confinement', () => {
             'DenyProdTaskExecution',
             'DenyProdTaskDefinitionRegistration',
             'DenyProdAppRoleMutation',
+            'DenyProdAppData',
+            'DenyProdDbLifecycle',
         ];
         const asymmetricTwin = new Map([['DenyIAMBackdoors', 'BoundaryDenyIAM']]);
         const noTwinByDesign = new Set(['DenyCIRoleMutation', 'DenyRoleWithoutBoundary', 'DenyBoundarySwap', 'DenyBoundaryMutation']);
@@ -498,6 +500,98 @@ describe('Preview task-role confinement', () => {
         expect([...boundaryStmts.keys()].sort()).toEqual(
             [...identicalTwins.map(twinSid), 'BoundaryBaseAllow', 'BoundaryDenyAuditBilling', 'BoundaryDenyIAM', 'BoundaryDenyPassRoleOffService', 'BoundaryDenyPassRoleOffTarget', 'BoundaryDenyProdPassRoleOffScheduler'].sort()
         );
+    });
+});
+
+describe('Preview data-plane confinement', () => {
+    // Service-scoped wildcards (quota-driven): each still only matches
+    // its own service, and none match the Describe/List reads plan
+    // refresh relies on. GetSecretValue is deliberately absent (plan
+    // refresh reads the version resource via GetSecretValue —
+    // provider-verified) as is DeleteMessage (needs a Receive handle,
+    // unreachable with Receive denied).
+    const APP_DATA_VERBS = [
+        'secretsmanager:Put*',
+        'secretsmanager:Update*',
+        'sqs:Send*',
+        'sqs:Receive*',
+    ];
+
+    it('denies prod app-data verbs with a task-role carve-out (both twins)', () => {
+        const { tf, guardrails, boundary } = twinSlices();
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdAppData')], ['boundary', sidChunk(boundary, 'BoundaryDenyAppData')]]) {
+            expect(chunk, `${label} statement missing`).not.toBe('');
+            for (const action of APP_DATA_VERBS) {
+                expect(chunk, `${label} missing ${action}`).toContain(action);
+            }
+            expect(chunk, label).toContain('local.guardrail_app_data_resources');
+            // Workers keep working: the carve-out exempts the exact task
+            // role ARN (mirrored on the guardrail side as a no-op — the
+            // preview role is never a task role — so twins stay identical).
+            // Singular on purpose: execution resolves taskdef secrets via
+            // GetSecretValue, which no statement here denies.
+            expect(chunk, label).toContain('StringNotEquals');
+            expect(chunk, label).toContain('aws:PrincipalArn');
+            expect(chunk, label).toContain('local.guardrail_task_role_principals');
+            // Reads stay for plan refresh (describes are legitimate
+            // traffic) — the accepted state-read residual.
+            expect(chunk, `${label} must not deny state reads`).not.toContain('s3:GetObject');
+        }
+        const local = tf.slice(tf.indexOf('guardrail_app_data_resources'), tf.indexOf(']', tf.indexOf('guardrail_app_data_resources')));
+        for (const arn of [
+            'secret:${local.prod_prefix}-secrets-*',
+            'arn:aws:sqs:',
+        ]) {
+            expect(local, `missing ${arn}`).toContain(arn);
+        }
+        expect(local).not.toContain('pr-');
+        // Exact ARN only: a wildcard carve-out would let a backdoor role
+        // match by name (CreateRole sets its own trust inline); a second
+        // principal would cost quota headroom for zero proven need.
+        const principals = tf.slice(tf.indexOf('guardrail_task_role_principals'), tf.indexOf(']', tf.indexOf('guardrail_task_role_principals')));
+        expect(principals).toContain('-task-role"');
+        expect(principals).not.toContain('-execution-role"');
+        expect(principals, 'carve-out must use exact ARNs, never wildcards').not.toContain('*');
+    });
+
+    it('carve-out task formula tracks the rendered task role name', () => {
+        const { tf } = twinSlices();
+        const main = readRepo('templates/terraform/main.tf');
+        const carve = tf.slice(tf.indexOf('guardrail_task_role_principals'));
+        const rendered = main.slice(main.indexOf('task_role_safe_name'));
+        // Same condition, stem arithmetic, and md5 slice modulo the base
+        // var (prod-stable carve vs workspace-aware name) — a stale carve
+        // would silently uncarve workers on over-cap trees.
+        const condPattern = /length\("([^"]+)"\) > (\d+)/;
+        const stemPattern = /substr\([^,]+,\s*0,\s*([\d\s\-+]+)\)/;
+        const hashPattern = /md5\(([^)]+)\)/;
+        for (const pattern of [condPattern, stemPattern, hashPattern]) {
+            const a = carve.match(pattern);
+            const b = rendered.match(pattern);
+            expect(a, `carve ${pattern}`).not.toBeNull();
+            expect(b, `rendered ${pattern}`).not.toBeNull();
+            expect(a[1].replaceAll('prod_prefix', 'app_name')).toBe(b[1]);
+            if (a[2] !== undefined) expect(a[2], `${pattern} cap`).toBe(b[2]);
+        }
+    });
+
+    it('denies prod DB lifecycle verbs with no carve-out (both twins)', () => {
+        const { tf, guardrails, boundary } = twinSlices();
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdDbLifecycle')], ['boundary', sidChunk(boundary, 'BoundaryDenyDbLifecycle')]]) {
+            expect(chunk, `${label} statement missing`).not.toBe('');
+            expect(chunk, label).toContain('rds:Stop*');
+            expect(chunk, label).toContain('rds:Reboot*');
+            expect(chunk, label).toContain('local.guardrail_db_lifecycle_resources');
+            // Deliberately carve-free: no bounded role ever stops or
+            // reboots a database (sleep/wake and db commands run on user
+            // credentials) — and one fewer condition keeps the boundary
+            // under quota.
+            expect(chunk, `${label} must stay carve-free`).not.toContain('aws:PrincipalArn');
+        }
+        const local = tf.slice(tf.indexOf('guardrail_db_lifecycle_resources'), tf.indexOf(']', tf.indexOf('guardrail_db_lifecycle_resources')));
+        expect(local).toContain('db:${local.prod_prefix}-db*');
+        expect(local).toContain('cluster:${local.prod_prefix}-db-cluster');
+        expect(local).not.toContain('pr-');
     });
 });
 
@@ -581,6 +675,12 @@ function boundaryPolicySize(prodPrefix) {
         .split('{{PROJECT_NAME}}').join(project);
     slice = subst(slice).replace(/local\.(\w+)/g, (_, name) => localList(name));
     slice = subst(slice);
+    // Length conditionals (task-role carve-out): both test prefixes take
+    // the plain branch — evaluate the literal form Terraform would. The
+    // taken branch carries no function calls, so textual evaluation is
+    // exact here.
+    slice = slice.replace(/length\("([^"]*)"\)\s*>\s*(\d+)\s*\?\s*"([^"]*)"\s*:\s*"([^"]*)"/g, (_, text, cap, over, under) =>
+        JSON.stringify(text.length > Number(cap) ? over : under));
     // HCL -> JSON: quote keys, comma-separate newline fields/items.
     let json = slice
         .replace(/([A-Za-z_][A-Za-z0-9_]*)\s*=/g, '"$1":')

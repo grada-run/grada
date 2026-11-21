@@ -5,9 +5,19 @@
 # Billing: $0/mo fixed baseline (first 14M EventBridge Scheduler
 # invocations/mo free); billed only for Fargate seconds while the task runs.
 
+locals {
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix instead of failing validation. Mirrors
+  # safeSuffixedName in resolvers.js.
+  scheduler_role_safe_name = length("${local.app_name}-cron-scheduler-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 20)}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-role" : "${local.app_name}-cron-scheduler-role"
+  schedule_full_name       = "${local.app_name}-cron-{{CRON_NAME}}"
+  schedule_safe_name       = length(local.schedule_full_name) > 64 ? "${substr(local.schedule_full_name, 0, 64 - 1 - 5)}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
+  schedule_group_safe_name = length("${local.app_name}-crons") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 6)}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
+}
+
 # --- IAM Role assumed by EventBridge Scheduler ---
 resource "aws_iam_role" "scheduler_cron_role" {
-  name                 = "${local.app_name}-cron-scheduler-role"
+  name                 = local.scheduler_role_safe_name
   permissions_boundary = local.preview_boundary_arn
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -55,9 +65,18 @@ resource "aws_iam_role_policy" "scheduler_cron_policy" {
   })
 }
 
+# --- Schedule group (failure metrics scope) ---
+# Scheduler metrics dimension by group only (no per-schedule dimension),
+# so the project's schedules get their own group instead of the shared
+# default one — the alerts.tf failure alarms stay project-scoped.
+resource "aws_scheduler_schedule_group" "crons" {
+  name = local.schedule_group_safe_name
+}
+
 # --- Scheduled task (single schedule per project) ---
 resource "aws_scheduler_schedule" "cron" {
-  name                         = "${local.app_name}-cron-{{CRON_NAME}}"
+  name                         = local.schedule_safe_name
+  group_name                   = aws_scheduler_schedule_group.crons.name
   schedule_expression          = "{{SCHEDULE_EXPRESSION}}"
   schedule_expression_timezone = "{{SCHEDULE_TIMEZONE}}"
   # Sleep guard: stays disabled while grada sleep's auto-vars are active

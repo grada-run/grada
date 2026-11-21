@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames, safeSuffixedName } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -427,6 +427,46 @@ describe('resolveAppName', () => {
         expect(withWorkspaceNamespace({ projectName: 'myapp' }, dir).projectName).toBe('myapp');
         expect(resolveNamespacedProject('myapp', { workspace: 'pr-7' }, dir)).toBe('myapp-pr-7');
         expect(resolveNamespacedProject('myapp', {}, dir)).toBe('myapp');
+    });
+});
+
+describe('safeSuffixedName', () => {
+    it('renders short names byte-identically (existing trees never rename)', () => {
+        expect(safeSuffixedName('myapp', '-alb', 32)).toBe('myapp-alb');
+        expect(safeSuffixedName('myapp-pr-7-a1b2c3', '-task-role', 64)).toBe('myapp-pr-7-a1b2c3-task-role');
+    });
+
+    it('renders exact-cap names byte-identically', () => {
+        expect(safeSuffixedName('a'.repeat(28), '-alb', 32)).toBe(`${'a'.repeat(28)}-alb`);
+    });
+
+    it('hash-suffixes over-cap names deterministically', () => {
+        // Precomputed md5 stems — any formula drift fails here, not silently.
+        expect(safeSuffixedName('averylongprojectnamethatexceeds', '-alb', 32)).toBe('averylongprojectnameth-1335c-alb');
+        const again = safeSuffixedName('averylongprojectnamethatexceeds', '-alb', 32);
+        expect(again).toBe('averylongprojectnameth-1335c-alb');
+    });
+
+    it('keeps shared prefixes distinct and within cap', () => {
+        const a = safeSuffixedName('tier1-live-p64qpk-c5228d-pr-123', '-alb', 32);
+        const b = safeSuffixedName('tier1-live-p64qpk-c5228e-pr-123', '-alb', 32);
+        expect(a).toBe('tier1-live-p64qpk-c522-f8c2b-alb');
+        expect(b).toBe('tier1-live-p64qpk-c522-b5889-alb');
+        expect(a).not.toBe(b);
+        expect(a.length).toBeLessThanOrEqual(32);
+        expect(b.length).toBeLessThanOrEqual(32);
+    });
+
+    it('leaves cut-point hyphens alone (valid mid-name, identical both sides)', () => {
+        expect(safeSuffixedName('myapp-abcdefghij---klm', '-alb', 24)).toBe('myapp-abcdefgh-9bd55-alb');
+        expect(safeSuffixedName('myapp-abcdefg-hijklmnop', '-alb', 24)).toBe('myapp-abcdefg--f8e88-alb');
+    });
+
+    it('supports empty suffixes for fully-derived names', () => {
+        const full = `myapp-cron-nightly-cleanup-job-with-a-long-name`;
+        const safe = safeSuffixedName(full, '', 48);
+        expect(safe.length).toBeLessThanOrEqual(48);
+        expect(safe).toMatch(/^[a-z0-9-]+$/);
     });
 });
 

@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
+import path from 'path';
 import { ECSClient, DescribeServicesCommand } from '@aws-sdk/client-ecs';
-import { CloudWatchClient, DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
+import { CloudWatchClient, DescribeAlarmsCommand, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { CloudFrontClient, ListDistributionsCommand } from '@aws-sdk/client-cloudfront';
 import color from 'picocolors';
 import { intro, outro, spinner } from '@clack/prompts';
@@ -8,8 +9,9 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix, resolveNamespacedProject } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix, resolveNamespacedProject, safeSuffixedName } from '../utils/resolvers.js';
 import { runDiagnose } from './diagnose.js';
+import { detectAlertAddonFeatures } from './alerts.js';
 import { fetchGoldenSignals } from '../utils/golden-signals.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 
@@ -89,13 +91,15 @@ export function getLambdaHealth(configuration = {}) {
     return { state, lastUpdateStatus, healthy };
 }
 
-function printLambdaDashboard({ functionName, configuration, health }) {
+function printLambdaDashboard({ functionName, configuration, health, cron }) {
     console.log('');
     console.log(`  ${color.bold('Function:')} ${color.cyan(functionName)} ${health.state === 'Active' ? color.green('(ACTIVE)') : color.yellow(`(${health.state})`)}`);
     console.log(`  ${color.bold('Last update:')} ${health.lastUpdateStatus === 'Successful' ? color.green(health.lastUpdateStatus) : color.yellow(health.lastUpdateStatus)}`);
     if (configuration.LastModified) console.log(`  ${color.dim('Modified:')} ${configuration.LastModified}`);
     if (configuration.MemorySize) console.log(`  ${color.dim('Memory:')} ${configuration.MemorySize} MB ${color.dim(`(timeout ${configuration.Timeout ?? '?'}s)`)}`);
     if (configuration.Code?.ImageUri) console.log(`  ${color.dim('Image:')} ${configuration.Code.ImageUri.split('/').pop()}`);
+    const cronLine = formatCronHealthLine(cron);
+    if (cronLine) console.log(`  ${color.bold('Cron:')} ${cronLine}`);
     console.log('');
 }
 
@@ -212,6 +216,17 @@ export async function runLambdaStatus(input = {}) {
     }
 
     const health = getLambdaHealth(configuration);
+    // Cron run evidence, best-effort like the ECS path: detected from
+    // the tree, null when absent or unreachable.
+    let cron = null;
+    if (detectAlertAddonFeatures(path.join(cwd, 'terraform')).cron) {
+        try {
+            const cloudWatchClient = resolveClient(options.cloudWatchClient, CloudWatchClient, { region });
+            cron = await fetchCronHealth({ cloudWatchClient, scheduleGroup: safeSuffixedName(`${namespacedProject}${readResourceSuffix(cwd)}`, '-crons', 64) });
+        } catch {
+            cron = null;
+        }
+    }
     const payload = {
         function: {
             name: functionName,
@@ -224,6 +239,7 @@ export async function runLambdaStatus(input = {}) {
         },
         healthy: health.healthy,
         signals: null,
+        cron,
         region,
         computeTarget: 'lambda',
     };
@@ -235,7 +251,7 @@ export async function runLambdaStatus(input = {}) {
     }
 
     if (s) s.stop('Health check complete.\n');
-    printLambdaDashboard({ functionName, configuration, health });
+    printLambdaDashboard({ functionName, configuration, health, cron });
 
     if (!health.healthy) {
         console.log(color.yellow(DEGRADED_MESSAGE));
@@ -389,7 +405,55 @@ function printStaticDashboard({ distribution }) {
     console.log('');
 }
 
-function printDashboard({ serviceName, cluster, health, signals }) {
+// Cron run evidence from scheduler metrics (the Scheduler API exposes
+// no execution history): latest attempt plus 24h failure sums. Throws
+// naturally — callers treat it as best-effort like golden signals.
+export async function fetchCronHealth({ cloudWatchClient, scheduleGroup }) {
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000);
+    const queries = [
+        ['cronAttempts', 'InvocationAttemptCount'],
+        ['cronErrors', 'TargetErrorCount'],
+        ['cronDropped', 'InvocationDroppedCount'],
+    ].map(([Id, MetricName]) => ({
+        Id,
+        MetricStat: {
+            Metric: {
+                Namespace: 'AWS/Scheduler',
+                MetricName,
+                Dimensions: [{ Name: 'ScheduleGroup', Value: scheduleGroup }],
+            },
+            Period: 3600,
+            Stat: 'Sum',
+        },
+    }));
+    const resp = await cloudWatchClient.send(new GetMetricDataCommand({
+        StartTime: startTime,
+        EndTime: endTime,
+        ScanBy: 'TimestampDescending',
+        MetricDataQueries: queries,
+    }));
+    const byId = new Map((resp.MetricDataResults || []).map((r) => [r.Id, r]));
+    const attempts = byId.get('cronAttempts');
+    let lastAttemptAt = null;
+    if (attempts) {
+        const stamps = (attempts.Timestamps || [])
+            .map((t, i) => [new Date(t).getTime(), attempts.Values[i]])
+            .filter(([, value]) => value > 0)
+            .map(([time]) => time);
+        if (stamps.length > 0) lastAttemptAt = new Date(Math.max(...stamps)).toISOString();
+    }
+    const sum = (id) => (byId.get(id)?.Values || []).reduce((total, value) => total + value, 0);
+    return { lastAttemptAt, targetErrors24h: sum('cronErrors'), dropped24h: sum('cronDropped') };
+}
+
+function formatCronHealthLine(cron) {
+    if (!cron) return null;
+    if (!cron.lastAttemptAt) return 'no runs in the last 24h';
+    return `last run ${cron.lastAttemptAt} · ${cron.targetErrors24h} target errors · ${cron.dropped24h} dropped (24h)`;
+}
+
+function printDashboard({ serviceName, cluster, health, signals, cron }) {
     console.log('');
     console.log(`  ${color.bold('Service:')} ${color.cyan(serviceName)} ${health.status === 'ACTIVE' ? color.green('(ACTIVE)') : color.yellow(`(${health.status})`)}`);
     console.log(`  ${color.dim('Cluster:')} ${cluster}`);
@@ -412,6 +476,8 @@ function printDashboard({ serviceName, cluster, health, signals }) {
         if (db?.kind === 'cluster') console.log(`    ${color.dim('DB:')} ${db.capacityAcu ?? 'n/a'} ACU · ${formatSignalCount(db.connections)} conns`);
         else if (db) console.log(`    ${color.dim('DB:')} CPU ${formatSignalPercent(db.cpuPercent)} · ${formatSignalCount(db.connections)} conns`);
     }
+    const cronLine = formatCronHealthLine(cron);
+    if (cronLine) console.log(`  ${color.bold('Cron:')} ${cronLine}`);
     console.log('');
 }
 
@@ -529,6 +595,17 @@ async function runStatusMain(input = {}) {
             signalsError = [`signals: ${error?.message || error}`];
         }
 
+        // Cron run evidence, same best-effort deal: detected from the
+        // tree (not the target), null when absent or unreachable.
+        let cron = null;
+        if (detectAlertAddonFeatures(path.join(cwd, 'terraform')).cron) {
+            try {
+                cron = await fetchCronHealth({ cloudWatchClient, scheduleGroup: safeSuffixedName(`${namespacedProject}${resourceSuffix}`, '-crons', 64) });
+            } catch {
+                cron = null;
+            }
+        }
+
         const payload = {
             service: {
                 name: serviceName,
@@ -541,6 +618,7 @@ async function runStatusMain(input = {}) {
             alarms: health.alarms,
             signals,
             ...(signalsError ? { signalsError } : {}),
+            cron,
             healthy: health.healthy,
             region,
         };
@@ -552,7 +630,7 @@ async function runStatusMain(input = {}) {
         }
 
         if (s) s.stop('Health check complete.\n');
-        printDashboard({ serviceName, cluster, health, signals });
+        printDashboard({ serviceName, cluster, health, signals, cron });
 
         if (!health.healthy) {
             console.log(color.yellow(DEGRADED_MESSAGE));

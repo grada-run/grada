@@ -52,6 +52,30 @@ const TARGET_ANCHORS = {
     static: { resource: 'resource "aws_cloudfront_distribution" "site"', errorCode: 'DISTRIBUTION_NOT_FOUND', reason: 'distribution-not-found' },
 };
 
+// Addon alarm anchors. Detection reads the addon FILE CONTENT (not just
+// its presence) so a hand-removed resource can't produce a dangling
+// alarm reference. Several anchors may share one id (either engine
+// file lights up 'db:instance').
+const ADDON_ALARM_ANCHORS = [
+    { id: 'queue:sqs', file: 'sqs.tf', resource: 'resource "aws_sqs_queue" "dlq"' },
+    { id: 'cron', file: 'cron.tf', resource: 'resource "aws_scheduler_schedule" "cron"' },
+    { id: 'db:instance', file: 'database.tf', resource: 'resource "aws_db_instance" "postgres"' },
+    { id: 'db:instance', file: 'database-mysql.tf', resource: 'resource "aws_db_instance" "postgres"' },
+    { id: 'db:aurora', file: 'database-aurora-postgresql.tf', resource: 'resource "aws_rds_cluster" "postgres"' },
+    { id: 'db:redis', file: 'redis.tf', resource: 'resource "aws_elasticache_replication_group" "redis"' },
+    { id: 'email:ses', file: 'ses.tf', resource: 'resource "aws_ses_domain_identity" "ses"' },
+];
+
+export function detectAlertAddonFeatures(terraformDir) {
+    const features = {};
+    for (const anchor of ADDON_ALARM_ANCHORS) {
+        if (features[anchor.id]) continue;
+        const content = readFileSafe(path.join(terraformDir, anchor.file));
+        features[anchor.id] = Boolean(content && content.includes(anchor.resource));
+    }
+    return features;
+}
+
 export function parseAlertsArgs(argv = []) {
     const args = normalizeArgv(argv);
     if (args[0] === 'alerts') args.shift();
@@ -183,7 +207,228 @@ exports.handler = async (event) => {
 // so every static alert resource is pinned to the aws.us_east_1 alias
 // (runAlerts ensures main.tf declares it). IAM and archive_file are
 // region-independent and stay unpinned.
-export function buildAlertsTf({ projectName, target = 'ecs', email, webhook, threshold }) {
+// Primary notify-alarm spec per compute target. Addon alarms (DLQ
+// depth, cron health, ...) append as further entries consumed the same
+// way; each spec carries its own baked threshold while --threshold
+// keeps driving the primary alarm only.
+const PRIMARY_NOTIFY_ALARMS = {
+    lambda: {
+        tfName: 'notify_errors',
+        alarmName: 'errors-notify',
+        metricName: 'Errors',
+        namespace: 'AWS/Lambda',
+        statistic: 'Sum',
+        describe: ({ projectName, limit, evaluationPeriods }) =>
+            `${projectName} reports more than ${limit} Lambda errors in ${evaluationPeriods} minutes.`,
+        dimensions: { FunctionName: 'aws_lambda_function.app.function_name' },
+    },
+    static: {
+        tfName: 'notify_5xx_rate',
+        alarmName: '5xx-rate-notify',
+        metricName: '5xxErrorRate',
+        namespace: 'AWS/CloudFront',
+        statistic: 'Average',
+        describe: ({ projectName, limit, evaluationPeriods }) =>
+            `${projectName} serves more than a ${limit}% 5xx error rate over ${evaluationPeriods} minutes.`,
+        dimensions: { DistributionId: 'aws_cloudfront_distribution.site.id' },
+    },
+    ecs: {
+        tfName: 'notify_5xx',
+        alarmName: '5xx-notify',
+        metricName: 'HTTPCode_Target_5XX_Count',
+        namespace: 'AWS/ApplicationELB',
+        statistic: 'Sum',
+        describe: ({ limit, evaluationPeriods }) =>
+            `the ALB serves more than ${limit} 5XX errors in ${evaluationPeriods} minutes.`,
+        dimensions: { LoadBalancer: 'aws_lb.main.arn_suffix' },
+    },
+};
+
+// Renders one notify alarm block. Shape is shared by primary and addon
+// alarms so every alarm reads (and diffs) the same way.
+function renderNotifyAlarm(spec, { namePrefix, aliasLine, limit, evaluationPeriods, period, projectName }) {
+    const dimensions = spec.dimensions
+        ? `\n  dimensions = {\n${Object.entries(spec.dimensions).map(([key, value]) => `    ${key} = ${value}`).join('\n')}\n  }\n`
+        : '';
+    return `resource "aws_cloudwatch_metric_alarm" "${spec.tfName}" {
+${aliasLine}  alarm_name          = "${namePrefix}-${spec.alarmName}"
+  comparison_operator = "${spec.comparison || 'GreaterThanThreshold'}"
+  evaluation_periods  = "${evaluationPeriods}"
+  metric_name         = "${spec.metricName}"
+  namespace           = "${spec.namespace}"
+  period              = "${period}"
+  statistic           = "${spec.statistic}"
+  threshold           = "${limit}"
+  alarm_description   = "Notifies ${namePrefix}-alerts when ${spec.describe({ projectName, limit, evaluationPeriods })}"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+${dimensions}}` + '\n';
+}
+
+// Addon notify alarms, rendered only when the tree carries the addon
+// (see detectAlertAddonFeatures). Thresholds are baked per alarm;
+// --threshold keeps driving the primary alarm only.
+const ADDON_NOTIFY_ALARMS = [
+    {
+        id: 'queue:sqs',
+        tfName: 'notify_dlq_depth',
+        alarmName: 'dlq-depth-notify',
+        metricName: 'ApproximateNumberOfMessagesVisible',
+        namespace: 'AWS/SQS',
+        statistic: 'Maximum',
+        threshold: 1,
+        evaluationPeriods: 1,
+        period: 300,
+        describe: () => 'the dead-letter queue holds failed messages (redrive or inspect them).',
+        dimensions: { QueueName: 'aws_sqs_queue.dlq.name' },
+    },
+    {
+        id: 'cron',
+        tfName: 'notify_cron_target_errors',
+        alarmName: 'cron-target-errors-notify',
+        metricName: 'TargetErrorCount',
+        namespace: 'AWS/Scheduler',
+        statistic: 'Sum',
+        threshold: 1,
+        evaluationPeriods: 1,
+        period: 300,
+        describe: () => 'a scheduled run fails to invoke its target.',
+        dimensions: { ScheduleGroup: 'aws_scheduler_schedule_group.crons.name' },
+    },
+    {
+        id: 'cron',
+        tfName: 'notify_cron_dropped',
+        alarmName: 'cron-dropped-notify',
+        metricName: 'InvocationDroppedCount',
+        namespace: 'AWS/Scheduler',
+        statistic: 'Sum',
+        threshold: 1,
+        evaluationPeriods: 1,
+        period: 300,
+        describe: () => 'a scheduled run is dropped after retry exhaustion.',
+        dimensions: { ScheduleGroup: 'aws_scheduler_schedule_group.crons.name' },
+    },
+    {
+        id: 'db:instance',
+        tfName: 'notify_rds_storage_low',
+        alarmName: 'rds-storage-low-notify',
+        metricName: 'FreeStorageSpace',
+        namespace: 'AWS/RDS',
+        statistic: 'Minimum',
+        comparison: 'LessThanThreshold',
+        threshold: 2147483648,
+        evaluationPeriods: 1,
+        period: 300,
+        describe: () => 'the database drops below 2 GB of free storage.',
+        dimensions: { DBInstanceIdentifier: 'aws_db_instance.postgres.identifier' },
+    },
+    {
+        id: 'db:instance',
+        tfName: 'notify_rds_cpu_high',
+        alarmName: 'rds-cpu-high-notify',
+        metricName: 'CPUUtilization',
+        namespace: 'AWS/RDS',
+        statistic: 'Average',
+        threshold: 80,
+        evaluationPeriods: 3,
+        period: 300,
+        describe: () => 'database CPU stays above 80% for 15 minutes.',
+        dimensions: { DBInstanceIdentifier: 'aws_db_instance.postgres.identifier' },
+    },
+    {
+        id: 'db:instance',
+        tfName: 'notify_rds_connections_high',
+        alarmName: 'rds-connections-high-notify',
+        metricName: 'DatabaseConnections',
+        namespace: 'AWS/RDS',
+        statistic: 'Maximum',
+        threshold: 80,
+        evaluationPeriods: 2,
+        period: 300,
+        describe: () => 'database connections exceed 80 (micro exhausts near 112).',
+        dimensions: { DBInstanceIdentifier: 'aws_db_instance.postgres.identifier' },
+    },
+    {
+        id: 'db:aurora',
+        tfName: 'notify_rds_cpu_high',
+        alarmName: 'rds-cpu-high-notify',
+        metricName: 'CPUUtilization',
+        namespace: 'AWS/RDS',
+        statistic: 'Average',
+        threshold: 80,
+        evaluationPeriods: 3,
+        period: 300,
+        describe: () => 'database CPU stays above 80% for 15 minutes.',
+        dimensions: { DBClusterIdentifier: 'aws_rds_cluster.postgres.id' },
+    },
+    {
+        id: 'db:aurora',
+        tfName: 'notify_rds_connections_high',
+        alarmName: 'rds-connections-high-notify',
+        metricName: 'DatabaseConnections',
+        namespace: 'AWS/RDS',
+        statistic: 'Maximum',
+        threshold: 80,
+        evaluationPeriods: 2,
+        period: 300,
+        describe: () => 'database connections exceed 80.',
+        dimensions: { DBClusterIdentifier: 'aws_rds_cluster.postgres.id' },
+    },
+    {
+        id: 'db:redis',
+        tfName: 'notify_valkey_evictions',
+        alarmName: 'valkey-evictions-notify',
+        metricName: 'Evictions',
+        namespace: 'AWS/ElastiCache',
+        statistic: 'Sum',
+        threshold: 1,
+        evaluationPeriods: 1,
+        period: 300,
+        describe: () => 'valkey evicts keys (dedup/rate windows lose entries).',
+        dimensions: { ReplicationGroupId: 'aws_elasticache_replication_group.redis.id' },
+    },
+    {
+        id: 'db:redis',
+        tfName: 'notify_valkey_cpu_high',
+        alarmName: 'valkey-cpu-high-notify',
+        metricName: 'EngineCPUUtilization',
+        namespace: 'AWS/ElastiCache',
+        statistic: 'Average',
+        threshold: 80,
+        evaluationPeriods: 3,
+        period: 300,
+        describe: () => 'valkey engine CPU stays above 80% for 15 minutes.',
+        dimensions: { ReplicationGroupId: 'aws_elasticache_replication_group.redis.id' },
+    },
+    {
+        id: 'email:ses',
+        tfName: 'notify_ses_bounce_rate',
+        alarmName: 'ses-bounce-rate-notify',
+        metricName: 'Reputation.BounceRate',
+        namespace: 'AWS/SES',
+        statistic: 'Average',
+        threshold: 0.05,
+        evaluationPeriods: 1,
+        period: 3600,
+        describe: () => 'the account bounce rate exceeds 5%.',
+        dimensions: null,
+    },
+    {
+        id: 'email:ses',
+        tfName: 'notify_ses_complaint_rate',
+        alarmName: 'ses-complaint-rate-notify',
+        metricName: 'Reputation.ComplaintRate',
+        namespace: 'AWS/SES',
+        statistic: 'Average',
+        threshold: 0.001,
+        evaluationPeriods: 1,
+        period: 3600,
+        describe: () => 'the account complaint rate exceeds 0.1%.',
+        dimensions: null,
+    },
+];
+
+export function buildAlertsTf({ projectName, target = 'ecs', email, webhook, threshold, addons = {} }) {
     const defaults = ALERT_TARGET_DEFAULTS[target] || ALERT_TARGET_DEFAULTS.ecs;
     const limit = threshold ?? defaults.threshold;
     // All targets use the workspace-aware local: flat ECS names let a
@@ -212,58 +457,29 @@ ${aliasLine}  name = "${namePrefix}-alerts"
 }
 `;
 
-    const alarm = target === 'lambda' ? `resource "aws_cloudwatch_metric_alarm" "notify_errors" {
-  alarm_name          = "${namePrefix}-errors-notify"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "${defaults.evaluationPeriods}"
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = "${defaults.period}"
-  statistic           = "Sum"
-  threshold           = "${limit}"
-  alarm_description   = "Notifies ${namePrefix}-alerts when ${projectName} reports more than ${limit} Lambda errors in ${defaults.evaluationPeriods} minutes."
-
-  alarm_actions = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    FunctionName = aws_lambda_function.app.function_name
-  }
-}
-` : target === 'static' ? `resource "aws_cloudwatch_metric_alarm" "notify_5xx_rate" {
-${aliasLine}  alarm_name          = "${namePrefix}-5xx-rate-notify"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "${defaults.evaluationPeriods}"
-  metric_name         = "5xxErrorRate"
-  namespace           = "AWS/CloudFront"
-  period              = "${defaults.period}"
-  statistic           = "Average"
-  threshold           = "${limit}"
-  alarm_description   = "Notifies ${namePrefix}-alerts when ${projectName} serves more than a ${limit}% 5xx error rate over ${defaults.evaluationPeriods} minutes."
-
-  alarm_actions = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    DistributionId = aws_cloudfront_distribution.site.id
-  }
-}
-` : `resource "aws_cloudwatch_metric_alarm" "notify_5xx" {
-  alarm_name          = "${namePrefix}-5xx-notify"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "${defaults.evaluationPeriods}"
-  metric_name         = "HTTPCode_Target_5XX_Count"
-  namespace           = "AWS/ApplicationELB"
-  period              = "${defaults.period}"
-  statistic           = "Sum"
-  threshold           = "${limit}"
-  alarm_description   = "Notifies ${namePrefix}-alerts when the ALB serves more than ${limit} 5XX errors in ${defaults.evaluationPeriods} minutes."
-
-  alarm_actions = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    LoadBalancer = aws_lb.main.arn_suffix
-  }
-}
-`;
+    const spec = PRIMARY_NOTIFY_ALARMS[target] || PRIMARY_NOTIFY_ALARMS.ecs;
+    const alarm = renderNotifyAlarm(spec, {
+        namePrefix,
+        aliasLine,
+        limit,
+        evaluationPeriods: defaults.evaluationPeriods,
+        period: defaults.period,
+        projectName,
+    });
+    // Addon alarms are regional metrics (no us-east-1 alias even on
+    // static trees) with baked thresholds.
+    const addonAlarms = ADDON_NOTIFY_ALARMS
+        .filter((entry) => addons && addons[entry.id])
+        .map((entry) => renderNotifyAlarm(entry, {
+            namePrefix,
+            aliasLine: '',
+            limit: entry.threshold,
+            evaluationPeriods: entry.evaluationPeriods,
+            period: entry.period,
+            projectName,
+        }))
+        .join('\n');
+    const addonSection = addonAlarms.length > 0 ? `\n${addonAlarms}` : '';
 
     // NOTE: the email endpoint lands in git by design (the operator passed
     // it explicitly); delivery still needs the recipient's confirmation
@@ -354,7 +570,7 @@ ${aliasLine}  topic_arn = aws_sns_topic.alerts.arn
 
     return `${header}
 ${topic}
-${alarm}${emailSubscription}${forwarder}`;
+${alarm}${addonSection}${emailSubscription}${forwarder}`;
 }
 
 // Adds the archive provider (used by the forwarder's data.archive_file)
@@ -458,6 +674,8 @@ async function runAlertsMain(input = {}) {
             resultExtra: { region },
         });
     }
+    const addons = detectAlertAddonFeatures(path.join(cwd, 'terraform'));
+    const addonAlarmIds = ADDON_NOTIFY_ALARMS.filter((entry) => addons[entry.id]).map((entry) => entry.id);
     const anchor = TARGET_ANCHORS[target] || TARGET_ANCHORS.ecs;
     if (!mainTf.includes(anchor.resource)) {
         const anchorName = target === 'lambda' ? 'aws_lambda_function.app'
@@ -573,7 +791,7 @@ async function runAlertsMain(input = {}) {
             archiveAdded = ensureArchiveProvider(path.join(cwd, 'terraform', 'backend.tf'));
         }
 
-        await atomicWriteFile(alertsPath, buildAlertsTf({ projectName, target, email, webhook, threshold }));
+        await atomicWriteFile(alertsPath, buildAlertsTf({ projectName, target, email, webhook, threshold, addons }));
         if (webhook) {
             await ensureForwarderZipIgnored(cwd);
         }
@@ -583,7 +801,7 @@ async function runAlertsMain(input = {}) {
     const { aliasAdded, archiveAdded } = scaffolded;
     const destinations = email && webhook ? 'both' : webhook ? 'webhook' : email ? 'email' : 'manual';
     const kind = webhook ? detectWebhookKind(webhook) : undefined;
-    console.log(color.green(`\n✅ Created ${ALERTS_TF_FILE} (SNS topic + ${target} notify alarm${webhook ? ' + chat forwarder' : ''}).`));
+    console.log(color.green(`\n✅ Created ${ALERTS_TF_FILE} (SNS topic + ${target} notify alarm${addonAlarmIds.length > 0 ? ` + ${addonAlarmIds.length} addon alarm${addonAlarmIds.length === 1 ? '' : 's'}` : ''}${webhook ? ' + chat forwarder' : ''}).`));
     if (aliasAdded) console.log(color.dim('  Added the aws.us_east_1 provider alias to terraform/main.tf (CloudFront alarms only exist there).'));
     if (archiveAdded) console.log(color.dim('  Pinned the archive provider in terraform/backend.tf (forwarder packaging).'));
     console.log(color.dim('  Next steps:'));
@@ -605,7 +823,7 @@ async function runAlertsMain(input = {}) {
     }
     // Telemetry carries destination *kinds* only — never the email
     // address or webhook URL (PII / bearer secret).
-    await trackSuccess('alerts_run', { projectName, action: 'scaffold', target, destinations, thresholdCustom: threshold !== undefined });
+    await trackSuccess('alerts_run', { projectName, action: 'scaffold', target, destinations, thresholdCustom: threshold !== undefined, addonAlarms: addonAlarmIds });
     outro(color.green('Done.'));
     return { ok: true, action: 'scaffold', projectName, region, target, destinations, file: ALERTS_TF_FILE };
 }

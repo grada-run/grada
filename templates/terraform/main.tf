@@ -50,6 +50,16 @@ locals {
 
   # Full application name: project + workspace + collision suffix.
   app_name = "{{PROJECT_NAME}}${local.env_suffix}${local.grada_resource_suffix}"
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix (deterministic md5 stem) instead of truncating
+  # into collisions (ALB/TG) or failing validation (IAM). Mirrors
+  # safeSuffixedName in resolvers.js — stem is always
+  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  alb_safe_name            = length("${local.app_name}-alb") > 32 ? "${substr(local.app_name, 0, 32 - 1 - 5 - 4)}-${substr(md5(local.app_name), 0, 5)}-alb" : "${local.app_name}-alb"
+  tg_safe_name             = length("${local.app_name}-tg") > 32 ? "${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-${substr(md5(local.app_name), 0, 5)}-tg" : "${local.app_name}-tg"
+  task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"
+  execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"
 }
 
 # --- CloudWatch Logs ---
@@ -94,7 +104,7 @@ data "aws_iam_policy_document" "ecs_trust" {
 }
 
 resource "aws_iam_role" "execution_role" {
-  name                 = "${local.app_name}-execution-role"
+  name                 = local.execution_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -107,7 +117,7 @@ resource "aws_iam_role_policy_attachment" "execution_role_policy" {
 # --- IAM: Task Role ---
 # Allows your application code running INSIDE the container to access AWS services
 resource "aws_iam_role" "task_role" {
-  name                 = "${local.app_name}-task-role"
+  name                 = local.task_role_safe_name
   assume_role_policy   = data.aws_iam_policy_document.ecs_trust.json
   permissions_boundary = local.preview_boundary_arn
 }
@@ -206,7 +216,7 @@ resource "aws_ecs_task_definition" "app" {
 # --- Application Load Balancer ---
 # trivy:ignore:AVD-AWS-0053 - This ALB is intended to be publicly facing behind CloudFront
 resource "aws_lb" "main" {
-  name                       = substr("${local.app_name}-alb", 0, 32)
+  name                       = local.alb_safe_name
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.public[*].id
@@ -214,7 +224,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = substr("${local.app_name}-tg", 0, 32)
+  name        = local.tg_safe_name
   port        = {{PORT}}
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id

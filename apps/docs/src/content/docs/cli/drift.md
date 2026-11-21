@@ -11,6 +11,7 @@ Catch console click-ops before they surprise you: compare live AWS state against
 - `drift --setup` (alias: `drift init`) scaffolds `.github/workflows/drift.yml` into an existing project, reusing your deploy workflow's OIDC role — no extra secrets needed.
 - `--setup-ci-drift` scaffolds the same workflow during `grada` scaffolding.
 - The scheduled workflow runs daily at 06:00 UTC (plus a manual `workflow_dispatch` trigger): on drift it opens (or updates, without spamming) a GitHub Issue labeled `iac-drift` with the plan diff; when drift resolves it comments `✅ Drift resolved` and closes the issue.
+- The same workflow also runs `gc --headless --yes` as a separate daily job, so old snapshots and orphans retire automatically; its failures open a `grada-gc-failed` issue without tripping the drift alarm.
 - Set a `SLACK_WEBHOOK_URL` repository secret to also post drift alerts to Slack.
 
 ## Before the first apply

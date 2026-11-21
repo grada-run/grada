@@ -21,6 +21,9 @@ env:
   ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
   WORKSPACE: pr-${{ github.event.pull_request.number }}
   CF_COMMENT: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-cdn
+  PREVIEW_CLUSTER: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-cluster
+  PREVIEW_SERVICE: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-service
+  PREVIEW_TASK_FAMILY: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-task
 
 permissions:
   id-token: write
@@ -98,6 +101,72 @@ jobs:
           # accepts CloudFront edges only — its direct URL is not browsable)
           PREVIEW_URL=$(terraform output -raw cloudfront_url)
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+
+      # The image tag is static per PR (:pr-N), so a re-push changes no
+      # Terraform input — without these steps the service keeps running
+      # the first push's image. Mirror the deploy workflow: register a
+      # digest-pinned revision (immutable, so concurrent pushes can't
+      # swap the image mid-rollout), force the rollout, and verify it
+      # stuck.
+      - name: Register preview task definition revision
+        id: register-preview-task-def
+        if: steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=${{ env.WORKSPACE }} \
+            --query 'imageDetails[0].imageDigest' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.PREVIEW_TASK_FAMILY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' \
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
+            --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --region ${{ env.AWS_REGION }} \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview deployment
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.PREVIEW_CLUSTER }} \
+            --service ${{ env.PREVIEW_SERVICE }} \
+            --task-definition ${{ steps.register-preview-task-def.outputs.task-arn }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      # update-service returns before the rollout finishes: wait for
+      # stability, then verify PRIMARY actually runs the registered
+      # revision — a circuit-breaker rollback re-stabilizes on the OLD
+      # revision, which the wait alone would report green.
+      - name: Wait for preview rollout
+        if: steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.PREVIEW_CLUSTER }} \
+            --services ${{ env.PREVIEW_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \
+            --cluster ${{ env.PREVIEW_CLUSTER }} \
+            --services ${{ env.PREVIEW_SERVICE }} \
+            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
+            echo "Preview rollout of ${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
 
       # Every push redeploys the preview: clear its CDN so new HTML shows
       # immediately instead of serving stale pages until TTL expiry.

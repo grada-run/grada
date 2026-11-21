@@ -49,7 +49,9 @@ locals {
   # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
   # the boundary under the 6144-char managed-policy quota that broke
   # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
-  # several exact ARNs when adding entries.
+  # several exact ARNs when adding entries. Headroom is now single
+  # digits at 32-char prefixes: the next IAM addition must economize
+  # (shorter Sids, fewer verbs, or slimmer patterns) before extending.
   guardrail_compute_abuse_resources    = ["*"]
   guardrail_snapshot_sharing_resources = ["*"]
   guardrail_state_destruction_resources = [
@@ -109,6 +111,37 @@ locals {
   # pass or mutate those, so the overlap only tightens the boundary.
   guardrail_app_role_resources = [
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-*-role",
+  ]
+  # Data-plane confinement: prod data ARNs shared by the
+  # DenyProdAppData twins. One statement is exact here, not
+  # lazy — every denied action only ever matches its own service's
+  # ARNs in a real call, so the cross-product cannot over-match.
+  guardrail_app_data_resources = [
+    "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
+    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-*",
+  ]
+  # Lifecycle twin of the above, deliberately carve-free: no bounded
+  # role ever stops or reboots a database (sleep/wake and db commands
+  # run on user credentials), and one fewer condition keeps the pair
+  # under the 6144-char boundary quota.
+  guardrail_db_lifecycle_resources = [
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db*",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
+  ]
+  # Carve-out principal for the app-data twins: the exact prod task
+  # role ARN (workers send/receive prod queues). Singular on purpose:
+  # execution resolves taskdef secrets via GetSecretValue, which no
+  # statement here denies (plan refresh requires it — provider-proven),
+  # and nothing bounded writes secrets — so nothing else needs
+  # carving. Exact ARN, never a wildcard: a backdoor role could match
+  # a pattern by name since CreateRole sets its own trust inline.
+  # String-built, so static trees (no roles at all) stay valid. The
+  # scheduler is intentionally absent: RunTask plus PassRole only.
+  # Length-conditional like the role itself: over-cap trees hash the
+  # task name, and the carve-out must track the rendered name exactly
+  # (a stale plain ARN would silently uncarve workers).
+  guardrail_task_role_principals = [
+    length("${local.prod_prefix}-task-role") > 64 ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${substr(local.prod_prefix, 0, 64 - 1 - 5 - 10)}-${substr(md5(local.prod_prefix), 0, 5)}-task-role" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
   ]
 }
 
@@ -430,6 +463,43 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Action   = ["iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:DeleteRole"]
         Resource = local.guardrail_app_role_resources
       },
+      {
+        # Preview CI must never write prod secrets or touch prod queue
+        # traffic. GetSecretValue stays allowed: plan refreshes the
+        # version resource with preview credentials, and the provider
+        # reads it via GetSecretValue (provider source verified) — a
+        # deny would break every PR plan. Reads stay an accepted
+        # residual (see below), as does DeleteMessage, which needs a
+        # Receive handle to call: with Receive denied it is unreachable.
+        # The carve-out is mirrored here as a no-op (the preview role
+        # is never a task role) so the twins stay identical.
+        # Accepted residual: GetSecretValue + prod state reads (plan
+        # refresh requires both; state additionally exposes adopted
+        # live values), snapshot export/restore, Bedrock/SES spend
+        # verbs, DynamoDB data verbs, and RDS Start — follow-ups, not
+        # oversights.
+        Sid    = "DenyProdAppData"
+        Effect = "Deny"
+        Action = [
+          "secretsmanager:Put*", "secretsmanager:Update*",
+          "sqs:Send*", "sqs:Receive*",
+        ]
+        Resource = local.guardrail_app_data_resources
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalArn" = local.guardrail_task_role_principals
+          }
+        }
+      },
+      {
+        # ...nor stop or reboot prod databases. Deliberately
+        # carve-free: no bounded role ever calls these (sleep/wake
+        # and db commands run on user credentials).
+        Sid      = "DenyProdDbLifecycle"
+        Effect   = "Deny"
+        Action   = ["rds:Stop*", "rds:Reboot*"]
+        Resource = local.guardrail_db_lifecycle_resources
+      },
     ]
   })
 }
@@ -583,6 +653,29 @@ resource "aws_iam_policy" "preview_boundary" {
         Effect   = "Deny"
         Action   = ["iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:DeleteRole"]
         Resource = local.guardrail_app_role_resources
+      },
+      {
+        # Backdoor twin of DenyProdAppData: roles born under preview
+        # credentials get no prod vault writes or queue traffic either.
+        # The exact-ARN carve-out keeps workers sending/receiving.
+        Sid    = "BoundaryDenyAppData"
+        Effect = "Deny"
+        Action = [
+          "secretsmanager:Put*", "secretsmanager:Update*",
+          "sqs:Send*", "sqs:Receive*",
+        ]
+        Resource = local.guardrail_app_data_resources
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalArn" = local.guardrail_task_role_principals
+          }
+        }
+      },
+      {
+        Sid      = "BoundaryDenyDbLifecycle"
+        Effect   = "Deny"
+        Action   = ["rds:Stop*", "rds:Reboot*"]
+        Resource = local.guardrail_db_lifecycle_resources
       },
       {
         # Carved PassRole may only pass to the ECS tasks

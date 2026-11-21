@@ -61,9 +61,9 @@ function baseInput(overrides = {}) {
 }
 
 describe('golden-signals: ALB discovery helpers', () => {
-    it('truncates the ALB name to 32 chars like the Terraform template', () => {
+    it('mirrors the template conditional: identical short, hashed over-cap', () => {
         expect(resolveAlbName('myapp')).toBe('myapp-alb');
-        expect(resolveAlbName('a-very-long-project-name-that-exceeds-limits')).toHaveLength(32);
+        expect(resolveAlbName('a-very-long-project-name-that-exceeds-limits')).toBe('a-very-long-project-na-6a34a-alb');
     });
 
     it('parses the CloudWatch dimension from the LB ARN', () => {

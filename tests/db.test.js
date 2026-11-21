@@ -1464,6 +1464,8 @@ describe('db migrate: --setup-ci and gate injection', () => {
         expect(updated).toContain('# grada:db-migrate-start');
         expect(updated).toContain('# grada:db-migrate-end');
         expect(updated).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4');
+        expect(updated).toContain("node-version: '22'");
+        expect(updated).not.toContain("node-version: '20'");
         expect(updated).toContain(`--cmd 'npx prisma migrate deploy'`);
         expect(updated).toContain('${{ steps.register-task-def.outputs.task-arn }}');
         expect(updated.indexOf('# grada:db-migrate-start')).toBeLessThan(updated.indexOf('- name: Force ECS deployment'));

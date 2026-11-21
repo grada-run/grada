@@ -317,6 +317,46 @@ describe('github workflow templates', () => {
         expect(init?.if).toBe("steps.aws-creds.outcome == 'success'");
     });
 
+    // Snapshots accumulate per push with no retention: a scheduled gc
+    // job (same cron, same role) collects them. Its failures get their
+    // own signal — never the drift labels.
+    it('drift.yml runs scheduled garbage collection as a separate job', () => {
+        const doc = parseTemplate('drift.yml');
+        expect(doc.jobs.gc, 'gc job missing').toBeDefined();
+        const steps = doc.jobs.gc.steps;
+        const byName = (name) => steps.find((s) => s?.name === name);
+        expect(byName('Configure AWS Credentials')?.['continue-on-error']).toBe(true);
+        const collect = byName('Collect garbage');
+        expect(collect?.run).toContain('grada-run gc --headless --yes');
+        expect(collect?.if).toBe("steps.aws-creds.outcome == 'success'");
+        const report = byName('Report gc result');
+        expect(report?.if).toContain('always()');
+        const raw = readTemplate('drift.yml');
+        const gcSlice = raw.slice(raw.indexOf('\n  gc:'));
+        expect(gcSlice).toContain('grada-gc-failed');
+        expect(gcSlice).not.toContain('iac-drift-check-failed');
+        expect(gcSlice).not.toContain("label = 'iac-drift'");
+    });
+
+    // Static :pr-N tags make re-pushes a Terraform no-op — without an
+    // explicit redeploy the service runs the first push's image forever
+    // while the comment says "Deployed!".
+    it('preview.yml redeploys with a fresh digest and verifies PRIMARY sticks', () => {
+        const raw = readTemplate('preview.yml');
+        const apply = raw.indexOf('terraform apply -auto-approve');
+        const digest = raw.indexOf('imageDigest');
+        const update = raw.indexOf('update-service');
+        const wait = raw.indexOf('services-stable');
+        const stick = raw.indexOf('did not stick');
+        for (const [name, idx] of [['digest lookup', digest], ['update-service', update], ['stability wait', wait], ['stick check', stick]]) {
+            expect(idx, `${name} missing`).toBeGreaterThanOrEqual(0);
+        }
+        expect(digest).toBeGreaterThan(apply);
+        expect(update).toBeGreaterThan(digest);
+        expect(wait).toBeGreaterThan(update);
+        expect(stick).toBeGreaterThan(wait);
+    });
+
     it('plan.yml gates PR plans behind the same-repo guard with a fork notice', () => {
         const doc = parseTemplate('plan.yml');
         expect(doc.on.pull_request, 'plan.yml must not trigger on pull_request').toBeUndefined();

@@ -24,6 +24,7 @@ import {
     detectWebhookKind,
     parseThreshold,
     ensureArchiveProvider,
+    detectAlertAddonFeatures,
     ALERTS_TF_FILE,
 } from '../src/commands/alerts.js';
 import { withProjectLock } from '../src/utils/file-lock.js';
@@ -177,6 +178,77 @@ describe('buildAlertsTf', () => {
         expect(tf).toContain('endpoint  = "you@example.com"');
     });
 
+    it('adds a DLQ-depth alarm only for trees with the queue addon', () => {
+        expect(buildAlertsTf({ projectName: 'myapp' })).not.toContain('notify_dlq_depth');
+        const tf = buildAlertsTf({ projectName: 'myapp', addons: { 'queue:sqs': true } });
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_dlq_depth"');
+        expect(tf).toContain('metric_name         = "ApproximateNumberOfMessagesVisible"');
+        expect(tf).toContain('namespace           = "AWS/SQS"');
+        expect(tf).toContain('QueueName = aws_sqs_queue.dlq.name');
+        expect(tf).toContain('threshold           = "1"');
+        expect(tf).toContain('alarm_actions = [aws_sns_topic.alerts.arn]');
+    });
+
+    it('keeps --threshold on the primary alarm (addon alarms use baked defaults)', () => {
+        const tf = buildAlertsTf({ projectName: 'myapp', target: 'ecs', threshold: 25, addons: { 'queue:sqs': true } });
+        expect(tf).toContain('threshold           = "25"');
+        expect(tf).toContain('threshold           = "1"');
+    });
+
+    it('adds scheduler failure alarms only for trees with the cron addon', () => {
+        expect(buildAlertsTf({ projectName: 'myapp' })).not.toContain('notify_cron_target_errors');
+        const tf = buildAlertsTf({ projectName: 'myapp', addons: { cron: true } });
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_cron_target_errors"');
+        expect(tf).toContain('metric_name         = "TargetErrorCount"');
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_cron_dropped"');
+        expect(tf).toContain('metric_name         = "InvocationDroppedCount"');
+        expect(tf).toContain('namespace           = "AWS/Scheduler"');
+        expect(tf).toContain('ScheduleGroup = aws_scheduler_schedule_group.crons.name');
+    });
+
+    it('adds storage/CPU/connections alarms for RDS instance trees', () => {
+        expect(buildAlertsTf({ projectName: 'myapp' })).not.toContain('notify_rds_storage_low');
+        const tf = buildAlertsTf({ projectName: 'myapp', addons: { 'db:instance': true } });
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_rds_storage_low"');
+        expect(tf).toContain('metric_name         = "FreeStorageSpace"');
+        expect(tf).toContain('comparison_operator = "LessThanThreshold"');
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_rds_cpu_high"');
+        expect(tf).toContain('metric_name         = "CPUUtilization"');
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_rds_connections_high"');
+        expect(tf).toContain('metric_name         = "DatabaseConnections"');
+        expect(tf).toContain('namespace           = "AWS/RDS"');
+        expect(tf).toContain('DBInstanceIdentifier = aws_db_instance.postgres.identifier');
+    });
+
+    it('adds cluster alarms (no storage alarm — serverless storage autoscales) for aurora trees', () => {
+        const tf = buildAlertsTf({ projectName: 'myapp', addons: { 'db:aurora': true } });
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_rds_cpu_high"');
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_rds_connections_high"');
+        expect(tf).not.toContain('notify_rds_storage_low');
+        expect(tf).toContain('DBClusterIdentifier = aws_rds_cluster.postgres.id');
+    });
+
+    it('adds eviction/CPU alarms for valkey trees', () => {
+        expect(buildAlertsTf({ projectName: 'myapp' })).not.toContain('notify_valkey_evictions');
+        const tf = buildAlertsTf({ projectName: 'myapp', addons: { 'db:redis': true } });
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_valkey_evictions"');
+        expect(tf).toContain('metric_name         = "Evictions"');
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_valkey_cpu_high"');
+        expect(tf).toContain('metric_name         = "EngineCPUUtilization"');
+        expect(tf).toContain('namespace           = "AWS/ElastiCache"');
+        expect(tf).toContain('ReplicationGroupId = aws_elasticache_replication_group.redis.id');
+    });
+
+    it('adds account-level bounce/complaint alarms for SES trees', () => {
+        expect(buildAlertsTf({ projectName: 'myapp' })).not.toContain('notify_ses_bounce_rate');
+        const tf = buildAlertsTf({ projectName: 'myapp', addons: { 'email:ses': true } });
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_ses_bounce_rate"');
+        expect(tf).toContain('metric_name         = "Reputation.BounceRate"');
+        expect(tf).toContain('resource "aws_cloudwatch_metric_alarm" "notify_ses_complaint_rate"');
+        expect(tf).toContain('metric_name         = "Reputation.ComplaintRate"');
+        expect(tf).toContain('namespace           = "AWS/SES"');
+    });
+
     it('adds the forwarding Lambda only when --webhook is set', () => {
         expect(buildAlertsTf({ projectName: 'myapp' })).not.toContain('aws_lambda_function');
         const tf = buildAlertsTf({ projectName: 'myapp', webhook: SLACK_URL });
@@ -268,6 +340,52 @@ describe('ensureArchiveProvider', () => {
     });
 });
 
+describe('detectAlertAddonFeatures', () => {
+    const NONE = { 'queue:sqs': false, cron: false, 'db:instance': false, 'db:aurora': false, 'db:redis': false, 'email:ses': false };
+
+    it('detects the queue addon from the dlq resource, not file presence', () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual(NONE);
+        fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), '# no queues here\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual(NONE);
+        fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), 'resource "aws_sqs_queue" "dlq" {}\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual({ ...NONE, 'queue:sqs': true });
+    });
+
+    it('detects the cron addon from the schedule resource, not file presence', () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), '# no schedules here\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual(NONE);
+        fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), 'resource "aws_scheduler_schedule" "cron" {}\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual({ ...NONE, cron: true });
+    });
+
+    it('detects the database engine from its resource file', () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'database.tf'), 'resource "aws_db_instance" "postgres" {}\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual({ ...NONE, 'db:instance': true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'database-aurora-postgresql.tf'), 'resource "aws_rds_cluster" "postgres" {}\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))['db:aurora']).toBe(true);
+    });
+
+    it('detects valkey from the replication group resource', () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'redis.tf'), 'resource "aws_elasticache_replication_group" "redis" {}\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual({ ...NONE, 'db:redis': true });
+    });
+
+    it('detects SES from the domain identity resource', () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'terraform', 'ses.tf'), 'resource "aws_ses_domain_identity" "ses" {}\n');
+        expect(detectAlertAddonFeatures(path.join(dir, 'terraform'))).toEqual({ ...NONE, 'email:ses': true });
+    });
+});
+
 describe('Command: alerts (scaffold SNS + alarm)', () => {
     function alertOptions(dir, overrides = {}) {
         return { cwd: dir, projectName: 'myapp', region: 'us-east-2', ...overrides };
@@ -297,6 +415,72 @@ describe('Command: alerts (scaffold SNS + alarm)', () => {
         expect(result).toMatchObject({ ok: true, target: 'lambda' });
         const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
         expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_errors"');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('scaffolds the DLQ alarm when the tree carries the queue addon', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), 'resource "aws_sqs_queue" "dlq" {}\n');
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
+
+        expect(result).toMatchObject({ ok: true });
+        const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_dlq_depth"');
+        expect(written).toContain('QueueName = aws_sqs_queue.dlq.name');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips the DLQ alarm when the queue file lacks the dlq resource', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'sqs.tf'), '# hand-edited: queue removed\n');
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
+
+        expect(result).toMatchObject({ ok: true });
+        const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
+        expect(written).not.toContain('notify_dlq_depth');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('scaffolds scheduler alarms when the tree carries the cron addon', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), 'resource "aws_scheduler_schedule" "cron" {}\n');
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
+
+        expect(result).toMatchObject({ ok: true });
+        const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_cron_target_errors"');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_cron_dropped"');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('scaffolds reputation alarms for trees that carry SES', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'ses.tf'), 'resource "aws_ses_domain_identity" "ses" {}\n');
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
+
+        expect(result).toMatchObject({ ok: true });
+        const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_ses_bounce_rate"');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_ses_complaint_rate"');
+        expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it('scaffolds database and cache alarms for trees that carry them', async () => {
+        const dir = tmp.makeTmp('alerts-test-');
+        writeMainTf(dir);
+        fs.writeFileSync(path.join(dir, 'terraform', 'database.tf'), 'resource "aws_db_instance" "postgres" {}\n');
+        fs.writeFileSync(path.join(dir, 'terraform', 'redis.tf'), 'resource "aws_elasticache_replication_group" "redis" {}\n');
+        const result = await runAlerts(alertOptions(dir, { isHeadless: true }));
+
+        expect(result).toMatchObject({ ok: true });
+        const written = fs.readFileSync(path.join(dir, ALERTS_TF_FILE), 'utf8');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_rds_storage_low"');
+        expect(written).toContain('aws_cloudwatch_metric_alarm" "notify_valkey_evictions"');
+        expect(written).not.toContain('DBClusterIdentifier');
         expect(exitSpy).not.toHaveBeenCalled();
     });
 

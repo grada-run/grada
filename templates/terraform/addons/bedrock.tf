@@ -7,10 +7,10 @@
 # chosen model in the AWS Bedrock console first.
 
 # --- Least-Privilege IAM Policy for the ECS Task Role ---
-# Scoped to the chosen model in the deploy region: the
+# Scoped to the chosen model in the deploy region and account: the
 # foundation-model ARN names the model exactly, and the
 # inference-profile line stays (profile-style model IDs invoke through
-# profiles) but pinned to the region.
+# profiles) but pinned to the region and the caller's account.
 resource "aws_iam_role_policy" "ai_bedrock_access" {
   name = "${local.app_name}-ai-bedrock-access"
   role = aws_iam_role.task_role.id
@@ -25,7 +25,7 @@ resource "aws_iam_role_policy" "ai_bedrock_access" {
         ]
         Resource = [
           "arn:aws:bedrock:{{REGION}}::foundation-model/{{BEDROCK_MODEL_ID}}",
-          "arn:aws:bedrock:{{REGION}}:*:inference-profile/*"
+          "arn:aws:bedrock:{{REGION}}:${data.aws_caller_identity.current.account_id}:inference-profile/*"
         ]
       }
     ]

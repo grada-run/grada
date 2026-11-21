@@ -4,7 +4,7 @@ import { RDSClient } from '@aws-sdk/client-rds';
 import { resolveClient } from './aws.js';
 import { normalizeOptions } from './args.js';
 import { findDbTarget, resolveDbIdentifier, resolveDbClusterIdentifier } from './rds.js';
-import { readResourceSuffix } from './resolvers.js';
+import { readResourceSuffix, safeSuffixedName } from './resolvers.js';
 
 // Golden Signals: live CloudWatch telemetry for `grada status`.
 //
@@ -21,10 +21,10 @@ import { readResourceSuffix } from './resolvers.js';
 export const GOLDEN_SIGNALS_WINDOW_MINUTES = 15;
 export const GOLDEN_SIGNALS_PERIOD_SECONDS = 300;
 
-// Mirrors the generated ALB name (`substr("${app}-alb", 0, 32)` in
-// templates/terraform/main.tf) so lookup matches the truncated name.
+// Mirrors the generated ALB name (the length-conditional in
+// templates/terraform/main.tf) so lookup matches exactly, hashed or not.
 export function resolveAlbName(projectName) {
-    return `${projectName}-alb`.slice(0, 32);
+    return safeSuffixedName(projectName, '-alb', 32);
 }
 
 // `arn:aws:elasticloadbalancing:<region>:<acct>:loadbalancer/app/<name>/<id>`

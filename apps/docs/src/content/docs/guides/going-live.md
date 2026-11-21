@@ -16,6 +16,7 @@ grada automates the infrastructure, but a few steps inherently need a human: AWS
 - [ ] **Secrets pushed and mapped.** `secrets push`, commit `secret_keys.json`, push to deploy — then `secrets audit` to confirm the app sees every variable it needs.
 - [ ] **First backup taken** (if running a database). `db backup --id pre-launch` before the first migration or import, so every later operation has a restore point.
 - [ ] **Migration gate wired** (if schema changes ship with code). `db migrate --cmd "<command>" --setup-ci` (or `--setup-ci-migrate` at init) halts releases when migrations fail — ECS targets only; Lambda projects run migrations from CI against the database endpoint.
+- [ ] **Valkey treated as cache** (if using `db:redis`). One node, no failover or snapshots: evictions and node replacements lose rate windows and dedupe keys by design.
 
 ## Access and trust
 
@@ -24,7 +25,7 @@ grada automates the infrastructure, but a few steps inherently need a human: AWS
 
 ## Operations
 
-- [ ] **Alerts subscribed.** `alerts` + `apply`, then confirm the SNS email subscription shows `Confirmed` — an unconfirmed topic pages nobody (or verify a test alarm lands in the chat webhook). See [Alert Notifications](/grada/guides/alert-notifications/).
+- [ ] **Alerts subscribed.** `alerts` + `apply`, then confirm the SNS email subscription shows `Confirmed` — an unconfirmed topic pages nobody (or verify a test alarm lands in the chat webhook). Coverage is the service alarm plus whatever your tree carries (DLQ, cron, RDS, valkey, SES reputation). See [Alert Notifications](/grada/guides/alert-notifications/).
 - [ ] **Drift detection on.** `drift --setup` (or `--setup-ci-drift` at init) for the daily plan check with `iac-drift` issues, plus a `SLACK_WEBHOOK_URL` secret if the team lives in Slack.
 - [ ] **Plan on PR on.** `plan.yml` scaffolded (on by default at init, or `--setup-ci-plan`) so every infrastructure PR gets a sticky plan comment to review before merge.
 - [ ] **Billing ceiling set.** The CLI estimates expected spend; pair it with an AWS Budgets billing alarm in the console so actuals page you too.

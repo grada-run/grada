@@ -93,7 +93,7 @@ function renderGateBlock({ includeSetupNode, steps }) {
             '      - name: Setup Node.js for migrations',
             `        uses: ${pinnedActionUse('actions/setup-node')}`,
             '        with:',
-            "          node-version: '20'",
+            "          node-version: '22'",
             ''
         );
     }

@@ -208,7 +208,7 @@ function assertLambdaAddonsFiles(dir) {
     }
     const mainTf = fs.readFileSync(path.join(dir, 'terraform', 'main.tf'), 'utf-8');
     if (!mainTf.includes('vpc_config {')) throw new Error('expected vpc_config in terraform/main.tf');
-    if (!mainTf.includes('REDIS_URL = ')) throw new Error('expected REDIS_URL in the function variables map');
+    if (!/REDIS_URL\s+=/.test(mainTf)) throw new Error('expected REDIS_URL in the function variables map');
     if (!mainTf.includes('image_config {')) throw new Error('expected image_config from the Procfile web command');
     const cronTf = fs.readFileSync(path.join(dir, 'terraform', 'cron.tf'), 'utf-8');
     if (!cronTf.includes('aws_lambda_function.app.arn')) throw new Error('expected the Lambda scheduler target in terraform/cron.tf');
