@@ -15,10 +15,11 @@ locals {
   # Length-safe names: short names render byte-identically; over-cap
   # names hash-suffix instead of failing validation. Mirrors
   # safeSuffixedName in resolvers.js.
-  scheduler_role_safe_name = length("${local.app_name}-cron-scheduler-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 20)}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-role" : "${local.app_name}-cron-scheduler-role"
-  schedule_full_name       = "${local.app_name}-cron-{{CRON_NAME}}"
-  schedule_safe_name       = length(local.schedule_full_name) > 64 ? "${substr(local.schedule_full_name, 0, 64 - 1 - 5)}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
-  schedule_group_safe_name = length("${local.app_name}-crons") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 6)}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
+  scheduler_role_safe_name   = length("${local.app_name}-cron-scheduler-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 20)}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-role" : "${local.app_name}-cron-scheduler-role"
+  schedule_full_name         = "${local.app_name}-cron-{{CRON_NAME}}"
+  schedule_safe_name         = length(local.schedule_full_name) > 64 ? "${substr(local.schedule_full_name, 0, 64 - 1 - 5)}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
+  schedule_group_safe_name   = length("${local.app_name}-crons") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 6)}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
+  scheduler_policy_safe_name = length("${local.app_name}-cron-scheduler-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 22)}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-policy" : "${local.app_name}-cron-scheduler-policy"
 }
 
 # --- IAM Role assumed by EventBridge Scheduler ---
@@ -41,7 +42,7 @@ resource "aws_iam_role" "scheduler_cron_role" {
 
 # --- Least-privilege permission to invoke the function ---
 resource "aws_iam_role_policy" "scheduler_cron_policy" {
-  name = "${local.app_name}-cron-scheduler-policy"
+  name = local.scheduler_policy_safe_name
   role = aws_iam_role.scheduler_cron_role.id
   policy = jsonencode({
     Version = "2012-10-17"

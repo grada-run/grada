@@ -1,5 +1,5 @@
 import { DescribeDBInstancesCommand, DescribeDBClustersCommand } from '@aws-sdk/client-rds';
-import { resolveProjectName, resolveWorkspaceSuffix, readResourceSuffix } from './resolvers.js';
+import { resolveProjectName, resolveWorkspaceSuffix, readResourceSuffix, safeSuffixedName } from './resolvers.js';
 import { normalizeOptions } from './args.js';
 
 // Error names the RDS API returns for a missing instance across SDK shapes.
@@ -118,24 +118,26 @@ export function isValidSnapshotId(id) {
 }
 
 // Database identifier for the current project/workspace. An explicit
-// `--db-identifier` override wins; otherwise `<appName>-db`.
+// `--db-identifier` override wins; otherwise `<appName>-db`, hash-suffixed
+// past the 63-char cap exactly like identifier_safe_name in database.tf.
 export function resolveDbIdentifier(options = {}, cwd = process.cwd()) {
     const opts = normalizeOptions(options);
     if (typeof opts.dbIdentifier === 'string' && opts.dbIdentifier.trim()) {
         return opts.dbIdentifier.trim();
     }
     const base = resolveProjectName(opts, cwd);
-    return `${base}${resolveWorkspaceSuffix(opts, cwd)}${readResourceSuffix(cwd)}-db`;
+    return safeSuffixedName(`${base}${resolveWorkspaceSuffix(opts, cwd)}${readResourceSuffix(cwd)}`, '-db', 63);
 }
 
 // Aurora cluster identifier for the current project/workspace. An explicit
 // `--db-identifier` override wins (tried as both kinds); otherwise
-// `<appName>-db-cluster`, matching the generated cluster_identifier.
+// `<appName>-db-cluster`, hash-suffixed past the 63-char cap exactly
+// like cluster_safe_name in database-aurora-postgresql.tf.
 export function resolveDbClusterIdentifier(options = {}, cwd = process.cwd()) {
     const opts = normalizeOptions(options);
     if (typeof opts.dbIdentifier === 'string' && opts.dbIdentifier.trim()) {
         return opts.dbIdentifier.trim();
     }
     const base = resolveProjectName(opts, cwd);
-    return `${base}${resolveWorkspaceSuffix(opts, cwd)}${readResourceSuffix(cwd)}-db-cluster`;
+    return safeSuffixedName(`${base}${resolveWorkspaceSuffix(opts, cwd)}${readResourceSuffix(cwd)}`, '-db-cluster', 63);
 }

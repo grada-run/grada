@@ -140,6 +140,19 @@ export function injectLambdaAdapter(dockerContent, port) {
 // master-secret IAM policy (indexing an empty `master_user_secret` tuple fails
 // planning) and appends the `random_password` resource. No-op for ECS content
 // or content that was already converted.
+const SAFE_NAME_KEYS = ['identifier_safe_name', 'db_name_base', 'db_name_safe_name', 'cluster_safe_name', 'instance_safe_name', 'database_name_base', 'database_name_safe_name'];
+
+function realignSurvivingSafeNames(content) {
+    const present = SAFE_NAME_KEYS.filter((key) => new RegExp(`^\\s*${key}\\s*=`, 'm').test(content));
+    if (present.length === 0) return content;
+    const width = Math.max(...present.map((key) => key.length));
+    let out = content;
+    for (const key of present) {
+        out = out.replace(new RegExp(`^(\\s*)${key}\\s*=`, 'm'), (_, indent) => `${indent}${key}${' '.repeat(width - key.length + 1)}=`);
+    }
+    return out;
+}
+
 export function convertDatabaseTfForLambda(databaseTfContent) {
     let content = String(databaseTfContent ?? '');
     if (!content.includes('manage_master_user_password = true')) return content;
@@ -151,6 +164,12 @@ export function convertDatabaseTfForLambda(databaseTfContent) {
         `  # Lambda targets use an explicit Terraform-managed password (see\n  # random_password.db_password below) so the value can flow into the\n  # function's DB_PASSWORD environment variable without a Secrets Manager\n  # VPC endpoint.\n  ${passwordAttr} = random_password.db_password.result`
     );
     content = content.replace('# 4. IAM Permission for RDS Master Password Secret\n', '');
+    // The policy's safe-name local dangles once the block below is gone —
+    // strip the line too or tflint flags an unused declaration. It was
+    // the longest key in its run, so re-pad the survivors to the new
+    // longest or the rendered file fails fmt -check.
+    content = content.replace(/^\s*secret_policy_safe_name\s*=.*\n/m, '');
+    content = realignSurvivingSafeNames(content);
     const resource = findResourceBlock(content, 'aws_iam_role_policy', 'rds_secret_access');
     if (resource) {
         const lineStart = content.lastIndexOf('\n', resource.headerIdx - 1) + 1;

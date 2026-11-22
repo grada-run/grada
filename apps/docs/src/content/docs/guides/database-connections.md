@@ -13,14 +13,14 @@ If you select "Yes", `grada` builds a true zero-trust network topology:
 1. The PostgreSQL instance is deployed into heavily restricted **Isolated Subnets**.
 2. It is given a strict Security Group that *only* allows inbound traffic from your specific ECS Fargate containers on port `5432`.
 3. The database is completely inaccessible from the public internet.
-4. TLS is enforced server-side via a dedicated parameter group (`rds.force_ssl`, or `require_secure_transport` on MySQL) — plaintext clients cannot negotiate. (Aurora trees are exempt until the engine version is pinned; the group family must match it exactly.)
+4. TLS is enforced server-side via a dedicated parameter group (`rds.force_ssl`, or `require_secure_transport` on MySQL) — plaintext clients cannot negotiate. Aurora enforces through a cluster parameter group whose family derives from the resolved regional default engine at plan time, so the floating version never mismatches.
 
 ## Enforcing TLS on existing databases
 
 Trees scaffolded before TLS enforcement pick it up on the next `apply`, but enforcement only bites after a reboot — and a single-AZ micro has no standby, so plan minutes of downtime:
 
 1. Snapshot first: `npx grada-run db backup`.
-2. `npx grada-run apply` in your maintenance window, then reboot the instance (`aws rds reboot-db-instance`) if the window hasn't.
+2. `npx grada-run apply` in your maintenance window, then reboot (`aws rds reboot-db-instance`, or `aws rds reboot-db-cluster` for Aurora) if the window hasn't.
 3. Verify: connect with `PGSSLMODE=require` (PostgreSQL) and confirm a plaintext attempt is refused.
 
 ## Auto-Injected Environment Variables

@@ -266,6 +266,15 @@ describe('buildAlertsTf', () => {
         expect(tf).not.toContain(SLACK_URL);
     });
 
+    it('hash-suffixes the forwarder function name past the 64-char cap', () => {
+        const tf = buildAlertsTf({ projectName: 'myapp', webhook: SLACK_URL });
+        expect(tf).toMatch(/forwarder_safe_name\s*=\s*length\(/);
+        expect(tf).toMatch(/function_name\s*=\s*local\.forwarder_safe_name/);
+        // Short names render byte-identically: the plain form survives
+        // as the under-cap branch.
+        expect(tf).toContain('"${local.app_name}-alerts-forwarder"');
+    });
+
     it('pins the static forwarder to us-east-1 alongside the alarm', () => {
         const tf = buildAlertsTf({ projectName: 'myapp', target: 'static', webhook: SLACK_URL });
         expect(tf).toContain('resource "aws_lambda_function" "forwarder"');

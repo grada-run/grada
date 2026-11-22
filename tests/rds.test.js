@@ -156,6 +156,20 @@ describe('resolveDbClusterIdentifier', () => {
         expect(resolveDbClusterIdentifier({ projectName: 'myapp' }, dir)).toBe('myapp-db-cluster');
         expect(resolveDbClusterIdentifier({ projectName: 'myapp', workspace: 'pr-1' }, dir)).toBe('myapp-pr-1-db-cluster');
     });
+
+    it('hash-suffixes over-cap identifiers exactly like the TF locals', async () => {
+        const { createHash } = await import('node:crypto');
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rds-id-'));
+        const long = 'a-very-long-project-name-that-definitely-blows-every-cap-wide-open-here';
+        const md5 = createHash('md5').update(long, 'utf8').digest('hex').slice(0, 5);
+        // identifier_safe_name: stem 63-1-5-3, suffix -db.
+        expect(resolveDbIdentifier({ projectName: long }, dir)).toBe(`${long.slice(0, 54)}-${md5}-db`);
+        // cluster_safe_name: stem 63-1-5-11, suffix -db-cluster.
+        expect(resolveDbClusterIdentifier({ projectName: long }, dir)).toBe(`${long.slice(0, 46)}-${md5}-db-cluster`);
+        for (const id of [resolveDbIdentifier({ projectName: long }, dir), resolveDbClusterIdentifier({ projectName: long }, dir)]) {
+            expect(id.length).toBeLessThanOrEqual(63);
+        }
+    });
 });
 
 describe('findDbCluster', () => {

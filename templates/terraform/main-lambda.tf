@@ -46,11 +46,13 @@ locals {
   # safeSuffixedName in resolvers.js.
   task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"
   execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"
+  fn_safe_name             = length("${local.app_name}-fn") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 3)}-${substr(md5(local.app_name), 0, 5)}-fn" : "${local.app_name}-fn"
+  secrets_policy_safe_name = length("${local.app_name}-app-secrets-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 19)}-${substr(md5(local.app_name), 0, 5)}-app-secrets-policy" : "${local.app_name}-app-secrets-policy"
 }
 
 # --- CloudWatch Logs ---
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/aws/lambda/${local.app_name}-fn"
+  name              = "/aws/lambda/${local.fn_safe_name}"
   retention_in_days = 30
 }
 
@@ -133,7 +135,7 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
 # reach Secrets Manager directly; VPC-attached functions should prefer
 # plain environment variables injected with `grada add`).
 resource "aws_iam_role_policy" "app_secrets_access" {
-  name = "${local.app_name}-app-secrets-policy"
+  name = local.secrets_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -149,7 +151,7 @@ resource "aws_iam_role_policy" "app_secrets_access" {
 
 # --- Lambda Function (container image + Web Adapter) ---
 resource "aws_lambda_function" "app" {
-  function_name = "${local.app_name}-fn"
+  function_name = local.fn_safe_name
   role          = aws_iam_role.task_role.arn
   package_type  = "Image"
   # Lambda requires an image in a private same-account ECR repository.

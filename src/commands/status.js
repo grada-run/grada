@@ -135,7 +135,7 @@ export async function runLambdaStatus(input = {}) {
     const namespacedProject = resolveNamespacedProject(projectName, options, cwd);
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : `${namespacedProject}${readResourceSuffix(cwd)}-fn`;
+        : safeSuffixedName(`${namespacedProject}${readResourceSuffix(cwd)}`, '-fn', 64);
     const asJson = Boolean(options.json);
     const runSync = options.spawnSyncImpl || spawnSync;
 

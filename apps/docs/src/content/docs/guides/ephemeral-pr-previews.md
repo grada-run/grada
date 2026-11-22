@@ -17,7 +17,7 @@ When a PR is opened, Terraform creates a new workspace (e.g., `pr-12`). It provi
 
 To save time and simplify architecture, PR environments **share** your production AWS Secrets Manager vault and ECR Image Repository.
 
-Every push to the PR re-applies infrastructure and force-updates the preview service, so the preview URL always serves the latest commit (ECS waits for the deployment to stabilize; Lambda redeploys the function code the same way).
+Every push to the PR re-applies infrastructure and force-updates the preview service (plus the worker service when the project has one), so the preview URL always serves the latest commit (ECS waits for the deployment to stabilize; Lambda redeploys the function code the same way).
 
 ### Preview database migrations
 

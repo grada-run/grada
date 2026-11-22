@@ -63,21 +63,54 @@ resource "aws_security_group" "rds" {
   }
 }
 
-# 2b. No SSL parameter group yet: this template floats its engine
-# version by design, and a cluster parameter group family must match
-# it exactly — forcing a family would pin the engine by side effect.
-# Deferred until the engine-version decision; the instance engines
-# already enforce TLS via their own groups.
+# 2b. TLS enforcement: the cluster floats its engine version by
+# design, so resolve the regional default at plan time and derive
+# the matching family — no pin, no mismatch, ever. (default_only
+# spans every major's default, so latest pins the lookup down to
+# one; if AWS ever defaults new clusters elsewhere, the family
+# mismatch fails loud at apply instead of enforcing silently
+# wrong.) Pending reboot like the instance groups.
+data "aws_rds_engine_version" "default" {
+  engine       = "aurora-postgresql"
+  default_only = true
+  latest       = true
+}
+
+locals {
+  aurora_major = split(".", data.aws_rds_engine_version.default.version_actual)[0]
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix instead of failing validation (identifiers and
+  # database names cap at 63, policies at 128). Mirrors
+  # safeSuffixedName in resolvers.js.
+  cluster_safe_name       = length("\${local.app_name}-db-cluster") > 63 ? "\${substr(local.app_name, 0, 63 - 1 - 5 - 11)}-\${substr(md5(local.app_name), 0, 5)}-db-cluster" : "\${local.app_name}-db-cluster"
+  instance_safe_name      = length("\${local.app_name}-db-instance-1") > 63 ? "\${substr(local.app_name, 0, 63 - 1 - 5 - 14)}-\${substr(md5(local.app_name), 0, 5)}-db-instance-1" : "\${local.app_name}-db-instance-1"
+  database_name_base      = replace(local.app_name, "-", "")
+  database_name_safe_name = length(local.database_name_base) > 63 ? "\${substr(local.database_name_base, 0, 58)}\${substr(md5(local.database_name_base), 0, 5)}" : local.database_name_base
+  secret_policy_safe_name = length("\${local.app_name}-rds-secret-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-\${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "\${local.app_name}-rds-secret-policy"
+}
+
+resource "aws_rds_cluster_parameter_group" "ssl" {
+  name   = "\${local.app_name}-aurorapg\${local.aurora_major}"
+  family = "aurora-postgresql\${local.aurora_major}"
+
+  parameter {
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The Aurora PostgreSQL Serverless v2 Cluster (scale-to-zero)
 resource "aws_rds_cluster" "postgres" {
-  cluster_identifier = "\${local.app_name}-db-cluster"
+  cluster_identifier = local.cluster_safe_name
   engine             = "aurora-postgresql"
 
   # engine_version is intentionally omitted: AWS retires Aurora minor versions
   # (e.g. 16.4 in us-east-2), so new clusters take the regional default.
   # Strip dashes for the database name: Aurora database_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)
-  database_name   = replace(local.app_name, "-", "")
+  database_name   = local.database_name_safe_name
   master_username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -85,6 +118,10 @@ resource "aws_rds_cluster" "postgres" {
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
+
+  # TLS enforcement (see the parameter group above). In-place update,
+  # never a replacement.
+  db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.ssl.name
 
   skip_final_snapshot = true
   storage_encrypted   = true
@@ -122,7 +159,7 @@ variable "grada_allow_data_loss" {
 }
 
 resource "aws_rds_cluster_instance" "postgres" {
-  identifier         = "\${local.app_name}-db-instance-1"
+  identifier         = local.instance_safe_name
   cluster_identifier = aws_rds_cluster.postgres.id
   instance_class     = "db.serverless"
   engine             = aws_rds_cluster.postgres.engine
@@ -133,7 +170,7 @@ resource "aws_rds_cluster_instance" "postgres" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "\${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -500,6 +537,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -565,7 +603,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -973,6 +1011,8 @@ env:
   PREVIEW_CLUSTER: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-aurora_serverless-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -1114,6 +1154,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -1403,7 +1503,18 @@ CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "gunicorn config.ws
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Django_Postgres > Django_Postgres - database.tf 1`] = `
-"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+"# 0. Length-safe names: short names render byte-identically; over-cap
+# names hash-suffix instead of failing validation (identifiers and
+# database names cap at 63, policies at 128). Mirrors
+# safeSuffixedName in resolvers.js.
+locals {
+  identifier_safe_name    = length("\${local.app_name}-db") > 63 ? "\${substr(local.app_name, 0, 63 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-db" : "\${local.app_name}-db"
+  db_name_base            = replace(local.app_name, "-", "_")
+  db_name_safe_name       = length(local.db_name_base) > 63 ? "\${substr(local.db_name_base, 0, 57)}_\${substr(md5(local.db_name_base), 0, 5)}" : local.db_name_base
+  secret_policy_safe_name = length("\${local.app_name}-rds-secret-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-\${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "\${local.app_name}-rds-secret-policy"
+}
+
+# 1. Database Subnet Group (isolated subnets live in network.tf, shared
 # with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
@@ -1441,7 +1552,7 @@ resource "aws_db_parameter_group" "ssl" {
 
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
-  identifier        = "\${local.app_name}-db"
+  identifier        = local.identifier_safe_name
   engine            = "postgres"
   engine_version    = "16"
   instance_class    = "db.t4g.micro"
@@ -1460,7 +1571,7 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
-  db_name  = replace(local.app_name, "-", "_")
+  db_name  = local.db_name_safe_name
   username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -1488,7 +1599,7 @@ variable "grada_allow_data_loss" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "\${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1855,6 +1966,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -1920,7 +2032,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -2327,6 +2439,8 @@ env:
   PREVIEW_CLUSTER: test-django_postgres-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-django_postgres-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-django_postgres-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-django_postgres-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-django_postgres-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -2468,6 +2582,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -3087,6 +3261,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -3152,7 +3327,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -3571,6 +3746,8 @@ env:
   PREVIEW_CLUSTER: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-docker_compose_sidecars-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -3712,6 +3889,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -4352,6 +4589,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -4417,7 +4655,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -4820,6 +5058,8 @@ env:
   PREVIEW_CLUSTER: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-fastapi_python-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -4961,6 +5201,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -5569,6 +5869,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -5634,7 +5935,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -6037,6 +6338,8 @@ env:
   PREVIEW_CLUSTER: test-go_distroless-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-go_distroless-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-go_distroless-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-go_distroless-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-go_distroless-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -6178,6 +6481,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -6467,7 +6830,18 @@ CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "gunicorn config.ws
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Heroku_Procfile_Migration > Heroku_Procfile_Migration - database.tf 1`] = `
-"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+"# 0. Length-safe names: short names render byte-identically; over-cap
+# names hash-suffix instead of failing validation (identifiers and
+# database names cap at 63, policies at 128). Mirrors
+# safeSuffixedName in resolvers.js.
+locals {
+  identifier_safe_name    = length("\${local.app_name}-db") > 63 ? "\${substr(local.app_name, 0, 63 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-db" : "\${local.app_name}-db"
+  db_name_base            = replace(local.app_name, "-", "_")
+  db_name_safe_name       = length(local.db_name_base) > 63 ? "\${substr(local.db_name_base, 0, 57)}_\${substr(md5(local.db_name_base), 0, 5)}" : local.db_name_base
+  secret_policy_safe_name = length("\${local.app_name}-rds-secret-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-\${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "\${local.app_name}-rds-secret-policy"
+}
+
+# 1. Database Subnet Group (isolated subnets live in network.tf, shared
 # with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
@@ -6505,7 +6879,7 @@ resource "aws_db_parameter_group" "ssl" {
 
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
-  identifier        = "\${local.app_name}-db"
+  identifier        = local.identifier_safe_name
   engine            = "postgres"
   engine_version    = "16"
   instance_class    = "db.t4g.micro"
@@ -6524,7 +6898,7 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
-  db_name  = replace(local.app_name, "-", "_")
+  db_name  = local.db_name_safe_name
   username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -6552,7 +6926,7 @@ variable "grada_allow_data_loss" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "\${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -6919,6 +7293,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -6984,7 +7359,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -7391,6 +7766,8 @@ env:
   PREVIEW_CLUSTER: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-heroku_procfile_migration-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -7532,6 +7909,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -7885,7 +8322,18 @@ CMD ["node", "index.js"]
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for MySQL_RDS > MySQL_RDS - database.tf 1`] = `
-"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+"# 0. Length-safe names: short names render byte-identically; over-cap
+# names hash-suffix instead of failing validation (identifiers cap
+# at 63, database names at 64, policies at 128). Mirrors
+# safeSuffixedName in resolvers.js.
+locals {
+  identifier_safe_name    = length("\${local.app_name}-db") > 63 ? "\${substr(local.app_name, 0, 63 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-db" : "\${local.app_name}-db"
+  db_name_base            = replace(local.app_name, "-", "")
+  db_name_safe_name       = length(local.db_name_base) > 64 ? "\${substr(local.db_name_base, 0, 59)}\${substr(md5(local.db_name_base), 0, 5)}" : local.db_name_base
+  secret_policy_safe_name = length("\${local.app_name}-rds-secret-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-\${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "\${local.app_name}-rds-secret-policy"
+}
+
+# 1. Database Subnet Group (isolated subnets live in network.tf, shared
 # with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
@@ -7923,7 +8371,7 @@ resource "aws_db_parameter_group" "ssl" {
 
 # 3. The MySQL Instance
 resource "aws_db_instance" "postgres" {
-  identifier        = "\${local.app_name}-db"
+  identifier        = local.identifier_safe_name
   engine            = "mysql"
   engine_version    = "8.0"
   instance_class    = "db.t4g.micro"
@@ -7943,7 +8391,7 @@ resource "aws_db_instance" "postgres" {
 
   # Strip dashes for the database name: RDS MySQL db_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)
-  db_name  = replace(local.app_name, "-", "")
+  db_name  = local.db_name_safe_name
   username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -7971,7 +8419,7 @@ variable "grada_allow_data_loss" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "\${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -8338,6 +8786,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -8403,7 +8852,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -8811,6 +9260,8 @@ env:
   PREVIEW_CLUSTER: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-mysql_rds-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -8952,6 +9403,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -9589,6 +10100,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -9654,7 +10166,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -10057,6 +10569,8 @@ env:
   PREVIEW_CLUSTER: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-nextjs_standalone-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -10198,6 +10712,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -10827,6 +11401,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -10892,7 +11467,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -11295,6 +11870,8 @@ env:
   PREVIEW_CLUSTER: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-nuxt_ssr-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -11436,6 +12013,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -11726,7 +12363,18 @@ CMD ["bundle", "exec", "puma", "-b", "tcp://0.0.0.0:8000"]"
 `;
 
 exports[`Infrastructure Generator > generates correct infrastructure, CI/CD, and Dockerfile for Rails_Postgres > Rails_Postgres - database.tf 1`] = `
-"# 1. Database Subnet Group (isolated subnets live in network.tf, shared
+"# 0. Length-safe names: short names render byte-identically; over-cap
+# names hash-suffix instead of failing validation (identifiers and
+# database names cap at 63, policies at 128). Mirrors
+# safeSuffixedName in resolvers.js.
+locals {
+  identifier_safe_name    = length("\${local.app_name}-db") > 63 ? "\${substr(local.app_name, 0, 63 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-db" : "\${local.app_name}-db"
+  db_name_base            = replace(local.app_name, "-", "_")
+  db_name_safe_name       = length(local.db_name_base) > 63 ? "\${substr(local.db_name_base, 0, 57)}_\${substr(md5(local.db_name_base), 0, 5)}" : local.db_name_base
+  secret_policy_safe_name = length("\${local.app_name}-rds-secret-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-\${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "\${local.app_name}-rds-secret-policy"
+}
+
+# 1. Database Subnet Group (isolated subnets live in network.tf, shared
 # with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
   name       = "\${local.app_name}-db-subnet-group"
@@ -11764,7 +12412,7 @@ resource "aws_db_parameter_group" "ssl" {
 
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
-  identifier        = "\${local.app_name}-db"
+  identifier        = local.identifier_safe_name
   engine            = "postgres"
   engine_version    = "16"
   instance_class    = "db.t4g.micro"
@@ -11783,7 +12431,7 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
-  db_name  = replace(local.app_name, "-", "_")
+  db_name  = local.db_name_safe_name
   username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -11811,7 +12459,7 @@ variable "grada_allow_data_loss" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "\${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -12178,6 +12826,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -12243,7 +12892,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -12651,6 +13300,8 @@ env:
   PREVIEW_CLUSTER: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-rails_postgres-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -12792,6 +13443,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -13427,6 +14138,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -13492,7 +14204,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -13895,6 +14607,8 @@ env:
   PREVIEW_CLUSTER: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-sveltekit_node-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -14036,6 +14750,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -14673,6 +15447,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -14738,7 +15513,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -15141,6 +15916,8 @@ env:
   PREVIEW_CLUSTER: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-vercel_edge_migration-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -15282,6 +16059,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 
@@ -15898,6 +16735,7 @@ locals {
   tg_safe_name             = length("\${local.app_name}-tg") > 32 ? "\${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-\${substr(md5(local.app_name), 0, 5)}-tg" : "\${local.app_name}-tg"
   task_role_safe_name      = length("\${local.app_name}-task-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-\${substr(md5(local.app_name), 0, 5)}-task-role" : "\${local.app_name}-task-role"
   execution_role_safe_name = length("\${local.app_name}-execution-role") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-execution-role" : "\${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("\${local.app_name}-ecs-exec-policy") > 128 ? "\${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-\${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "\${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -15963,7 +16801,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for \`npx grada-run exec\` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "\${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -16366,6 +17204,8 @@ env:
   PREVIEW_CLUSTER: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-cluster
   PREVIEW_SERVICE: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-service
   PREVIEW_TASK_FAMILY: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-task
+  PREVIEW_WORKER_SERVICE: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: test-vite_static_spa-pr-\${{ github.event.pull_request.number }}-worker-task
 
 permissions:
   id-token: write
@@ -16507,6 +17347,66 @@ jobs:
             --region \${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "\${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of \${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: \${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \\
+            --repository-name \${{ env.ECR_REPOSITORY }} \\
+            --image-ids imageTag=\${{ env.WORKSPACE }} \\
+            --query 'imageDetails[0].imageDigest' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          IMAGE_URI=\${{ steps.login-ecr.outputs.registry }}/\${{ env.ECR_REPOSITORY }}@\${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \\
+            --task-definition \${{ env.PREVIEW_WORKER_TASK_FAMILY }} \\
+            --region \${{ env.AWS_REGION }} \\
+            --query 'taskDefinition' \\
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \\
+            --arg IMAGE "$IMAGE_URI" \\
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \\
+            --region \${{ env.AWS_REGION }} \\
+            --cli-input-json "$NEW_TASK_DEF" \\
+            --query 'taskDefinition.taskDefinitionArn' \\
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --service \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --task-definition \${{ steps.register-preview-worker-task-def.outputs.task-arn }} \\
+            --force-new-deployment \\
+            --region \${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --region \${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \\
+            --cluster \${{ env.PREVIEW_CLUSTER }} \\
+            --services \${{ env.PREVIEW_WORKER_SERVICE }} \\
+            --query 'services[0].deployments[?status==\`PRIMARY\`].taskDefinition' \\
+            --output text \\
+            --region \${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "\${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of \${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 

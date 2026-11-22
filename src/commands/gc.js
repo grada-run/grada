@@ -11,7 +11,7 @@ import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix, safeSuffixedName } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
@@ -85,6 +85,9 @@ function projectRepoName(projectName, resourceSuffix = '') {
 // lookalikes (`myapp-evil-pr-2`) never match.
 function previewLogGroupPattern({ projectName, resourceSuffix = '', isLambda = false }) {
     const base = `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
+    // Plain-form only by design: over-cap preview names hash-suffix in
+    // Terraform, so they never match here — fail closed (never proposed)
+    // and the 30-day group retention self-cleans them instead.
     return isLambda ? new RegExp(`^/aws/lambda/${base}-fn$`) : new RegExp(`^/ecs/${base}$`);
 }
 
@@ -199,6 +202,9 @@ export async function discoverLivePreviewLogGroups({
     try {
         const base = `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
         if (isLambda) {
+            // Plain-form only (see previewLogGroupPattern): hashed
+            // over-cap functions are invisible here, and invisible to
+            // the orphan candidate pattern too — consistently skipped.
             const fnPattern = new RegExp(`^${base}-fn$`);
             const names = await listFunctionsImpl({ region, spawnSyncImpl });
             for (const name of names || []) {
@@ -740,7 +746,7 @@ async function runGcMain(input = {}) {
             // Exact match: the live group carries the suffix on suffixed
             // trees, and proposing it for deletion would be catastrophic.
             excludeLogGroup: isLambda
-                ? `/aws/lambda/${projectName}${suffix}-fn`
+                ? `/aws/lambda/${safeSuffixedName(`${projectName}${suffix}`, '-fn', 64)}`
                 : `/ecs/${projectName}${suffix}`,
             livePreviewGroups: liveness.groups,
             previewLivenessUnknown: liveness.unknown,

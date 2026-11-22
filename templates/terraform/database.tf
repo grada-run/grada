@@ -1,3 +1,14 @@
+# 0. Length-safe names: short names render byte-identically; over-cap
+# names hash-suffix instead of failing validation (identifiers and
+# database names cap at 63, policies at 128). Mirrors
+# safeSuffixedName in resolvers.js.
+locals {
+  identifier_safe_name    = length("${local.app_name}-db") > 63 ? "${substr(local.app_name, 0, 63 - 1 - 5 - 3)}-${substr(md5(local.app_name), 0, 5)}-db" : "${local.app_name}-db"
+  db_name_base            = replace(local.app_name, "-", "_")
+  db_name_safe_name       = length(local.db_name_base) > 63 ? "${substr(local.db_name_base, 0, 57)}_${substr(md5(local.db_name_base), 0, 5)}" : local.db_name_base
+  secret_policy_safe_name = length("${local.app_name}-rds-secret-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "${local.app_name}-rds-secret-policy"
+}
+
 # 1. Database Subnet Group (isolated subnets live in network.tf, shared
 # with ElastiCache so every data-plane group stays off public subnets)
 resource "aws_db_subnet_group" "main" {
@@ -36,7 +47,7 @@ resource "aws_db_parameter_group" "ssl" {
 
 # 3. The PostgreSQL Instance
 resource "aws_db_instance" "postgres" {
-  identifier        = "${local.app_name}-db"
+  identifier        = local.identifier_safe_name
   engine            = "postgres"
   engine_version    = "16"
   instance_class    = "db.t4g.micro"
@@ -55,7 +66,7 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name = aws_db_parameter_group.ssl.name
 
   # Clean up dashes for the database name (e.g. my-project -> my_project)
-  db_name  = replace(local.app_name, "-", "_")
+  db_name  = local.db_name_safe_name
   username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -83,7 +94,7 @@ variable "grada_allow_data_loss" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"

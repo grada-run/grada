@@ -10,6 +10,13 @@
 # --- SES Domain Identity ---
 # Account-wide singletons per domain/region: scoped to the default
 # (production) workspace so PR preview teardowns never delete them.
+locals {
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix instead of failing validation (config sets
+  # cap at 64, policies at 128). Mirrors safeSuffixedName.
+  config_set_safe_name  = length("${local.app_name}-ses-events") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 11)}-${substr(md5(local.app_name), 0, 5)}-ses-events" : "${local.app_name}-ses-events"
+  send_policy_safe_name = length("${local.app_name}-ses-send") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 9)}-${substr(md5(local.app_name), 0, 5)}-ses-send" : "${local.app_name}-ses-send"
+}
 resource "aws_ses_domain_identity" "ses" {
   count  = terraform.workspace == "default" ? 1 : 0
   domain = "{{SES_DOMAIN}}"
@@ -34,7 +41,7 @@ resource "aws_ses_domain_mail_from" "ses" {
 # under the verified domain above verify automatically.
 resource "aws_ses_configuration_set" "main" {
   count                      = terraform.workspace == "default" ? 1 : 0
-  name                       = "${local.app_name}-ses-events"
+  name                       = local.config_set_safe_name
   reputation_metrics_enabled = true
   sending_enabled            = true
 }
@@ -62,7 +69,7 @@ resource "aws_sesv2_email_identity" "sender" {
 {{SES_ROUTE53_RECORDS_BLOCK}}
 # --- Least-Privilege IAM Policy for the ECS Task Role ---
 resource "aws_iam_role_policy" "ses_send" {
-  name = "${local.app_name}-ses-send"
+  name = local.send_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"

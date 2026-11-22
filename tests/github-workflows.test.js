@@ -357,6 +357,35 @@ describe('github workflow templates', () => {
         expect(stick).toBeGreaterThan(wait);
     });
 
+    // The worker ships the same static :pr-N image as web: without its
+    // own redeploy it runs the first push's code forever while web
+    // moves on. Mirrors the deploy workflow's worker trio.
+    it('preview.yml redeploys the worker too, guarded on worker.tf', () => {
+        const raw = readTemplate('preview.yml');
+        expect(raw).toContain('PREVIEW_WORKER_SERVICE:');
+        expect(raw).toContain('PREVIEW_WORKER_TASK_FAMILY:');
+        const webStick = raw.indexOf('did not stick');
+        const wRegister = raw.indexOf('Register preview worker task definition revision');
+        const wForce = raw.indexOf('Force preview worker deployment');
+        const wWait = raw.indexOf('Wait for preview worker rollout');
+        for (const [name, idx] of [['worker register', wRegister], ['worker force', wForce], ['worker wait', wWait]]) {
+            expect(idx, `${name} missing`).toBeGreaterThanOrEqual(0);
+        }
+        expect(wRegister).toBeGreaterThan(webStick);
+        expect(wForce).toBeGreaterThan(wRegister);
+        expect(wWait).toBeGreaterThan(wForce);
+        // Each worker step skipped on workerless trees (deploy-workflow
+        // guard) and on credential failure (every preview step's guard).
+        for (const [from, to] of [[wRegister, wForce], [wForce, wWait], [wWait, raw.length]]) {
+            const step = raw.slice(from, to);
+            expect(step).toContain("hashFiles('terraform/worker.tf') != ''");
+            expect(step).toContain("steps.aws-creds.outcome == 'success'");
+        }
+        const workerSlice = raw.slice(wRegister);
+        expect(workerSlice).toContain('register-preview-worker-task-def');
+        expect(workerSlice).toContain('did not stick');
+    });
+
     it('plan.yml gates PR plans behind the same-repo guard with a fork notice', () => {
         const doc = parseTemplate('plan.yml');
         expect(doc.on.pull_request, 'plan.yml must not trigger on pull_request').toBeUndefined();

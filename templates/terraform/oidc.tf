@@ -49,17 +49,15 @@ locals {
   # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
   # the boundary under the 6144-char managed-policy quota that broke
   # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
-  # several exact ARNs when adding entries. Headroom is now single
-  # digits at 32-char prefixes: the next IAM addition must economize
-  # (shorter Sids, fewer verbs, or slimmer patterns) before extending.
+  # several exact ARNs when adding entries. Headroom is 78 chars
+  # at 32-char prefixes (316 at 24): the shutdown-into-execution
+  # merger paid for the lifecycle/snapshot/table data verbs, so
+  # additions still fit — but the next one re-runs the quota probe
+  # before extending.
   guardrail_compute_abuse_resources    = ["*"]
   guardrail_snapshot_sharing_resources = ["*"]
   guardrail_state_destruction_resources = [
     "arn:aws:s3:::{{STATE_BUCKET}}*",
-  ]
-  guardrail_ecs_shutdown_resources = [
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${local.prod_prefix}-cluster",
-    "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${local.prod_prefix}-cluster/*",
   ]
   guardrail_image_deletion_resources = [
     "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${local.prod_prefix}-repo",
@@ -306,7 +304,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
       {
         Sid      = "DenySnapshotSharing"
         Effect   = "Deny"
-        Action   = ["rds:ModifyDBSnapshotAttribute"]
+        Action   = ["rds:Modify*SnapshotAttribute"]
         Resource = local.guardrail_snapshot_sharing_resources
       },
       {
@@ -314,12 +312,6 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Effect   = "Deny"
         Action   = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
         Resource = local.guardrail_state_destruction_resources
-      },
-      {
-        Sid      = "DenyProdECSShutdown"
-        Effect   = "Deny"
-        Action   = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
-        Resource = local.guardrail_ecs_shutdown_resources
       },
       {
         Sid      = "DenyProdImageDeletion"
@@ -352,9 +344,15 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Resource = local.guardrail_aurora_destruction_resources
       },
       {
-        Sid      = "DenyProdTableDeletion"
+        # Item data joins the table deny: preview apps use preview
+        # tables, so no bounded role ever reads prod items — and the
+        # wildcard set below leaves Describe*/List* (plan refresh) and
+        # control verbs alone. Streams stay out of reach of this
+        # pattern (stream ARNs carry a /stream suffix): accepted, the
+        # iterator dance is narrow and unactionable without table reads.
+        Sid      = "DenyProdTableData"
         Effect   = "Deny"
-        Action   = ["dynamodb:DeleteTable"]
+        Action   = ["dynamodb:DeleteTable", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*"]
         Resource = local.guardrail_table_deletion_resources
       },
       {
@@ -363,9 +361,13 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # <db-identifier>-pre-deploy-<sha>) are directly deletable;
         # automated snapshots can only go away via retention changes or
         # instance deletion, both already denied above.
-        Sid      = "DenyProdSnapshotDeletion"
+        # Copies, snapshot-based restores, and S3 exports authorize
+        # the source snapshot (service authorization reference), so
+        # denying them here closes the copy-then-read and
+        # export-to-attacker-bucket paths. Deletion keeps its verbs.
+        Sid      = "DenyProdSnapshotData"
         Effect   = "Deny"
-        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
+        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot", "rds:Copy*", "rds:Restore*", "rds:StartExportTask"]
         Resource = local.guardrail_snapshot_deletion_resources
       },
       {
@@ -424,9 +426,15 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # ARNs while pr-* stays allowed. No describes: plan.yml
         # refreshes prod state with preview credentials, so describing
         # prod is legitimate traffic.
+        # Service shutdown verbs live here (not in a separate
+        # statement): they share the cluster+service resources below,
+        # and a twin pair of their own would re-inline ~280 chars of
+        # ARNs against the boundary quota. The scheduler carve-out is
+        # a no-op for them — the scheduler role can never call
+        # Update/DeleteService or DeleteCluster.
         Sid      = "DenyProdTaskExecution"
         Effect   = "Deny"
-        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService"]
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService", "ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
         Resource = local.guardrail_task_execution_resources
         # The bounded scheduler role must RunTask its task
         # definition at trigger time. A no-op on this side (the preview
@@ -475,9 +483,14 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # is never a task role) so the twins stay identical.
         # Accepted residual: GetSecretValue + prod state reads (plan
         # refresh requires both; state additionally exposes adopted
-        # live values), snapshot export/restore, Bedrock/SES spend
-        # verbs, DynamoDB data verbs, and RDS Start — follow-ups, not
-        # oversights.
+        # live values), Bedrock/SES spend verbs (denying would gut
+        # preview fidelity for AI/email apps — previews are full
+        # copies; same-repo guard + PR review are the controls), and
+        # DynamoDB stream reads (narrow iterator dance, unactionable
+        # without the table reads denied below). Snapshot copy/
+        # restore/export, point-in-time restore, DynamoDB item data,
+        # and RDS Start all landed as denies; DeleteMessage stays
+        # unreachable with Receive denied.
         Sid    = "DenyProdAppData"
         Effect = "Deny"
         Action = [
@@ -492,12 +505,13 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         }
       },
       {
-        # ...nor stop or reboot prod databases. Deliberately
-        # carve-free: no bounded role ever calls these (sleep/wake
-        # and db commands run on user credentials).
+        # ...nor stop, start, reboot, or point-in-time-restore prod
+        # databases. Deliberately carve-free: no bounded role ever
+        # calls these (sleep/wake and db commands run on user
+        # credentials).
         Sid      = "DenyProdDbLifecycle"
         Effect   = "Deny"
-        Action   = ["rds:Stop*", "rds:Reboot*"]
+        Action   = ["rds:Stop*", "rds:Reboot*", "rds:Start*", "rds:Restore*"]
         Resource = local.guardrail_db_lifecycle_resources
       },
     ]
@@ -555,7 +569,7 @@ resource "aws_iam_policy" "preview_boundary" {
       {
         Sid      = "BoundaryDenySnapshotSharing"
         Effect   = "Deny"
-        Action   = ["rds:ModifyDBSnapshotAttribute"]
+        Action   = ["rds:Modify*SnapshotAttribute"]
         Resource = local.guardrail_snapshot_sharing_resources
       },
       {
@@ -563,12 +577,6 @@ resource "aws_iam_policy" "preview_boundary" {
         Effect   = "Deny"
         Action   = ["s3:DeleteBucket", "s3:DeleteObjectVersion"]
         Resource = local.guardrail_state_destruction_resources
-      },
-      {
-        Sid      = "BoundaryDenyECSShutdown"
-        Effect   = "Deny"
-        Action   = ["ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
-        Resource = local.guardrail_ecs_shutdown_resources
       },
       {
         Sid      = "BoundaryDenyImageDeletion"
@@ -601,15 +609,15 @@ resource "aws_iam_policy" "preview_boundary" {
         Resource = local.guardrail_aurora_destruction_resources
       },
       {
-        Sid      = "BoundaryDenyTableDeletion"
+        Sid      = "BoundaryDenyTableData"
         Effect   = "Deny"
-        Action   = ["dynamodb:DeleteTable"]
+        Action   = ["dynamodb:DeleteTable", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*"]
         Resource = local.guardrail_table_deletion_resources
       },
       {
-        Sid      = "BoundaryDenySnapshotDeletion"
+        Sid      = "BoundaryDenySnapshotData"
         Effect   = "Deny"
-        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot"]
+        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot", "rds:Copy*", "rds:Restore*", "rds:StartExportTask"]
         Resource = local.guardrail_snapshot_deletion_resources
       },
       {
@@ -625,9 +633,11 @@ resource "aws_iam_policy" "preview_boundary" {
         Resource = local.guardrail_log_deletion_resources
       },
       {
+        # Shutdown verbs merged here; see the twin's comment (quota
+        # economy — a separate pair would re-inline the ARNs below).
         Sid      = "BoundaryDenyTaskExecution"
         Effect   = "Deny"
-        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService"]
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService", "ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
         Resource = local.guardrail_task_execution_resources
         # The bounded scheduler role must RunTask its task
         # definition at trigger time; every other capped caller stays
@@ -674,7 +684,7 @@ resource "aws_iam_policy" "preview_boundary" {
       {
         Sid      = "BoundaryDenyDbLifecycle"
         Effect   = "Deny"
-        Action   = ["rds:Stop*", "rds:Reboot*"]
+        Action   = ["rds:Stop*", "rds:Reboot*", "rds:Start*", "rds:Restore*"]
         Resource = local.guardrail_db_lifecycle_resources
       },
       {

@@ -378,6 +378,16 @@ describe('Preview task-role confinement', () => {
         for (const action of ['ecs:RunTask', 'ecs:StopTask', 'ecs:ExecuteCommand', 'ecs:CreateService']) {
             expect(chunk).toContain(action);
         }
+        // Shutdown verbs merged in (quota economy): Update/DeleteService
+        // and DeleteCluster share the cluster+service resources already
+        // listed here, so a separate statement would re-inline ~280
+        // chars of ARNs for nothing. The scheduler carve-out is a
+        // no-op for these verbs (the scheduler role can never call
+        // them), so the merge changes no effective permission.
+        for (const action of ['ecs:UpdateService', 'ecs:DeleteService', 'ecs:DeleteCluster']) {
+            expect(chunk).toContain(action);
+        }
+        expect(sidChunk(guardrails, 'DenyProdECSShutdown')).toBe('');
         expect(chunk).toContain('local.guardrail_task_execution_resources');
         const local = tf.slice(tf.indexOf('guardrail_task_execution_resources'));
         for (const arn of [
@@ -439,6 +449,7 @@ describe('Preview task-role confinement', () => {
         for (const sid of ['BoundaryDenyTaskExecution', 'BoundaryDenyTaskDefinitionRegistration', 'BoundaryDenyAppRoleMutation']) {
             expect(sidChunk(boundary, sid), `${sid} missing`).not.toBe('');
         }
+        expect(sidChunk(boundary, 'BoundaryDenyECSShutdown')).toBe('');
         // No flat pass-role twin (see the scheduler repair suite): the
         // OffService/OffTarget/OffScheduler trio gates it instead.
         expect(sidChunk(boundary, 'BoundaryDenyPassRole')).toBe('');
@@ -456,20 +467,21 @@ describe('Preview task-role confinement', () => {
         const { guardrails, boundary } = twinSlices();
         const guardrailStmts = statementsBySid(guardrails);
         const boundaryStmts = statementsBySid(boundary);
-        // Exact enumeration: 16 identical + 1 asymmetric + 4 no-twin by
+        // Exact enumeration: 17 identical + 1 asymmetric + 4 no-twin by
         // design + 1 trio-subsumed. A new Sid without a twin fails here.
+        // (Shutdown merged into TaskExecution for quota; Table/Snapshot
+        // Deletion renamed to Table/SnapshotData when data verbs joined.)
         const identicalTwins = [
             'DenyComputeAbuse',
             'DenySnapshotSharing',
             'DenyProdStateDestruction',
-            'DenyProdECSShutdown',
             'DenyProdImageDeletion',
             'DenyProdLambdaRewrite',
             'DenyProdQueueDestruction',
             'DenyProdDatabaseDestruction',
             'DenyProdAuroraDestruction',
-            'DenyProdTableDeletion',
-            'DenyProdSnapshotDeletion',
+            'DenyProdTableData',
+            'DenyProdSnapshotData',
             'DenyProdSecretsDeletion',
             'DenyProdLogDeletion',
             'DenyProdTaskExecution',
@@ -581,11 +593,17 @@ describe('Preview data-plane confinement', () => {
             expect(chunk, `${label} statement missing`).not.toBe('');
             expect(chunk, label).toContain('rds:Stop*');
             expect(chunk, label).toContain('rds:Reboot*');
+            // Start is the symmetric half (a stopped prod database must
+            // not be startable from PR runs either); Restore* covers
+            // point-in-time restores, which authorize the source db /
+            // cluster (AWS service authorization reference).
+            expect(chunk, label).toContain('rds:Start*');
+            expect(chunk, label).toContain('rds:Restore*');
             expect(chunk, label).toContain('local.guardrail_db_lifecycle_resources');
-            // Deliberately carve-free: no bounded role ever stops or
-            // reboots a database (sleep/wake and db commands run on user
-            // credentials) — and one fewer condition keeps the boundary
-            // under quota.
+            // Deliberately carve-free: no bounded role ever stops,
+            // starts, reboots, or restores a database (sleep/wake and
+            // db commands run on user credentials) — and one fewer
+            // condition keeps the boundary under quota.
             expect(chunk, `${label} must stay carve-free`).not.toContain('aws:PrincipalArn');
         }
         const local = tf.slice(tf.indexOf('guardrail_db_lifecycle_resources'), tf.indexOf(']', tf.indexOf('guardrail_db_lifecycle_resources')));
@@ -625,13 +643,77 @@ describe('Scheduler survives the boundary', () => {
 describe('Snapshot guardrails cover pre-deploy names', () => {
     it('denies legacy bare pre-deploy snapshot deletion on both twins', () => {
         const { tf, guardrails, boundary } = twinSlices();
-        expect(sidChunk(guardrails, 'DenyProdSnapshotDeletion')).toContain('local.guardrail_snapshot_deletion_resources');
-        expect(sidChunk(boundary, 'BoundaryDenySnapshotDeletion')).toContain('local.guardrail_snapshot_deletion_resources');
+        expect(sidChunk(guardrails, 'DenyProdSnapshotData')).toContain('local.guardrail_snapshot_deletion_resources');
+        expect(sidChunk(boundary, 'BoundaryDenySnapshotData')).toContain('local.guardrail_snapshot_deletion_resources');
         const local = tf.slice(tf.indexOf('guardrail_snapshot_deletion_resources'));
         expect(local).toContain('snapshot:${local.prod_prefix}-db-*');
         expect(local).toContain('cluster-snapshot:${local.prod_prefix}-db-cluster-*');
         expect(local).toContain('snapshot:pre-deploy-*');
         expect(local).toContain('cluster-snapshot:pre-deploy-*');
+    });
+
+    it('denies snapshot copy/restore/export on both twins (no exfil path)', () => {
+        const { guardrails, boundary } = twinSlices();
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdSnapshotData')], ['boundary', sidChunk(boundary, 'BoundaryDenySnapshotData')]]) {
+            expect(chunk, `${label} statement missing`).not.toBe('');
+            expect(chunk, label).toContain('rds:DeleteDBSnapshot');
+            expect(chunk, label).toContain('rds:DeleteDBClusterSnapshot');
+            // Exfil half: copies and snapshot-based restores authorize
+            // the source snapshot, exports authorize it too (AWS service
+            // authorization reference) — denying here closes the
+            // copy-then-read and export-to-S3 paths.
+            expect(chunk, label).toContain('rds:Copy*');
+            expect(chunk, label).toContain('rds:Restore*');
+            expect(chunk, label).toContain('rds:StartExportTask');
+            expect(chunk, `${label} must stay carve-free`).not.toContain('aws:PrincipalArn');
+        }
+    });
+
+    it('denies snapshot sharing for instance and cluster snapshots (both twins)', () => {
+        const { guardrails, boundary } = twinSlices();
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenySnapshotSharing')], ['boundary', sidChunk(boundary, 'BoundaryDenySnapshotSharing')]]) {
+            expect(chunk, `${label} statement missing`).not.toBe('');
+            // One wildcard covers ModifyDBSnapshotAttribute and
+            // ModifyDBClusterSnapshotAttribute (the only two verbs that
+            // match) — the cluster form was previously uncovered.
+            expect(chunk, label).toContain('rds:Modify*SnapshotAttribute');
+        }
+    });
+});
+
+describe('Table guardrails deny item data, not just the table', () => {
+    // Wildcard set covering all 13 DynamoDB data-plane verbs while
+    // leaving Describe*/List* (plan refresh) and control verbs alone:
+    // Batch* (3), *Item (4), Query, Scan, Execute* (2), Transact* (2).
+    const TABLE_DATA_VERBS = [
+        'dynamodb:Batch*',
+        'dynamodb:*Item',
+        'dynamodb:Query',
+        'dynamodb:Scan',
+        'dynamodb:Execute*',
+        'dynamodb:Transact*',
+    ];
+
+    it('denies prod table item reads and writes with no carve-out (both twins)', () => {
+        const { tf, guardrails, boundary } = twinSlices();
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdTableData')], ['boundary', sidChunk(boundary, 'BoundaryDenyTableData')]]) {
+            expect(chunk, `${label} statement missing`).not.toBe('');
+            expect(chunk, label).toContain('dynamodb:DeleteTable');
+            for (const action of TABLE_DATA_VERBS) {
+                expect(chunk, `${label} missing ${action}`).toContain(action);
+            }
+            expect(chunk, label).toContain('local.guardrail_table_deletion_resources');
+            // Preview apps use preview tables (pr-* names never match
+            // the prod pattern), so unlike the shared vault this needs
+            // no task-role carve-out — and stays carve-free for quota.
+            expect(chunk, `${label} must stay carve-free`).not.toContain('aws:PrincipalArn');
+            // Plan refresh describes table config; item verbs never
+            // match describes, and none may be added here.
+            expect(chunk, `${label} must not deny describes`).not.toContain('Describe');
+        }
+        const local = tf.slice(tf.indexOf('guardrail_table_deletion_resources'), tf.indexOf(']', tf.indexOf('guardrail_table_deletion_resources')));
+        expect(local).toContain('table/${local.prod_prefix}-table');
+        expect(local).not.toContain('pr-');
     });
 });
 

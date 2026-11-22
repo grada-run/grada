@@ -8,7 +8,7 @@ import { failCommand, failAwsError, trackAwsFailure, failProjectNotInitialized, 
 import { normalizeOptions } from '../utils/args.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 import { isAuthError, handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix, resolveNamespacedProject, withWorkspaceNamespace } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveLogGroup, resolveCwd, readTerraformComputeTarget, guardComputeTarget, readResourceSuffix, resolveNamespacedProject, withWorkspaceNamespace, safeSuffixedName } from '../utils/resolvers.js';
 import { pickNewestRunningTask } from '../utils/ecs.js';
 import { fetchLatestEvents } from './logs.js';
 
@@ -127,7 +127,7 @@ export async function runLambdaDiagnose(input = {}) {
     const namespacedProject = resolveNamespacedProject(projectName, options, options.cwd);
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : `${namespacedProject}${readResourceSuffix(options.cwd)}-fn`;
+        : safeSuffixedName(`${namespacedProject}${readResourceSuffix(options.cwd)}`, '-fn', 64);
     const runSync = options.spawnSyncImpl || spawnSync;
 
     intro(color.bgCyan(color.black(' grada diagnose 🩺 ')));

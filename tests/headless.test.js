@@ -312,6 +312,30 @@ describe('Headless contract (automation-safe)', () => {
         }
     });
 
+    it('warns when the project name outgrows readable downstream names', async () => {
+        const spies = mockConsoleTrio();
+        try {
+            const config = await getTargetDirectory(true, { dir: 'a-very-long-project-name-that-keeps-going' });
+            expect(config.actualProjectName).toBe('a-very-long-project-name-that-keeps-going');
+            const out = spies.logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+            expect(out).toContain('truncate');
+        } finally {
+            spies.restore();
+        }
+    });
+
+    it('stays quiet about name length for short project names', async () => {
+        const spies = mockConsoleTrio();
+        try {
+            const config = await getTargetDirectory(true, { dir: 'myapp' });
+            expect(config.actualProjectName).toBe('myapp');
+            const out = spies.logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+            expect(out).not.toContain('truncate');
+        } finally {
+            spies.restore();
+        }
+    });
+
     it('sanitizes dots, underscores, and casing without changing the target dir', async () => {
         expect(sanitizeProjectName('my.app_v2')).toBe('my-app-v2');
         expect(sanitizeProjectName('  My App__Name.. ')).toBe('my-app-name');

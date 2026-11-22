@@ -499,6 +499,12 @@ ${aliasLine}  topic_arn = aws_sns_topic.alerts.arn
 # (The archive provider constraint lives in backend.tf next to the aws
 # one — a module may declare required_providers only once.)
 
+locals {
+  # Length-safe forwarder name (role + function both cap at 64):
+  # short names render byte-identically, over-cap hash-suffixes.
+  forwarder_safe_name = length("${namePrefix}-alerts-forwarder") > 64 ? "\${substr(local.app_name, 0, 64 - 1 - 5 - 17)}-\${substr(md5(local.app_name), 0, 5)}-alerts-forwarder" : "${namePrefix}-alerts-forwarder"
+}
+
 variable "alerts_webhook_url" {
   description = "Incoming chat webhook URL for alarm notifications. Export TF_VAR_alerts_webhook_url before apply — never commit the URL to git."
   type        = string
@@ -518,7 +524,7 @@ ${buildForwarderJs()}    EOT
 }
 
 resource "aws_iam_role" "forwarder" {
-  name = "${namePrefix}-alerts-forwarder"
+  name = local.forwarder_safe_name
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -537,7 +543,7 @@ resource "aws_iam_role_policy_attachment" "forwarder_logs" {
 }
 
 resource "aws_lambda_function" "forwarder" {
-${aliasLine}  function_name    = "${namePrefix}-alerts-forwarder"
+${aliasLine}  function_name    = local.forwarder_safe_name
   role             = aws_iam_role.forwarder.arn
   runtime          = "nodejs22.x"
   handler          = "index.handler"

@@ -60,6 +60,7 @@ locals {
   tg_safe_name             = length("${local.app_name}-tg") > 32 ? "${substr(local.app_name, 0, 32 - 1 - 5 - 3)}-${substr(md5(local.app_name), 0, 5)}-tg" : "${local.app_name}-tg"
   task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 10)}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"
   execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 16)}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"
+  exec_policy_safe_name    = length("${local.app_name}-ecs-exec-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 16)}-${substr(md5(local.app_name), 0, 5)}-ecs-exec-policy" : "${local.app_name}-ecs-exec-policy"
 }
 
 # --- CloudWatch Logs ---
@@ -125,7 +126,7 @@ resource "aws_iam_role" "task_role" {
 # --- IAM: ECS Exec (SSM) permissions for the task role ---
 # Required for `npx grada-run exec` — lets Fargate open an SSM session.
 resource "aws_iam_role_policy" "ecs_exec" {
-  name = "${local.app_name}-ecs-exec-policy"
+  name = local.exec_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"

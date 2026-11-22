@@ -12,6 +12,7 @@ Generate Terraform, Docker, and GitHub Actions files for your project.
 - Pre-selects prompts from your manifests — database drivers pre-check the database prompt, detected capabilities (Redis, SQS, S3, …) come pre-checked in the addon picker — each showing the evidence that triggered it.
 - Scaffolds addons in the same run, offers the pre-deploy migration gate and scheduled drift detection, and prints a stack topology preview when addons are included.
 - Mints a short random suffix (e.g. `-a1b2c3`) baked into AWS-wide singleton names, so same-named projects never collide; clones and re-runs reuse it, older trees are unaffected.
+- Warns when the project name passes ~29 chars: CI role names and the state bucket truncate past that point (uniqueness preserved via the suffix), while over-long AWS resource names hash-suffix automatically instead of failing validation.
 - Never silently adopts existing remote state: a fresh project over occupied state asks adopt / rename / wipe (headless fails unless `--adopt-state`).
 - Backs up existing generated files before overwriting, writes AI assistant rules, never overwrites your own `README.md`, and finishes with exact next steps (`apply`, then `git push`).
 

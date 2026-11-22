@@ -24,6 +24,8 @@ env:
   PREVIEW_CLUSTER: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-cluster
   PREVIEW_SERVICE: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-service
   PREVIEW_TASK_FAMILY: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-task
+  PREVIEW_WORKER_SERVICE: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-worker-service
+  PREVIEW_WORKER_TASK_FAMILY: {{PROJECT_NAME}}-pr-${{ github.event.pull_request.number }}{{RESOURCE_SUFFIX}}-worker-task
 
 permissions:
   id-token: write
@@ -165,6 +167,66 @@ jobs:
             --region ${{ env.AWS_REGION }})
           if [ "$PRIMARY_TD" != "${{ steps.register-preview-task-def.outputs.task-arn }}" ]; then
             echo "Preview rollout of ${{ steps.register-preview-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
+            exit 1
+          fi
+
+      # The worker ships the same static :pr-N image as web, so it gets
+      # the same digest-pinned treatment — otherwise it would run the
+      # first push's code forever while web moves on. Skipped on
+      # workerless projects (deploy-workflow guard).
+      - name: Register preview worker task definition revision
+        id: register-preview-worker-task-def
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=${{ env.WORKSPACE }} \
+            --query 'imageDetails[0].imageDigest' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${DIGEST}
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.PREVIEW_WORKER_TASK_FAMILY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' \
+            --output json)
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
+            --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --region ${{ env.AWS_REGION }} \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task-arn=$NEW_TASK_ARN" >> $GITHUB_OUTPUT
+
+      - name: Force preview worker deployment
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.PREVIEW_CLUSTER }} \
+            --service ${{ env.PREVIEW_WORKER_SERVICE }} \
+            --task-definition ${{ steps.register-preview-worker-task-def.outputs.task-arn }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for preview worker rollout
+        if: hashFiles('terraform/worker.tf') != '' && steps.aws-creds.outcome == 'success'
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.PREVIEW_CLUSTER }} \
+            --services ${{ env.PREVIEW_WORKER_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          PRIMARY_TD=$(aws ecs describe-services \
+            --cluster ${{ env.PREVIEW_CLUSTER }} \
+            --services ${{ env.PREVIEW_WORKER_SERVICE }} \
+            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          if [ "$PRIMARY_TD" != "${{ steps.register-preview-worker-task-def.outputs.task-arn }}" ]; then
+            echo "Preview worker rollout of ${{ steps.register-preview-worker-task-def.outputs.task-arn }} did not stick (PRIMARY runs $PRIMARY_TD) — the deployment failed or rolled back." >&2
             exit 1
           fi
 

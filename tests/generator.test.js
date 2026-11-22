@@ -306,7 +306,8 @@ describe('database env vars render as bare HCL references', () => {
         expect(mainTf).not.toContain('"${aws_db_instance.postgres.db_name}"');
 
         const databaseTf = await fs.readFile(path.join(dbDir, 'terraform', 'database.tf'), 'utf-8');
-        expect(databaseTf).toContain('db_name  = replace(local.app_name, "-", "_")');
+        expect(databaseTf).toContain('db_name  = local.db_name_safe_name');
+        expect(databaseTf).toContain('db_name_base            = replace(local.app_name, "-", "_")');
         expect(databaseTf).not.toContain('replace("${local.app_name}"');
     });
 });
@@ -375,7 +376,8 @@ describe('multi-engine database generation', () => {
         expect(mainTf).toContain('{ "name" : "DB_ENGINE", "value" : "mysql" }');
         expect(mainTf).toContain('{ "name" : "DB_HOST", "value" : aws_db_instance.postgres.address }');
         // RDS MySQL db_name is alphanumeric-only: dashes are stripped, not underscored.
-        expect(databaseTf).toContain('db_name  = replace(local.app_name, "-", "")');
+        expect(databaseTf).toContain('db_name  = local.db_name_safe_name');
+        expect(databaseTf).toContain('db_name_base            = replace(local.app_name, "-", "")');
         expect(databaseTf).not.toContain('replace(local.app_name, "-", "_")');
     });
 
@@ -398,7 +400,8 @@ describe('multi-engine database generation', () => {
         expect(mainTf).toContain('{ "name" : "DB_ENGINE", "value" : "aurora-postgresql" }');
         expect(mainTf).toContain('aws_rds_cluster.postgres.master_user_secret[0].secret_arn');
         // Aurora database_name is alphanumeric-only: dashes are stripped, not underscored.
-        expect(databaseTf).toContain('database_name   = replace(local.app_name, "-", "")');
+        expect(databaseTf).toContain('database_name   = local.database_name_safe_name');
+        expect(databaseTf).toContain('database_name_base      = replace(local.app_name, "-", "")');
         expect(databaseTf).not.toContain('replace(local.app_name, "-", "_")');
     });
 });
@@ -1124,6 +1127,21 @@ describe('Lambda generator helpers', () => {
         }
     });
 
+    it('convertDatabaseTfForLambda strips the policy safe-name local with the policy', async () => {
+        for (const [tpl, survivor] of [['database.tf', 'identifier_safe_name'], ['database-mysql.tf', 'identifier_safe_name'], ['database-aurora-postgresql.tf', 'cluster_safe_name']]) {
+            const content = await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', tpl), 'utf-8');
+            const converted = convertDatabaseTfForLambda(content);
+            expect(converted, tpl).not.toContain('secret_policy_safe_name');
+            // The surviving locals stay intact.
+            expect(converted, tpl).toContain(survivor);
+        }
+        // The stripped line was the longest key: survivors re-pad to the
+        // new longest or rendered lambda trees fail fmt -check.
+        const mysql = convertDatabaseTfForLambda(await fs.readFile(path.join(process.cwd(), 'templates', 'terraform', 'database-mysql.tf'), 'utf-8'));
+        const equals = mysql.split('\n').filter((line) => /safe_name\s*=|db_name_base\s*=/.test(line)).map((line) => line.indexOf('='));
+        expect(new Set(equals).size).toBe(1);
+    });
+
     it('addRandomProvider is idempotent and ignores foreign backends', () => {
         const backend = 'terraform {\n  required_providers {\n    aws = {}\n    tls = {\n      source  = "hashicorp/tls"\n      version = "~> 4.0"\n    }\n  }\n}\n';
         const once = addRandomProvider(backend);
@@ -1646,13 +1664,27 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(content).toMatch(/parameter_group_name\s*=\s*aws_db_parameter_group\.ssl\.name/);
     });
 
-    // Aurora floats its engine version by design, and a cluster parameter
-    // group family must match it exactly — forcing a family would pin the
-    // engine by side effect. Deferred until the engine-version decision.
-    it('aurora documents why it carries no SSL parameter group yet', async () => {
+    // Aurora floats its engine version by design, so the cluster
+    // parameter group family is derived from the resolved regional
+    // default at plan time — no pin, no mismatch, ever.
+    it('aurora enforces TLS via a version-derived cluster parameter group', async () => {
         const content = await readTf('database-aurora-postgresql.tf');
-        expect(content).not.toContain('aws_rds_cluster_parameter_group');
-        expect(content).toContain('engine-version decision');
+        expect(content).toContain('data "aws_rds_engine_version" "default"');
+        expect(content).toMatch(/engine\s*=\s*"aurora-postgresql"/);
+        expect(content).toMatch(/default_only\s*=\s*true/);
+        // latest pins down the multi-major default set (15/16/17
+        // defaults coexist); without it the lookup errors out.
+        expect(content).toMatch(/latest\s*=\s*true/);
+        expect(content).toContain('version_actual');
+        expect(content).toContain('resource "aws_rds_cluster_parameter_group" "ssl"');
+        expect(content).toMatch(/family\s*=\s*"aurora-postgresql\$\{local\.aurora_major\}"/);
+        expect(content).toMatch(/name\s*=\s*"rds\.force_ssl"/);
+        expect(content).toMatch(/value\s*=\s*"1"/);
+        expect(content).toMatch(/apply_method\s*=\s*"pending-reboot"/);
+        expect(content).toMatch(/db_cluster_parameter_group_name\s*=\s*aws_rds_cluster_parameter_group\.ssl\.name/);
+        // The cluster engine still floats (no pinned minor).
+        expect(content).not.toMatch(/^\s*engine_version\s*=\s*"/m);
+        expect(content).toContain('engine_version     = aws_rds_cluster.postgres.engine_version');
     });
 
     it('storage addon versions the bucket and expires old versions', async () => {
@@ -1716,6 +1748,28 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(content).not.toContain('substr("${local.app_name}-alb", 0, 32)');
         expect(content).not.toContain('substr("${local.app_name}-tg", 0, 32)');
     });
+
+    // Round two: queues, config sets, policies, function and database
+    // identifiers get the same conditional hash-suffix; short names
+    // render byte-identically (mirrors safeSuffixedName).
+    it.each([
+        ['addons/sqs.tf', ['queue_safe_name', 'dlq_safe_name', 'queue_policy_safe_name']],
+        ['addons/ses.tf', ['config_set_safe_name', 'send_policy_safe_name']],
+        ['main.tf', ['exec_policy_safe_name']],
+        ['main-lambda.tf', ['fn_safe_name', 'secrets_policy_safe_name']],
+        ['addons/cron.tf', ['scheduler_policy_safe_name']],
+        ['addons/cron-lambda.tf', ['scheduler_policy_safe_name']],
+        ['database.tf', ['identifier_safe_name', 'db_name_safe_name', 'secret_policy_safe_name']],
+        ['database-mysql.tf', ['identifier_safe_name', 'db_name_safe_name', 'secret_policy_safe_name']],
+        ['database-aurora-postgresql.tf', ['cluster_safe_name', 'instance_safe_name', 'database_name_safe_name', 'secret_policy_safe_name']],
+    ])('%s conditionalizes %s', async (file, locals) => {
+        const content = await readTf(...file.split('/'));
+        for (const local of locals) {
+            expect(content, local).toMatch(new RegExp(`${local}\\s*=\\s*length\\(`));
+            expect(content, local).toMatch(new RegExp(`=\\s*local\\.${local}`));
+        }
+        expect(content).toContain('md5(');
+    });
 });
 
 describe('oidc.tf dual-role shape', () => {
@@ -1753,9 +1807,11 @@ describe('oidc.tf dual-role shape', () => {
             'ecr:BatchDeleteImage',
             'lambda:UpdateFunctionCode', 'lambda:DeleteFunction',
             'sqs:PurgeQueue', 'sqs:DeleteQueue',
-            'rds:DeleteDBInstance', 'rds:ModifyDBInstance', 'rds:ModifyDBSnapshotAttribute',
+            'rds:DeleteDBInstance', 'rds:ModifyDBInstance', 'rds:Modify*SnapshotAttribute',
             'rds:DeleteDBCluster', 'rds:ModifyDBCluster',
-            'dynamodb:DeleteTable',
+            'rds:Stop*', 'rds:Reboot*', 'rds:Start*', 'rds:Restore*',
+            'rds:Copy*', 'rds:StartExportTask',
+            'dynamodb:DeleteTable', 'dynamodb:*Item', 'dynamodb:Query', 'dynamodb:Scan',
         ]) {
             expect(raw, action).toContain(action);
         }

@@ -25,6 +25,12 @@ function resolveActualProjectName(rawName) {
     if (actualProjectName !== String(rawName ?? '').trim()) {
         console.log(color.dim(`Project name sanitized to "${actualProjectName}" for AWS resource compatibility.`));
     }
+    // Downstream truncation is silent (CI role heads keep ~29 chars,
+    // the state bucket ~42) with uniqueness preserved via the
+    // resource suffix — say so once at decision time instead.
+    if (actualProjectName.length > 29) {
+        console.log(color.yellow(`⚠️  "${actualProjectName}" is ${actualProjectName.length} chars: CI role names truncate to the first ~29 and the state bucket to the first ~42 (uniqueness preserved via the suffix). Shorter names stay fully readable.`));
+    }
     return actualProjectName;
 }
 

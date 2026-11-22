@@ -332,9 +332,9 @@ export function resolveLogGroup(options = {}, cwd = process.cwd()) {
     const projectName = resolveProjectName(opts, base);
     const suffixed = `${projectName}${readResourceSuffix(base)}`;
     // Lambda functions log to /aws/lambda/<fn> (see main-lambda.tf), where
-    // the function name is `<app>-fn`.
+    // the function name is `<app>-fn`, hash-suffixed past 64 chars.
     if (readTerraformComputeTarget(base) === 'lambda') {
-        return `/aws/lambda/${suffixed}-fn`;
+        return `/aws/lambda/${safeSuffixedName(suffixed, '-fn', 64)}`;
     }
     return `/ecs/${suffixed}`;
 }

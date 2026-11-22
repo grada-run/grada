@@ -619,7 +619,7 @@ describe('queue:sqs generated terraform', () => {
         expect(rendered).toContain('deadLetterTargetArn = aws_sqs_queue.dlq.arn');
         expect(rendered).toContain('maxReceiveCount     = 3');
         expect(rendered).toContain('resource "aws_iam_role_policy" "queue_sqs_access"');
-        expect(rendered).toContain('name = "${local.app_name}-queue-sqs-access"');
+        expect(rendered).toContain('name = local.queue_policy_safe_name');
         expect(rendered).toContain('role = aws_iam_role.task_role.id');
         expect(rendered).toContain('"sqs:SendMessage"');
         expect(rendered).not.toContain('{{WORKER_AUTOSCALING_BLOCK}}');

@@ -19,21 +19,54 @@ resource "aws_security_group" "rds" {
   }
 }
 
-# 2b. No SSL parameter group yet: this template floats its engine
-# version by design, and a cluster parameter group family must match
-# it exactly — forcing a family would pin the engine by side effect.
-# Deferred until the engine-version decision; the instance engines
-# already enforce TLS via their own groups.
+# 2b. TLS enforcement: the cluster floats its engine version by
+# design, so resolve the regional default at plan time and derive
+# the matching family — no pin, no mismatch, ever. (default_only
+# spans every major's default, so latest pins the lookup down to
+# one; if AWS ever defaults new clusters elsewhere, the family
+# mismatch fails loud at apply instead of enforcing silently
+# wrong.) Pending reboot like the instance groups.
+data "aws_rds_engine_version" "default" {
+  engine       = "aurora-postgresql"
+  default_only = true
+  latest       = true
+}
+
+locals {
+  aurora_major = split(".", data.aws_rds_engine_version.default.version_actual)[0]
+
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix instead of failing validation (identifiers and
+  # database names cap at 63, policies at 128). Mirrors
+  # safeSuffixedName in resolvers.js.
+  cluster_safe_name       = length("${local.app_name}-db-cluster") > 63 ? "${substr(local.app_name, 0, 63 - 1 - 5 - 11)}-${substr(md5(local.app_name), 0, 5)}-db-cluster" : "${local.app_name}-db-cluster"
+  instance_safe_name      = length("${local.app_name}-db-instance-1") > 63 ? "${substr(local.app_name, 0, 63 - 1 - 5 - 14)}-${substr(md5(local.app_name), 0, 5)}-db-instance-1" : "${local.app_name}-db-instance-1"
+  database_name_base      = replace(local.app_name, "-", "")
+  database_name_safe_name = length(local.database_name_base) > 63 ? "${substr(local.database_name_base, 0, 58)}${substr(md5(local.database_name_base), 0, 5)}" : local.database_name_base
+  secret_policy_safe_name = length("${local.app_name}-rds-secret-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "${local.app_name}-rds-secret-policy"
+}
+
+resource "aws_rds_cluster_parameter_group" "ssl" {
+  name   = "${local.app_name}-aurorapg${local.aurora_major}"
+  family = "aurora-postgresql${local.aurora_major}"
+
+  parameter {
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+}
+
 # 3. The Aurora PostgreSQL Serverless v2 Cluster (scale-to-zero)
 resource "aws_rds_cluster" "postgres" {
-  cluster_identifier = "${local.app_name}-db-cluster"
+  cluster_identifier = local.cluster_safe_name
   engine             = "aurora-postgresql"
 
   # engine_version is intentionally omitted: AWS retires Aurora minor versions
   # (e.g. 16.4 in us-east-2), so new clusters take the regional default.
   # Strip dashes for the database name: Aurora database_name must begin with a
   # letter and contain only alphanumeric characters (e.g. my-project -> myproject)
-  database_name   = replace(local.app_name, "-", "")
+  database_name   = local.database_name_safe_name
   master_username = "dbadmin"
 
   # AWS automatically creates and manages the secret in Secrets Manager!
@@ -41,6 +74,10 @@ resource "aws_rds_cluster" "postgres" {
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
+
+  # TLS enforcement (see the parameter group above). In-place update,
+  # never a replacement.
+  db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.ssl.name
 
   skip_final_snapshot = true
   storage_encrypted   = true
@@ -78,7 +115,7 @@ variable "grada_allow_data_loss" {
 }
 
 resource "aws_rds_cluster_instance" "postgres" {
-  identifier         = "${local.app_name}-db-instance-1"
+  identifier         = local.instance_safe_name
   cluster_identifier = aws_rds_cluster.postgres.id
   instance_class     = "db.serverless"
   engine             = aws_rds_cluster.postgres.engine
@@ -89,7 +126,7 @@ resource "aws_rds_cluster_instance" "postgres" {
 
 # 4. IAM Permission for RDS Master Password Secret
 resource "aws_iam_role_policy" "rds_secret_access" {
-  name = "${local.app_name}-rds-secret-policy"
+  name = local.secret_policy_safe_name
   role = aws_iam_role.execution_role.id
   policy = jsonencode({
     Version = "2012-10-17"

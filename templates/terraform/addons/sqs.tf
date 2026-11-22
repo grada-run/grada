@@ -5,16 +5,25 @@
 # Billing: no fixed hourly instance cost (usage-billed). The first 1M SQS
 # requests/mo are free, then $0.40 per million requests.
 
+locals {
+  # Length-safe names: short names render byte-identically; over-cap
+  # names hash-suffix instead of failing validation (queues cap at
+  # 80, policies at 128). Mirrors safeSuffixedName in resolvers.js.
+  queue_safe_name        = length("${local.app_name}-queue") > 80 ? "${substr(local.app_name, 0, 80 - 1 - 5 - 6)}-${substr(md5(local.app_name), 0, 5)}-queue" : "${local.app_name}-queue"
+  dlq_safe_name          = length("${local.app_name}-dlq") > 80 ? "${substr(local.app_name, 0, 80 - 1 - 5 - 4)}-${substr(md5(local.app_name), 0, 5)}-dlq" : "${local.app_name}-dlq"
+  queue_policy_safe_name = length("${local.app_name}-queue-sqs-access") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 17)}-${substr(md5(local.app_name), 0, 5)}-queue-sqs-access" : "${local.app_name}-queue-sqs-access"
+}
+
 # --- Dead-Letter Queue ---
 resource "aws_sqs_queue" "dlq" {
-  name                      = "${local.app_name}-dlq"
+  name                      = local.dlq_safe_name
   message_retention_seconds = 1209600
   sqs_managed_sse_enabled   = true
 }
 
 # --- Primary Queue ---
 resource "aws_sqs_queue" "main" {
-  name                       = "${local.app_name}-queue"
+  name                       = local.queue_safe_name
   visibility_timeout_seconds = 30
   message_retention_seconds  = 345600
   receive_wait_time_seconds  = 20
@@ -27,7 +36,7 @@ resource "aws_sqs_queue" "main" {
 
 # --- Least-Privilege IAM Policy for the ECS Task Role ---
 resource "aws_iam_role_policy" "queue_sqs_access" {
-  name = "${local.app_name}-queue-sqs-access"
+  name = local.queue_policy_safe_name
   role = aws_iam_role.task_role.id
   policy = jsonencode({
     Version = "2012-10-17"
