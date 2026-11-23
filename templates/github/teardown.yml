@@ -69,14 +69,26 @@ jobs:
       - name: Lift preview deletion protection
         if: steps.aws-creds.outcome == 'success'
         run: |
+          # Mirror of safeSuffixedName (resolvers.js): Terraform hashes
+          # over-cap names, so plain reconstruction misses on long names
+          # (the describe-miss would skip the lift and fail the destroy).
+          safe_name() {
+            local base="$1" suffix="$2" cap="$3" full="${1}${2}"
+            if [ "${#full}" -le "$cap" ]; then printf '%s' "$full"; return; fi
+            local stemlen=$((cap - 1 - 5 - ${#suffix}))
+            local stem=${base:0:$stemlen}
+            while [[ "$stem" == *- ]]; do stem=${stem%-}; done
+            local hash=$(printf '%s' "$base" | md5sum | cut -c1-5)
+            printf '%s-%s%s' "$stem" "$hash" "$suffix"
+          }
           APP_NAME="{{PROJECT_NAME}}-${{ env.WORKSPACE }}{{RESOURCE_SUFFIX}}"
-          DB_ID="$APP_NAME-db"
+          DB_ID=$(safe_name "$APP_NAME" "-db" 63)
           if aws rds describe-db-instances --db-instance-identifier "$DB_ID" --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
             echo "Lifting deletion protection on $DB_ID..."
             aws rds modify-db-instance --db-instance-identifier "$DB_ID" --no-deletion-protection --apply-immediately --region ${{ env.AWS_REGION }}
             aws rds wait db-instance-available --db-instance-identifier "$DB_ID" --region ${{ env.AWS_REGION }}
           fi
-          CLUSTER_ID="$APP_NAME-db-cluster"
+          CLUSTER_ID=$(safe_name "$APP_NAME" "-db-cluster" 63)
           if aws rds describe-db-clusters --db-cluster-identifier "$CLUSTER_ID" --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
             echo "Lifting deletion protection on $CLUSTER_ID..."
             aws rds modify-db-cluster --db-cluster-identifier "$CLUSTER_ID" --no-deletion-protection --apply-immediately --region ${{ env.AWS_REGION }}

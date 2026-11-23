@@ -14,8 +14,8 @@ locals {
   # Length-safe names: short names render byte-identically; over-cap
   # names hash-suffix instead of failing validation (config sets
   # cap at 64, policies at 128). Mirrors safeSuffixedName.
-  config_set_safe_name  = length("${local.app_name}-ses-events") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 11)}-${substr(md5(local.app_name), 0, 5)}-ses-events" : "${local.app_name}-ses-events"
-  send_policy_safe_name = length("${local.app_name}-ses-send") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 9)}-${substr(md5(local.app_name), 0, 5)}-ses-send" : "${local.app_name}-ses-send"
+  config_set_safe_name  = length("${local.app_name}-ses-events") > 64 ? "${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 11), "-")}-${substr(md5(local.app_name), 0, 5)}-ses-events" : "${local.app_name}-ses-events"
+  send_policy_safe_name = length("${local.app_name}-ses-send") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 9), "-")}-${substr(md5(local.app_name), 0, 5)}-ses-send" : "${local.app_name}-ses-send"
 }
 resource "aws_ses_domain_identity" "ses" {
   count  = terraform.workspace == "default" ? 1 : 0

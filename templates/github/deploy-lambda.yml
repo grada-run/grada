@@ -15,7 +15,7 @@ concurrency:
 env:
   AWS_REGION: {{REGION}}
   ECR_REPOSITORY: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-repo
-  LAMBDA_FUNCTION: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-fn
+  APP_NAME: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}
   CF_COMMENT: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}-cdn
 
 permissions:
@@ -153,13 +153,26 @@ jobs:
       # `latest` is never the deploy artifact of record).
       - name: Deploy image to AWS Lambda
         run: |
+          # Mirror of safeSuffixedName (resolvers.js): Terraform hashes
+          # over-cap function names, so plain reconstruction would target
+          # a function that doesn't exist.
+          safe_name() {
+            local base="$1" suffix="$2" cap="$3" full="${1}${2}"
+            if [ "${#full}" -le "$cap" ]; then printf '%s' "$full"; return; fi
+            local stemlen=$((cap - 1 - 5 - ${#suffix}))
+            local stem=${base:0:$stemlen}
+            while [[ "$stem" == *- ]]; do stem=${stem%-}; done
+            local hash=$(printf '%s' "$base" | md5sum | cut -c1-5)
+            printf '%s-%s%s' "$stem" "$hash" "$suffix"
+          }
           IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA::7}
+          LAMBDA_FUNCTION=$(safe_name "${{ env.APP_NAME }}" "-fn" 64)
           aws lambda update-function-code \
-            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --function-name "$LAMBDA_FUNCTION" \
             --image-uri "$IMAGE_URI" \
             --region ${{ env.AWS_REGION }}
           aws lambda wait function-updated \
-            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --function-name "$LAMBDA_FUNCTION" \
             --region ${{ env.AWS_REGION }}
 
       # --- 9. CACHE INVALIDATION ---

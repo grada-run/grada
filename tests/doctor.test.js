@@ -867,6 +867,61 @@ describe('S27: project-aware doctor checks (R2)', () => {
         expect(check.hint()).not.toContain('setup');
     });
 
+    it('warns when the project name exceeds the confinement bound', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "a-very-long-project-name-here${local.env_suffix}"\n}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/confinement bound/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_name_confinement_bound: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes short names on the default workspace', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_name_confinement_bound: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('warns on over-long manual workspaces even with short projects', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.mkdirSync(path.join(tmpDir, '.terraform'), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, '.terraform', 'environment'), 'a-manually-created-workspace-name-that-is-far-too-long\n');
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/workspace/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_name_confinement_bound: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
     it('warns on list trusts containing an open repo:* entry', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

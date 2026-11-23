@@ -7,7 +7,7 @@ import { checkDependency } from '../utils/system.js';
 import { checkAwsCredentials, TROUBLESHOOTING_URL } from '../utils/aws.js';
 import { readLastRunMarker, isInterruptedMarker } from '../utils/terraform.js';
 import { refuseUnknownFlags } from '../utils/command.js';
-import { readTerraformOidcTrust } from '../utils/resolvers.js';
+import { readTerraformOidcTrust, readTerraformProjectName, readResourceSuffix, resolveWorkspaceSuffix, MAX_CONFINED_PROJECT_LENGTH, MAX_CONFINED_APP_LENGTH, exceedsConfinementBound } from '../utils/resolvers.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
 import { trackEvent, flushTelemetry, detectCiProvider, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
@@ -35,6 +35,7 @@ export const PROJECT_CHECKS = [
     { id: 'oidc_trust_scope', label: 'OIDC trust scope', scope: 'project', severity: 'warn', run: checkOidcTrustScope, hint: () => 'Re-scope with: npx grada-run init --github-repo owner/name (or edit the sub claim in terraform/oidc.tf).' },
     { id: 'oidc_immutable_claims', label: 'OIDC trust formats', scope: 'project', severity: 'warn', run: checkOidcImmutableClaims, hint: () => 'Re-run npx grada-run init to upgrade the trust, or add a repo:<owner>@*/<name>@*:* entry to terraform/oidc.tf.' },
     { id: 'origin_restriction', label: 'ALB origin restriction', scope: 'project', severity: 'warn', run: checkOriginRestriction, hint: () => 'Re-run npx grada-run init to add the CloudFront origin-secret wiring, then apply.' },
+    { id: 'name_confinement_bound', label: 'Project name confinement bound', scope: 'project', severity: 'warn', run: checkNameConfinementBound, hint: () => 'Shorten the project name (re-scaffold into a fresh tree and migrate state) or switch to a shorter workspace; the residual and its bounds are documented in the CI/CD pipeline guide.' },
 ];
 
 const INSTALL_HINTS = {
@@ -213,6 +214,26 @@ function workspaceSuffix(lockKey) {
 // rule 403ing hits without the header). Warning-grade: the URL still
 // prints, but on unwired trees it misleads. Non-ECS targets have no
 // ALB — skip.
+// Project check: names past the confinement bound hash-suffix their
+// derived AWS resources, which prefix-anchored preview guardrails
+// stop matching. Init refuses such names on fresh scaffolds, so a
+// hit here means a grandfathered tree (or a hand-made over-long
+// workspace) — warn with the remediation path, never fail.
+function checkNameConfinementBound({ cwd }) {
+    const project = readTerraformProjectName(cwd);
+    if (!project) return { ok: true, skipped: 'no project name found' };
+    const appLen = project.length + resolveWorkspaceSuffix({}, cwd).length + (readResourceSuffix(cwd) || '').length;
+    if (!exceedsConfinementBound(project) && appLen <= MAX_CONFINED_APP_LENGTH) return { ok: true };
+    const reasons = [];
+    if (exceedsConfinementBound(project)) {
+        reasons.push(`project name is ${project.length} chars (bound: ${MAX_CONFINED_PROJECT_LENGTH}): derived AWS names hash-suffix past what the preview guardrails match`);
+    }
+    if (appLen > MAX_CONFINED_APP_LENGTH) {
+        reasons.push(`current app name resolves to ${appLen} chars (bound: ${MAX_CONFINED_APP_LENGTH}): the active workspace lengthens it past confinement`);
+    }
+    return { ok: false, detailLines: reasons };
+}
+
 function checkOriginRestriction({ cwd }) {
     let mainTf;
     try {

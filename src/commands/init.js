@@ -42,7 +42,7 @@ import { getTargetDirectory, getProjectConfig, promptWorkerCommand, promptGitHub
 import { resolveDjangoWsgi, handleRailsCI } from '../utils/frameworks.js';
 import { parseDockerCompose, selectComposeWebService } from '../utils/dockerCompose.js';
 import { getBaseRules, getCursorRules, injectManagedBlock } from '../utils/ai-rules.js';
-import { readFileSafe, COMPUTE_TARGETS, resolveHeadless, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust, guardComputeTarget } from '../utils/resolvers.js';
+import { readFileSafe, COMPUTE_TARGETS, resolveHeadless, resolveInitSuffix, readTerraformProjectName, readTerraformOidcTrust, guardComputeTarget, MAX_CONFINED_PROJECT_LENGTH, exceedsConfinementBound, safeSuffixedName } from '../utils/resolvers.js';
 import { readGitHubRepoFromRemote, isValidGitHubRepoSlug } from '../utils/git.js';
 import { parseDomainTf } from '../utils/domains.js';
 import { PLACEHOLDER_ACCOUNT_ID } from '../utils/reconcile.js';
@@ -185,6 +185,15 @@ export function buildDeployRoleName(projectName, suffix) {
 
 export function buildPreviewRoleName(projectName, suffix) {
     return buildCiRoleName(projectName, suffix, 'preview');
+}
+
+// Gate snapshot scope: the database identifier the pre-deploy gate
+// snapshots, hashed exactly like identifier_safe_name /
+// cluster_safe_name so gate snapshots match gc's pre-deploy patterns
+// (and the guardrail snapshot patterns) on all name lengths.
+export function buildGateDbIdentifier(projectName, suffix, isCluster) {
+    const base = `${projectName ?? ''}${suffix ?? ''}`;
+    return isCluster ? safeSuffixedName(base, '-db-cluster', 63) : safeSuffixedName(base, '-db', 63);
 }
 
 export function buildRoleArn(accountId, roleName) {
@@ -544,7 +553,7 @@ async function wireInitWorkflows({ targetDir, projectName, resourceSuffix, regio
         // Scope the gate's snapshot id to the database (aurora
         // takes the cluster prefix) so guardrails and gc can name it.
         const gateDbRefs = resolveDbEngineRefs(dbEngine);
-        const gateDbIdentifier = `${projectName}${resourceSuffix}-db${gateDbRefs.isCluster ? '-cluster' : ''}`;
+        const gateDbIdentifier = buildGateDbIdentifier(projectName, resourceSuffix, gateDbRefs.isCluster);
         const gated = workflowContent ? injectMigrationGate(workflowContent, { cmd: migrationCmd, cliVersion: CLI_VERSION, dbIdentifier: gateDbIdentifier }) : null;
         if (gated) {
             atomicWriteFileSync(deployYmlPath, gated);
@@ -1350,6 +1359,36 @@ async function resolveInitWorkdir({ options, isHeadless, headlessOptions, explic
         console.log(color.yellow(`⚠️  Directory "${path.basename(dirConfig.targetDir)}" doesn't match this tree's project "${sanitizedTreeName}" — keeping "${sanitizedTreeName}" so re-init doesn't fork your infrastructure. Pass --project-name <name> to rename explicitly.`));
         trackEvent('init_project_name_reused', { projectName: sanitizedTreeName });
         dirConfig.actualProjectName = sanitizedTreeName;
+    }
+    // Fresh and renamed trees collapse consecutive hyphens: RDS
+    // identifiers forbid `--`, and collapsing at mint time keeps every
+    // derived name valid. Grandfathered trees keep their exact name
+    // (collapsing there would fork live infrastructure).
+    if (dirConfig.actualProjectName !== sanitizedTreeName) {
+        const collapsed = dirConfig.actualProjectName.replace(/-{2,}/g, '-');
+        if (collapsed !== dirConfig.actualProjectName) {
+            console.log(color.dim(`Project name collapsed to "${collapsed}" (consecutive hyphens are invalid in RDS identifiers).`));
+            dirConfig.actualProjectName = collapsed;
+        }
+    }
+    // Confinement bound for NEW names only: past it, derived AWS names
+    // hash-suffix and prefix-anchored preview guardrails stop matching
+    // them. Grandfathered trees (existing name kept) are never refused
+    // here — doctor flags them instead. Explicit renames count as new
+    // names: they provision a fresh stack.
+    if (dirConfig.actualProjectName !== sanitizedTreeName && exceedsConfinementBound(dirConfig.actualProjectName)) {
+        return {
+            refusal: await failCommand({
+                message: `\n✖ Project name "${dirConfig.actualProjectName}" is ${dirConfig.actualProjectName.length} chars — past the ${MAX_CONFINED_PROJECT_LENGTH}-char confinement bound. Longer names hash-suffix their derived AWS resource names, which the prefix-anchored preview guardrails can no longer match.`,
+                hint: `  Shorten to ${MAX_CONFINED_PROJECT_LENGTH} chars or fewer and re-run (existing long-name trees keep deploying; grada doctor flags them). Bound rationale: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/cicd-pipeline.md\n`,
+                useErrorStream: true,
+                event: 'cli-error',
+                telemetry: { step: 'project_name', error_code: 'PROJECT_NAME_OVER_CONFINEMENT_BOUND' },
+                errorCode: 'PROJECT_NAME_OVER_CONFINEMENT_BOUND',
+                reason: 'project-name-over-confinement-bound',
+                exitCode: 1,
+            }),
+        };
     }
     return { dirConfig };
 }

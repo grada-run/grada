@@ -23,6 +23,14 @@ Trees scaffolded before TLS enforcement pick it up on the next `apply`, but enfo
 2. `npx grada-run apply` in your maintenance window, then reboot (`aws rds reboot-db-instance`, or `aws rds reboot-db-cluster` for Aurora) if the window hasn't.
 3. Verify: connect with `PGSSLMODE=require` (PostgreSQL) and confirm a plaintext attempt is refused.
 
+## Aurora major-version rollovers
+
+The Aurora TLS group derives its family from the regional default engine at plan time, while existing clusters stay on their major. When AWS rolls the default major (years apart), the next `apply` fails loud on the family mismatch instead of enforcing silently wrong — new clusters are unaffected. Recover:
+
+1. Snapshot first: `npx grada-run db backup` (cluster snapshots).
+2. Major-upgrade the cluster in your maintenance window (RDS console or `aws rds modify-db-cluster` with major upgrade enabled), after the usual compat homework — extensions, parameter changes, and a tested rollback snapshot. Major upgrades always need this care; the manual step is inherent, not grada overhead.
+3. Re-apply: the lookup now resolves the new default and the family matches again.
+
 ## Auto-Injected Environment Variables
 
 You do not need to configure database connection strings manually. The generated Terraform automatically creates a secure, random master password in AWS Secrets Manager and injects the following environment variables directly into your running containers:

@@ -115,16 +115,45 @@ export function readTerraformRegion(cwd = process.cwd()) {
 // Length-safe AWS resource name, mirroring the template conditional
 // byte-for-byte: short names render identically; over-cap names take a
 // deterministic md5 stem (never a truncating collision). `cap` is the
-// service limit including suffix. Doubled hyphens at the cut point are
-// left alone — valid in every name pattern here, and trimming would
-// need identical semantics on both sides. Both sides must stay in
+// service limit including suffix. Cut-point hyphens are trimmed from
+// the stem (RDS forbids `--`) — the hash input stays untouched, so
+// non-hyphen cuts render exactly as before. Both sides must stay in
 // sync — the parity tests below pin the shared cases.
 export function safeSuffixedName(base, suffix, cap) {
     const full = `${base}${suffix}`;
     if (full.length <= cap) return full;
     const stemLength = Math.max(cap - 1 - 5 - suffix.length, 1);
-    const stem = base.slice(0, stemLength);
+    const stem = base.slice(0, stemLength).replace(/-+$/, '');
     return `${stem}-${createHash('md5').update(base, 'utf8').digest('hex').slice(0, 5)}${suffix}`;
+}
+
+// Preview-confinement bound: the longest sanitized project name whose
+// worst-case derived names stay plain (unhashed), so prefix-anchored
+// guardrail patterns keep matching. Binding constraint is the
+// scheduler role (64 - 20); worst-case app adds the preview infix
+// (`-pr-` + 7 PR digits = 11) and the 7-char resource suffix, so
+// project <= 64 - 20 - 11 - 7 = 26. New scaffolds past this are
+// refused at init; grandfathered trees are flagged by doctor, never
+// broken. Pinned honest by the parity harness in generator.test.js —
+// if a template grows a longer escape-relevant suffix, recompute.
+export const MAX_CONFINED_PROJECT_LENGTH = 26;
+export const CONFINEMENT_WORST_ENV_SUFFIX_LENGTH = 11;
+export const CONFINEMENT_RESOURCE_SUFFIX_LENGTH = 7;
+// Worst-case app_name the bound admits (project + env + suffix): the
+// scheduler role renders at exactly the 64-char cap here. Doctor
+// evaluates the LIVE tree (real workspace + suffix) against this.
+export const MAX_CONFINED_APP_LENGTH = 44;
+
+export function exceedsConfinementBound(sanitizedProjectName) {
+    return String(sanitizedProjectName ?? '').length > MAX_CONFINED_PROJECT_LENGTH;
+}
+
+// Single home for the Lambda function name (`<app>-fn`, 64-char cap):
+// status, diagnose, gc, rollback, and the log-group resolver all read
+// through here, so the suffix and cap can't drift apart again. Short
+// names render plain; over-cap names hash-suffix like fn_safe_name.
+export function resolveFunctionName(appName) {
+    return safeSuffixedName(String(appName ?? ''), '-fn', 64);
 }
 
 export function resolveRegion(options = {}, cwd = process.cwd()) {
@@ -334,7 +363,7 @@ export function resolveLogGroup(options = {}, cwd = process.cwd()) {
     // Lambda functions log to /aws/lambda/<fn> (see main-lambda.tf), where
     // the function name is `<app>-fn`, hash-suffixed past 64 chars.
     if (readTerraformComputeTarget(base) === 'lambda') {
-        return `/aws/lambda/${safeSuffixedName(suffixed, '-fn', 64)}`;
+        return `/aws/lambda/${resolveFunctionName(suffixed)}`;
     }
     return `/ecs/${suffixed}`;
 }

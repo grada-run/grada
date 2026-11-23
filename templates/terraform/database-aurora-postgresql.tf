@@ -39,11 +39,11 @@ locals {
   # names hash-suffix instead of failing validation (identifiers and
   # database names cap at 63, policies at 128). Mirrors
   # safeSuffixedName in resolvers.js.
-  cluster_safe_name       = length("${local.app_name}-db-cluster") > 63 ? "${substr(local.app_name, 0, 63 - 1 - 5 - 11)}-${substr(md5(local.app_name), 0, 5)}-db-cluster" : "${local.app_name}-db-cluster"
-  instance_safe_name      = length("${local.app_name}-db-instance-1") > 63 ? "${substr(local.app_name, 0, 63 - 1 - 5 - 14)}-${substr(md5(local.app_name), 0, 5)}-db-instance-1" : "${local.app_name}-db-instance-1"
+  cluster_safe_name       = length("${local.app_name}-db-cluster") > 63 ? "${trimsuffix(substr(local.app_name, 0, 63 - 1 - 5 - 11), "-")}-${substr(md5(local.app_name), 0, 5)}-db-cluster" : "${local.app_name}-db-cluster"
+  instance_safe_name      = length("${local.app_name}-db-instance-1") > 63 ? "${trimsuffix(substr(local.app_name, 0, 63 - 1 - 5 - 14), "-")}-${substr(md5(local.app_name), 0, 5)}-db-instance-1" : "${local.app_name}-db-instance-1"
   database_name_base      = replace(local.app_name, "-", "")
   database_name_safe_name = length(local.database_name_base) > 63 ? "${substr(local.database_name_base, 0, 58)}${substr(md5(local.database_name_base), 0, 5)}" : local.database_name_base
-  secret_policy_safe_name = length("${local.app_name}-rds-secret-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 18)}-${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "${local.app_name}-rds-secret-policy"
+  secret_policy_safe_name = length("${local.app_name}-rds-secret-policy") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 18), "-")}-${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "${local.app_name}-rds-secret-policy"
 }
 
 resource "aws_rds_cluster_parameter_group" "ssl" {

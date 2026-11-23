@@ -1,7 +1,7 @@
 import fsSync from 'fs';
 import path from 'path';
 import { withProjectLock } from './file-lock.js';
-import { readResourceSuffix } from './resolvers.js';
+import { readResourceSuffix, safeSuffixedName } from './resolvers.js';
 
 // Auxiliary sleep/wake targets driven through the AWS CLI: EventBridge
 // Scheduler pause/resume and ECS Application Auto Scaling suspend/resume.
@@ -12,11 +12,13 @@ import { readResourceSuffix } from './resolvers.js';
 // instead of adding new npm packages. Every helper degrades to a skip
 // reason; callers warn and continue so sleep/wake never fail on these.
 
-// cron.tf renders `name = "${local.app_name}-cron-<slug>"` inside the
-// schedule block. Resolves the live schedule name for an app prefix, or
-// null when cron isn't configured (or the file was hand-edited past
-// recognition). Scoped to the schedule block: the IAM role/policy above
-// share the `-cron-` prefix, and an unscoped first match resolves
+// cron.tf renders the slug in the `schedule_full_name` local while the
+// schedule block references `schedule_safe_name` (hashed past 64
+// chars). Resolves the live schedule name for an app prefix, or null
+// when cron isn't configured (or the file was hand-edited past
+// recognition). Falls back to the legacy inline `name` for pre-hash
+// trees. Scoped lookups only: the IAM role/policy share the `-cron-`
+// prefix, and an unscoped first match resolves
 // `-cron-scheduler-role` — pausing a schedule that doesn't exist while
 // the real one keeps firing (and Terraform plans ENABLED -> DISABLED).
 export function readCronScheduleName(cwd, appPrefix) {
@@ -26,11 +28,16 @@ export function readCronScheduleName(cwd, appPrefix) {
     } catch {
         return null;
     }
-    const blockStart = content.indexOf('resource "aws_scheduler_schedule"');
-    if (blockStart < 0) return null;
-    const match = /name\s*=\s*"\$\{local\.app_name\}-cron-([A-Za-z0-9-]+)"/.exec(content.slice(blockStart));
-    if (!match) return null;
-    return `${appPrefix}${readResourceSuffix(cwd)}-cron-${match[1]}`;
+    const fullName = /schedule_full_name\s*=\s*"\$\{local\.app_name\}-cron-([A-Za-z0-9-]+)"/.exec(content)?.[1] ?? null;
+    let slug = fullName;
+    if (!slug) {
+        const blockStart = content.indexOf('resource "aws_scheduler_schedule"');
+        if (blockStart < 0) return null;
+        const match = /name\s*=\s*"\$\{local\.app_name\}-cron-([A-Za-z0-9-]+)"/.exec(content.slice(blockStart));
+        if (!match) return null;
+        slug = match[1];
+    }
+    return safeSuffixedName(`${appPrefix}${readResourceSuffix(cwd)}-cron-${slug}`, '', 64);
 }
 
 export function hasCronAddon(cwd) {

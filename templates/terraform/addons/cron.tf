@@ -9,16 +9,19 @@ locals {
   # Length-safe names: short names render byte-identically; over-cap
   # names hash-suffix instead of failing validation. Mirrors
   # safeSuffixedName in resolvers.js.
-  scheduler_role_safe_name   = length("${local.app_name}-cron-scheduler-role") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 20)}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-role" : "${local.app_name}-cron-scheduler-role"
   schedule_full_name         = "${local.app_name}-cron-{{CRON_NAME}}"
-  schedule_safe_name         = length(local.schedule_full_name) > 64 ? "${substr(local.schedule_full_name, 0, 64 - 1 - 5)}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
-  schedule_group_safe_name   = length("${local.app_name}-crons") > 64 ? "${substr(local.app_name, 0, 64 - 1 - 5 - 6)}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
-  scheduler_policy_safe_name = length("${local.app_name}-cron-scheduler-policy") > 128 ? "${substr(local.app_name, 0, 128 - 1 - 5 - 22)}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-policy" : "${local.app_name}-cron-scheduler-policy"
+  schedule_safe_name         = length(local.schedule_full_name) > 64 ? "${trimsuffix(substr(local.schedule_full_name, 0, 64 - 1 - 5), "-")}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
+  schedule_group_safe_name   = length("${local.app_name}-crons") > 64 ? "${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 6), "-")}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
+  scheduler_policy_safe_name = length("${local.app_name}-cron-scheduler-policy") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 22), "-")}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-policy" : "${local.app_name}-cron-scheduler-policy"
 }
 
 # --- IAM Role assumed by EventBridge Scheduler ---
 resource "aws_iam_role" "scheduler_cron_role" {
-  name                 = local.scheduler_role_safe_name
+  # Deliberately unhashed: the preview guardrails carve this exact
+  # principal out of the task-execution deny, and a hashed name would
+  # silently uncarve it. Over-cap names fail the precondition below
+  # at plan time instead of breaking schedules silently.
+  name                 = "${local.app_name}-cron-scheduler-role"
   permissions_boundary = local.preview_boundary_arn
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -32,6 +35,13 @@ resource "aws_iam_role" "scheduler_cron_role" {
       }
     ]
   })
+
+  lifecycle {
+    precondition {
+      condition     = length("${local.app_name}-cron-scheduler-role") <= 64
+      error_message = "Project name is too long: the scheduler role name exceeds the 64-char IAM cap. Shorten the project name (max 26 chars keeps every derived name within caps)."
+    }
+  }
 }
 
 # --- Least-privilege permission to launch the scheduled task ---

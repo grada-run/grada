@@ -164,6 +164,16 @@ describe('formatStateBucketName', () => {
     expect(name.endsWith('-tfstate-123456789012')).toBe(true);
   });
 
+  it('preserves a trailing resource suffix when truncating (no bucket collisions)', () => {
+    const long = `${'b'.repeat(50)}-a1b2c3`;
+    const name = formatStateBucketName(long, '123456789012');
+    expect(name.length).toBeLessThanOrEqual(63);
+    expect(name).toContain('-a1b2c3-tfstate-123456789012');
+    // Two trees sharing a 42-char head but different suffixes land apart.
+    const other = formatStateBucketName(`${'b'.repeat(50)}-d4e5f6`, '123456789012');
+    expect(other).not.toBe(name);
+  });
+
   it('falls back to app for empty names instead of an invalid leading hyphen', () => {
     expect(formatStateBucketName('   ', '123456789012')).toBe('app-tfstate-123456789012');
   });

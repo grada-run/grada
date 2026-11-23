@@ -187,6 +187,8 @@ describe('buildAlertsTf', () => {
         expect(tf).toContain('QueueName = aws_sqs_queue.dlq.name');
         expect(tf).toContain('threshold           = "1"');
         expect(tf).toContain('alarm_actions = [aws_sns_topic.alerts.arn]');
+        // The paged engineer gets the runbook, not just the symptom.
+        expect(tf).toContain('alert-notifications.md#redriving-the-dlq');
     });
 
     it('keeps --threshold on the primary alarm (addon alarms use baked defaults)', () => {
@@ -273,6 +275,7 @@ describe('buildAlertsTf', () => {
         // Short names render byte-identically: the plain form survives
         // as the under-cap branch.
         expect(tf).toContain('"${local.app_name}-alerts-forwarder"');
+        expect(tf).toContain('trimsuffix(substr(');
     });
 
     it('pins the static forwarder to us-east-1 alongside the alarm', () => {

@@ -11,7 +11,7 @@ import { parseCliArgs } from '../src/core/parser.js';
 import { getProjectConfig, getTargetDirectory, sanitizeProjectName } from '../src/utils/prompts.js';
 import { trackEvent } from '../src/core/telemetry.js';
 import { provisionStateBucket } from '../src/utils/aws.js';
-import { mainStack, resolveOidcTrust, renderOidcSubClaim, renderOidcRoleSubs, resolveDefaultBranch, buildDeployRoleName, buildPreviewRoleName, immutableCompanion } from '../src/commands/init.js';
+import { mainStack, resolveOidcTrust, renderOidcSubClaim, renderOidcRoleSubs, resolveDefaultBranch, buildDeployRoleName, buildPreviewRoleName, buildGateDbIdentifier, immutableCompanion } from '../src/commands/init.js';
 
 // Deep-mock the interactive prompt library. The CLI only uses
 // `@clack/prompts` for interactive mode (verified: no `inquirer` or
@@ -307,30 +307,6 @@ describe('Headless contract (automation-safe)', () => {
             expect(exitSpy).not.toHaveBeenCalled();
             const mainTf = await fs.readFile(path.join(tmpDir, 'terraform', 'main.tf'), 'utf-8');
             expect(mainTf).toContain('region = "us-east-2"');
-        } finally {
-            spies.restore();
-        }
-    });
-
-    it('warns when the project name outgrows readable downstream names', async () => {
-        const spies = mockConsoleTrio();
-        try {
-            const config = await getTargetDirectory(true, { dir: 'a-very-long-project-name-that-keeps-going' });
-            expect(config.actualProjectName).toBe('a-very-long-project-name-that-keeps-going');
-            const out = spies.logSpy.mock.calls.map((call) => String(call[0])).join('\n');
-            expect(out).toContain('truncate');
-        } finally {
-            spies.restore();
-        }
-    });
-
-    it('stays quiet about name length for short project names', async () => {
-        const spies = mockConsoleTrio();
-        try {
-            const config = await getTargetDirectory(true, { dir: 'myapp' });
-            expect(config.actualProjectName).toBe('myapp');
-            const out = spies.logSpy.mock.calls.map((call) => String(call[0])).join('\n');
-            expect(out).not.toContain('truncate');
         } finally {
             spies.restore();
         }
@@ -1382,7 +1358,7 @@ describe('Headless: --target lambda', () => {
     let tmpDir;
 
     beforeEach(async () => {
-        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-headless-lambda-'));
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gh-lambda-'));
         process.chdir(tmpDir);
     });
 
@@ -1482,7 +1458,7 @@ describe('Headless: state adoption gate', () => {
 
     beforeEach(async () => {
         vi.clearAllMocks();
-        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-headless-adopt-'));
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gh-adopt-'));
         process.chdir(tmpDir);
     });
 
@@ -1750,6 +1726,94 @@ describe('Headless: OIDC trust scoping', () => {
         expect(exitCalls).toEqual([]);
         expect(await renderedTrust()).toBe('["repo:acme/widgets:ref:refs/heads/main", "repo:acme@*/widgets@*:ref:refs/heads/main"]');
         expect(trustTelemetry()[0][1]).toMatchObject({ mode: 'scoped', source: 'tree' });
+    });
+});
+
+describe('Headless: confinement-bound project cap', () => {
+    let tmpDir;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grada-headless-cap-'));
+        process.chdir(tmpDir);
+    });
+
+    afterEach(async () => {
+        process.chdir(path.dirname(tmpDir));
+        if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('refuses fresh scaffolds past 26 chars without writing', async () => {
+        const long = path.join(tmpDir, 'a-very-long-project-name-here');
+        await fs.mkdir(long, { recursive: true });
+        process.chdir(long);
+        const { result, exitCalls, errorText } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(result).toMatchObject({ ok: false, reason: 'project-name-over-confinement-bound' });
+        expect(exitCalls).toEqual([1]);
+        expect(errorText).toContain('26 chars');
+        expect(errorText).toContain('guardrail');
+        expectNoInteractivePrompts();
+        await expect(fs.stat(path.join(long, 'terraform'))).rejects.toThrow();
+    });
+
+    it('admits fresh scaffolds at exactly 26 chars', async () => {
+        const edge = path.join(tmpDir, 'a-very-long-project-namexy');
+        await fs.mkdir(edge, { recursive: true });
+        process.chdir(edge);
+        const { result, exitCalls } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect((result ?? {}).reason ?? 'ok').not.toBe('project-name-over-confinement-bound');
+        expect(exitCalls).toEqual([]);
+    });
+
+    it('grandfathered long-name trees re-init without refusal', async () => {
+        const long = path.join(tmpDir, 'a-very-long-project-name-here');
+        await fs.mkdir(path.join(long, 'terraform'), { recursive: true });
+        await fs.writeFile(
+            path.join(long, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "a-very-long-project-name-here${local.env_suffix}"\n}\n'
+        );
+        process.chdir(long);
+        const { result, exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect((result ?? {}).reason ?? 'ok').not.toBe('project-name-over-confinement-bound');
+        expect(exitCalls).toEqual([]);
+    });
+
+    it('explicit renames past the bound refuse like fresh scaffolds', async () => {
+        await runHeadlessInit(['--headless', '--framework=node']);
+        vi.clearAllMocks();
+        const { result, exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force', '--project-name=a-very-long-project-name-here']);
+
+        expect(result).toMatchObject({ ok: false, reason: 'project-name-over-confinement-bound' });
+        expect(exitCalls).toEqual([1]);
+    });
+
+    it('collapses consecutive hyphens for fresh scaffolds (RDS forbids --)', async () => {
+        const dashed = path.join(tmpDir, 'my--app');
+        await fs.mkdir(dashed, { recursive: true });
+        process.chdir(dashed);
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node']);
+
+        expect(exitCalls).toEqual([]);
+        const mainTf = await fs.readFile(path.join(dashed, 'terraform', 'main.tf'), 'utf-8');
+        expect(mainTf).toContain('app_name = "my-app${local.env_suffix}');
+    });
+
+    it('keeps grandfathered double-hyphen names verbatim on re-init', async () => {
+        const dashed = path.join(tmpDir, 'my--app');
+        await fs.mkdir(path.join(dashed, 'terraform'), { recursive: true });
+        await fs.writeFile(
+            path.join(dashed, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "my--app${local.env_suffix}"\n}\n'
+        );
+        process.chdir(dashed);
+        const { exitCalls } = await runHeadlessInit(['--headless', '--framework=node', '--force']);
+
+        expect(exitCalls).toEqual([]);
+        const mainTf = await fs.readFile(path.join(dashed, 'terraform', 'main.tf'), 'utf-8');
+        expect(mainTf).toContain('app_name = "my--app${local.env_suffix}');
     });
 });
 
@@ -2027,6 +2091,18 @@ describe('resolveOidcTrust', () => {
         expect(buildDeployRoleName('myapp', '-abc123')).toBe('myapp-abc123-github-actions-deploy-role');
         expect(buildPreviewRoleName('myapp', '-abc123')).toBe('myapp-abc123-github-actions-preview-role');
         expect(buildDeployRoleName('myapp', '')).toBe('myapp-github-actions-deploy-role');
+    });
+
+    it('gate-db builder hashes over-cap identifiers like the TF locals', async () => {
+        const { createHash } = await import('node:crypto');
+        expect(buildGateDbIdentifier('myapp', '-a1b2c3', false)).toBe('myapp-a1b2c3-db');
+        expect(buildGateDbIdentifier('myapp', '-a1b2c3', true)).toBe('myapp-a1b2c3-db-cluster');
+        const long = 'a-very-long-project-name-that-definitely-blows-every-cap';
+        const md5 = createHash('md5').update(`${long}-a1b2c3`, 'utf8').digest('hex').slice(0, 5);
+        // Same formulas gc resolves (resolveDbIdentifier/ClusterIdentifier),
+        // so gate snapshots match gc's pre-deploy patterns on all lengths.
+        expect(buildGateDbIdentifier(long, '-a1b2c3', false)).toBe(`${`${long}-a1b2c3`.slice(0, 54)}-${md5}-db`);
+        expect(buildGateDbIdentifier(long, '-a1b2c3', true)).toBe(`${`${long}-a1b2c3`.slice(0, 46)}-${md5}-db-cluster`);
     });
 
     it('role-name builders truncate long projects to the 64-char IAM limit', () => {

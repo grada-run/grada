@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { generateTemplates, resolveDocDest, isManagedDoc, buildReadmeNotice, MANAGED_DOC_FALLBACK, LEGACY_MANAGED_DOC_FALLBACK, injectLambdaAdapter, convertDatabaseTfForLambda, addRandomProvider, backendNeedsRandomProvider, RAILS_MASTER_KEY_PLACEHOLDER } from '../src/utils/generator.js';
+import { safeSuffixedName, MAX_CONFINED_PROJECT_LENGTH, MAX_CONFINED_APP_LENGTH, CONFINEMENT_WORST_ENV_SUFFIX_LENGTH, CONFINEMENT_RESOURCE_SUFFIX_LENGTH } from '../src/utils/resolvers.js';
 
 describe('Infrastructure Generator', () => {
     const testTargetDir = path.join(process.cwd(), 'tests', '.tmp-test-env');
@@ -1735,12 +1736,24 @@ describe('terraform template safety nets (carried P4s)', () => {
 
     it.each(['cron.tf', 'cron-lambda.tf'])('%s conditionalizes scheduler names', async (file) => {
         const content = await readTf('addons', file);
-        for (const local of ['scheduler_role_safe_name', 'schedule_safe_name', 'schedule_group_safe_name']) {
+        for (const local of ['schedule_safe_name', 'schedule_group_safe_name']) {
             expect(content, local).toMatch(new RegExp(`${local}\\s*=\\s*length\\(`));
             expect(content, local).toMatch(new RegExp(`=\\s*local\\.${local}`));
         }
         expect(content).toContain('md5(local.app_name)');
         expect(content).toContain('group_name                   = aws_scheduler_schedule_group.crons.name');
+    });
+
+    it.each(['cron.tf', 'cron-lambda.tf'])('%s keeps the scheduler role unhashed with a plan-time cap', async (file) => {
+        const content = await readTf('addons', file);
+        // The guardrail carve-out names this exact principal: hashing
+        // it would silently uncarve the scheduler (breaking all
+        // schedules on over-cap trees), so over-cap names fail here at
+        // plan time with guidance instead.
+        expect(content).not.toContain('scheduler_role_safe_name');
+        expect(content).toMatch(/name\s*=\s*"\$\{local\.app_name\}-cron-scheduler-role"/);
+        expect(content).toContain('precondition');
+        expect(content).toMatch(/length\("\$\{local\.app_name\}-cron-scheduler-role"\)\s*<=\s*64/);
     });
 
     it('drops the bare ALB/TG truncation', async () => {
@@ -1769,6 +1782,56 @@ describe('terraform template safety nets (carried P4s)', () => {
             expect(content, local).toMatch(new RegExp(`=\\s*local\\.${local}`));
         }
         expect(content).toContain('md5(');
+    });
+
+    it('trims hyphen-cut stems in every hashed safe name (no -- joins)', async () => {
+        for (const file of ['main.tf', 'main-lambda.tf', 'database.tf', 'database-mysql.tf', 'database-aurora-postgresql.tf', 'addons/sqs.tf', 'addons/ses.tf', 'addons/cron.tf', 'addons/cron-lambda.tf']) {
+            const content = await readTf(...file.split('/'));
+            // Hyphen-joined over branches only (db-name `_`/`` joins exempt).
+            const lines = content.split('\n').filter((line) => /_safe_name\s*=\s*length\(/.test(line) && line.includes('}-${substr(md5'));
+            expect(lines.length, `${file} has no hyphen-joined safe names`).toBeGreaterThan(0);
+            for (const line of lines) {
+                expect(line, `${file}: ${line.slice(0, 70)}`).toContain('trimsuffix(substr(');
+            }
+        }
+    });
+
+    // Confinement-bound honesty harness: recomputes the init cap from
+    // the escape-relevant template names (every name referenced by a
+    // prefix-anchored deny pattern or carve-out: destruction, rewrite,
+    // PassRole/mutation, scheduler carve-out), so template drift fails
+    // here instead of silently invalidating the bound. Suffix-
+    // loosened statements need no entry — they cover hashed names at
+    // any length by construction.
+    it('MAX_CONFINED_PROJECT_LENGTH matches the recomputed template bound', async () => {
+        const entries = [
+            ['main.tf', '-task-role', 64],
+            ['main.tf', '-execution-role', 64],
+            ['addons/cron.tf', '-cron-scheduler-role', 64],
+            ['database.tf', '-db', 63],
+            ['database-aurora-postgresql.tf', '-db-cluster', 63],
+            ['addons/sqs.tf', '-queue', 80],
+            ['addons/sqs.tf', '-dlq', 80],
+            ['main-lambda.tf', '-fn', 64],
+        ];
+        let appMax = Infinity;
+        for (const [file, suffix, cap] of entries) {
+            const content = await readTf(...file.split('/'));
+            expect(content, `${file} lost ${suffix}`).toContain(`\${local.app_name}${suffix}`);
+            appMax = Math.min(appMax, cap - suffix.length);
+        }
+        const recomputed = appMax - CONFINEMENT_WORST_ENV_SUFFIX_LENGTH - CONFINEMENT_RESOURCE_SUFFIX_LENGTH;
+        expect(recomputed, 'template drift changed the bound — recompute MAX_CONFINED_PROJECT_LENGTH').toBe(MAX_CONFINED_PROJECT_LENGTH);
+        expect(appMax, 'app bound drifted — recompute MAX_CONFINED_APP_LENGTH').toBe(MAX_CONFINED_APP_LENGTH);
+        // Max-length fixture: a cap-sized project renders every bound
+        // name plain (unhashed) even on the worst-case workspace.
+        const worstApp = `${'x'.repeat(MAX_CONFINED_PROJECT_LENGTH)}-pr-1234567-a1b2c3`;
+        for (const [, suffix, cap] of entries) {
+            expect(safeSuffixedName(worstApp, suffix, cap), suffix).toBe(`${worstApp}${suffix}`);
+        }
+        // ...and one char over tips the binding constraint into hashing.
+        const overApp = `${'x'.repeat(MAX_CONFINED_PROJECT_LENGTH + 1)}-pr-1234567-a1b2c3`;
+        expect(safeSuffixedName(overApp, '-cron-scheduler-role', 64)).not.toBe(`${overApp}-cron-scheduler-role`);
     });
 });
 
@@ -1803,15 +1866,15 @@ describe('oidc.tf dual-role shape', () => {
         expect(raw).toContain('iam:CreateAccessKey');
         for (const action of [
             's3:DeleteBucket', 's3:DeleteObjectVersion',
-            'ecs:UpdateService', 'ecs:DeleteService', 'ecs:DeleteCluster',
+            'ecs:UpdateService', 'ecs:Delete*',
             'ecr:BatchDeleteImage',
-            'lambda:UpdateFunctionCode', 'lambda:DeleteFunction',
+            'lambda:UpdateFunctionCode', 'lambda:Delete*',
             'sqs:PurgeQueue', 'sqs:DeleteQueue',
             'rds:DeleteDBInstance', 'rds:ModifyDBInstance', 'rds:Modify*SnapshotAttribute',
             'rds:DeleteDBCluster', 'rds:ModifyDBCluster',
             'rds:Stop*', 'rds:Reboot*', 'rds:Start*', 'rds:Restore*',
             'rds:Copy*', 'rds:StartExportTask',
-            'dynamodb:DeleteTable', 'dynamodb:*Item', 'dynamodb:Query', 'dynamodb:Scan',
+            'dynamodb:Delete*', 'dynamodb:*Item', 'dynamodb:Query', 'dynamodb:Scan',
         ]) {
             expect(raw, action).toContain(action);
         }

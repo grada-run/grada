@@ -9,7 +9,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { handleAuthErrorBranch, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix, resolveNamespacedProject, safeSuffixedName } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, readTerraformComputeTarget, readResourceSuffix, resolveNamespacedProject, safeSuffixedName, resolveFunctionName } from '../utils/resolvers.js';
 import { runDiagnose } from './diagnose.js';
 import { detectAlertAddonFeatures } from './alerts.js';
 import { fetchGoldenSignals } from '../utils/golden-signals.js';
@@ -135,7 +135,7 @@ export async function runLambdaStatus(input = {}) {
     const namespacedProject = resolveNamespacedProject(projectName, options, cwd);
     const functionName = typeof options.functionName === 'string' && options.functionName.trim()
         ? options.functionName.trim()
-        : safeSuffixedName(`${namespacedProject}${readResourceSuffix(cwd)}`, '-fn', 64);
+        : resolveFunctionName(`${namespacedProject}${readResourceSuffix(cwd)}`);
     const asJson = Boolean(options.json);
     const runSync = options.spawnSyncImpl || spawnSync;
 

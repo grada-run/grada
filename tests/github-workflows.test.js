@@ -580,6 +580,74 @@ describe('github workflow templates', () => {
         const steps = doc.jobs.deploy.steps;
         expect(steps.some((s) => typeof s?.run === 'string' && s.run.includes('migrate'))).toBe(true);
     });
+
+    // Terraform hashes over-cap names (safeSuffixedName), so workflows
+    // that rebuild names in bash must hash identically — plain
+    // reconstruction misses on long names (teardown skips the
+    // protection lift and destroy fails; lambda updates target a
+    // function that doesn't exist).
+    it.each([
+        ['teardown.yml', ['DB_ID=$(safe_name "$APP_NAME" "-db" 63)', 'CLUSTER_ID=$(safe_name "$APP_NAME" "-db-cluster" 63)']],
+        ['deploy-lambda.yml', ['LAMBDA_FUNCTION=$(safe_name "${{ env.APP_NAME }}" "-fn" 64)']],
+        ['preview-lambda.yml', ['LAMBDA_FUNCTION=$(safe_name "${{ env.APP_NAME }}" "-fn" 64)']],
+    ])('%s resolves resource names through the hashed safe_name mirror', (filename, usages) => {
+        const raw = readTemplate(filename);
+        expect(raw).toContain('safe_name() {');
+        expect(raw).toContain('md5sum');
+        for (const usage of usages) {
+            expect(raw, `${filename}: ${usage}`).toContain(usage);
+        }
+    });
+
+    it('teardown resolves no plain DB identifiers anymore', () => {
+        const raw = readTemplate('teardown.yml');
+        expect(raw).not.toContain('DB_ID="$APP_NAME-db"');
+        expect(raw).not.toContain('CLUSTER_ID="$APP_NAME-db-cluster"');
+    });
+
+    it('deploy-lambda computes the function name in-step (no stale static env)', () => {
+        const raw = readTemplate('deploy-lambda.yml');
+        expect(raw).not.toContain('LAMBDA_FUNCTION: {{PROJECT_NAME}}');
+        expect(raw).toContain('APP_NAME: {{PROJECT_NAME}}{{RESOURCE_SUFFIX}}');
+    });
+
+    // The deploy/preview worker trios are intentionally duplicated
+    // (workflows stay standalone), so this pins them in sync: same
+    // step shape, same jq filter, same PRIMARY check, modulo the
+    // documented env/image mapping. A fix to one trio must land in
+    // both or fail here.
+    it('deploy and preview worker trios stay structurally in sync', () => {
+        const normalize = (raw) => raw
+            .replaceAll('PREVIEW_CLUSTER', 'CLUSTER')
+            .replaceAll('PREVIEW_SERVICE', 'SERVICE')
+            .replaceAll('PREVIEW_WORKER_SERVICE', 'WORKER_SERVICE')
+            .replaceAll('PREVIEW_WORKER_TASK_FAMILY', 'WORKER_TASK_FAMILY')
+            .replaceAll('register-preview-worker-task-def', 'register-worker-task-def')
+            .replaceAll('Preview worker rollout of', 'Worker rollout of')
+            .replaceAll('preview worker', 'worker');
+        const sliceTrio = (raw, start, end) => raw.slice(raw.indexOf(start), raw.indexOf(end));
+        const deploy = sliceTrio(readTemplate('deploy.yml'), 'Register worker task definition revision', '# --- 9. CACHE INVALIDATION ---');
+        const preview = sliceTrio(readTemplate('preview.yml'), 'Register preview worker task definition revision', '# Every push redeploys the preview: clear its CDN');
+        // Image sourcing legitimately differs (SHA tag vs digest lookup).
+        const stripImage = (text) => text
+            .split('\n')
+            .filter((line) => !/IMAGE_URI=|DIGEST=\$\(|describe-images|imageTag=|imageDigest|ECR_REGISTRY/.test(line))
+            .join('\n');
+        const normDeploy = stripImage(deploy).replaceAll('${{ env.ECS_CLUSTER }}', 'CLUSTER').replaceAll('${{ env.ECS_WORKER_SERVICE }}', 'WORKER').replaceAll('${{ env.ECS_WORKER_TASK_FAMILY }}', 'FAMILY');
+        const normPreview = stripImage(normalize(preview)).replaceAll('${{ env.CLUSTER }}', 'CLUSTER').replaceAll('${{ env.WORKER_SERVICE }}', 'WORKER').replaceAll('${{ env.WORKER_TASK_FAMILY }}', 'FAMILY');
+        for (const invariant of [
+            '.containerDefinitions[0].image = $IMAGE',
+            'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)',
+            'deployments[?status==`PRIMARY`].taskDefinition',
+            'did not stick',
+            "hashFiles('terraform/worker.tf') != ''",
+            '--force-new-deployment',
+            'services-stable',
+        ]) {
+            expect(normDeploy, `deploy trio lost: ${invariant}`).toContain(invariant);
+            expect(normPreview, `preview trio lost: ${invariant}`).toContain(invariant);
+        }
+    });
 });
 
 describe('workflow supply-chain pins', () => {

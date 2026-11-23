@@ -170,6 +170,14 @@ describe('resolveDbClusterIdentifier', () => {
             expect(id.length).toBeLessThanOrEqual(63);
         }
     });
+
+    it('keeps gate snapshot ids valid on hyphen-cut trees (no -- cascade)', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rds-id-'));
+        const cut = 'a'.repeat(53) + '-tail-that-keeps-going-past-every-cap';
+        const id = resolveDbIdentifier({ projectName: cut }, dir);
+        expect(id).not.toContain('--');
+        expect(isValidSnapshotId(generateSnapshotId(id))).toBe(true);
+    });
 });
 
 describe('findDbCluster', () => {

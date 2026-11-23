@@ -12,7 +12,7 @@ import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveComman
 import { failCommand, failAwsError, failProjectNotInitialized, refuseIfNonInteractive, refuseUnknownFlags } from '../utils/command.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
 import { isAuthError, handleAwsAuthError, resolveClient } from '../utils/aws.js';
-import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, withWorkspaceNamespace, resolveCwd, guardComputeTarget, readResourceSuffix, safeSuffixedName } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCluster, resolveService, readFileSafe, withWorkspaceNamespace, resolveCwd, guardComputeTarget, readResourceSuffix, resolveFunctionName } from '../utils/resolvers.js';
 import { requireManagedTree } from '../utils/terraform-metadata.js';
 import { truncateSpinnerText } from '../utils/spinner-text.js';
 import { guardSleepingEnv, resolveSleepTarget } from '../utils/sleep-state.js';
@@ -131,7 +131,7 @@ async function runRollbackMain(input = {}) {
 
     const targetGuard = guardComputeTarget({ cwd, command: 'Rollback', supported: ['ecs'] });
     if (targetGuard) {
-        const functionName = safeSuffixedName(`${projectName}${readResourceSuffix(cwd)}`, '-fn', 64);
+        const functionName = resolveFunctionName(`${projectName}${readResourceSuffix(cwd)}`);
         trackEvent('rollback_target_unsupported', { projectName, actual: targetGuard.actual });
         return failCommand({
             message: targetGuard.message,

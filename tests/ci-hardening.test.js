@@ -218,14 +218,18 @@ describe('Preview guardrails are self-protecting', () => {
 
     it('denies prod snapshot, secrets, and log-group deletion', () => {
         const { tf, guardrails } = twinSlices();
-        expect(guardrails).toContain('rds:DeleteDBSnapshot');
-        expect(guardrails).toContain('rds:DeleteDBClusterSnapshot');
+        // Exact-2 collapse (quota economy): the only rds verbs matching
+        // DeleteDB*Snapshot are the two deletes.
+        expect(guardrails).toContain('rds:DeleteDB*Snapshot');
+        expect(guardrails).not.toContain('rds:DeleteDBSnapshot');
+        expect(guardrails).not.toContain('rds:DeleteDBClusterSnapshot');
         expect(guardrails).toContain('secretsmanager:DeleteSecret');
         expect(guardrails).toContain('logs:DeleteLogGroup');
         // Resource lists live in the shared locals both twins consume.
+        // Snapshot entries are middle-wildcards (automated `rds:` names).
         for (const arn of [
-            'snapshot:${local.prod_prefix}-db-*',
-            'cluster-snapshot:${local.prod_prefix}-db-cluster-*',
+            'snapshot:*${local.prod_prefix}-db*',
+            'cluster-snapshot:*${local.prod_prefix}-db-cluster*',
             'secret:${local.prod_prefix}-secrets-*',
             'log-group:/ecs/${local.prod_prefix}',
         ]) {
@@ -253,8 +257,11 @@ describe('Preview permissions boundary', () => {
         // every service (see the carve-out assertions below).
         const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
         expect(chunk).not.toContain('NotAction');
-        expect(chunk).toContain('iam:PutRolePermissionsBoundary');
-        expect(chunk).toContain('iam:DeleteRolePermissionsBoundary');
+        // Exact-2 collapse (quota economy): these are the only IAM verbs
+        // matching *PermissionsBoundary — no List*/Get* form exists.
+        expect(chunk).toContain('iam:*PermissionsBoundary');
+        expect(chunk).not.toContain('iam:PutRolePermissionsBoundary');
+        expect(chunk).not.toContain('iam:DeleteRolePermissionsBoundary');
     });
 
     it('caps backdoor roles at the task data-plane (deny-list mirror)', () => {
@@ -262,7 +269,7 @@ describe('Preview permissions boundary', () => {
         // Base allow with guardrail-mirroring denies: default-allow so a
         // missing entry weakens security instead of breaking prod tasks.
         expect(boundary).toContain('BoundaryBaseAllow');
-        for (const action of ['cloudtrail:*', 'organizations:*', 'ec2:RunInstances', 'rds:DeleteDBInstance', 's3:DeleteBucket', 'dynamodb:DeleteTable', 'sqs:DeleteQueue', 'ecs:DeleteCluster', 'ecr:BatchDeleteImage', 'secretsmanager:DeleteSecret', 'logs:DeleteLogGroup']) {
+        for (const action of ['cloudtrail:*', 'organizations:*', 'ec2:RunInstances', 'rds:DeleteDBInstance', 's3:DeleteBucket', 'dynamodb:Delete*', 'sqs:DeleteQueue', 'ecs:Delete*', 'ecr:BatchDeleteImage', 'secretsmanager:DeleteSecret', 'logs:DeleteLogGroup']) {
             expect(boundary).toContain(action);
         }
     });
@@ -384,9 +391,14 @@ describe('Preview task-role confinement', () => {
         // chars of ARNs for nothing. The scheduler carve-out is a
         // no-op for these verbs (the scheduler role can never call
         // them), so the merge changes no effective permission.
-        for (const action of ['ecs:UpdateService', 'ecs:DeleteService', 'ecs:DeleteCluster']) {
-            expect(chunk).toContain(action);
-        }
+        expect(chunk).toContain('ecs:UpdateService');
+        // DeleteService + DeleteCluster fold into ecs:Delete* — which
+        // also matches DeleteTaskDefinitions on this statement's
+        // task-definition ARNs, closing a gap (deregisters stay in the
+        // Registration statement, untouched).
+        expect(chunk).toContain('ecs:Delete*');
+        expect(chunk).not.toContain('ecs:DeleteService');
+        expect(chunk).not.toContain('ecs:DeleteCluster');
         expect(sidChunk(guardrails, 'DenyProdECSShutdown')).toBe('');
         expect(chunk).toContain('local.guardrail_task_execution_resources');
         const local = tf.slice(tf.indexOf('guardrail_task_execution_resources'));
@@ -405,7 +417,7 @@ describe('Preview task-role confinement', () => {
 
     it('denies prod task-definition registration and prod PassRole', () => {
         const { tf, guardrails } = twinSlices();
-        const registration = sidChunk(guardrails, 'DenyProdTaskDefinitionRegistration');
+        const registration = sidChunk(guardrails, 'DenyProdTaskDefRegistration');
         expect(registration).toContain('ecs:RegisterTaskDefinition');
         expect(registration).toContain('ecs:DeregisterTaskDefinition');
         expect(registration).toContain('local.guardrail_task_definition_resources');
@@ -446,7 +458,7 @@ describe('Preview task-role confinement', () => {
 
     it('mirrors the new statements into the boundary (PassRole via the trio)', () => {
         const { boundary } = twinSlices();
-        for (const sid of ['BoundaryDenyTaskExecution', 'BoundaryDenyTaskDefinitionRegistration', 'BoundaryDenyAppRoleMutation']) {
+        for (const sid of ['BoundaryDenyTaskExecution', 'BoundaryDenyTaskDefRegistration', 'BoundaryDenyAppRoleMutation']) {
             expect(sidChunk(boundary, sid), `${sid} missing`).not.toBe('');
         }
         expect(sidChunk(boundary, 'BoundaryDenyECSShutdown')).toBe('');
@@ -485,7 +497,7 @@ describe('Preview task-role confinement', () => {
             'DenyProdSecretsDeletion',
             'DenyProdLogDeletion',
             'DenyProdTaskExecution',
-            'DenyProdTaskDefinitionRegistration',
+            'DenyProdTaskDefRegistration',
             'DenyProdAppRoleMutation',
             'DenyProdAppData',
             'DenyProdDbLifecycle',
@@ -556,6 +568,14 @@ describe('Preview data-plane confinement', () => {
         ]) {
             expect(local, `missing ${arn}`).toContain(arn);
         }
+        // Suffix-anchored on purpose: hashed queue names keep their
+        // -queue/-dlq tails, so prefix anchoring would miss them while
+        // suffixes catch plain + hashed alike. Preview queues match
+        // too — safe, because the preview role never sends/receives
+        // (proven below) and tasks stay carved out.
+        expect(local).toContain(':*-queue');
+        expect(local).toContain(':*-dlq');
+        expect(local).not.toContain('${local.prod_prefix}-*');
         expect(local).not.toContain('pr-');
         // Exact ARN only: a wildcard carve-out would let a backdoor role
         // match by name (CreateRole sets its own trust inline); a second
@@ -585,6 +605,10 @@ describe('Preview data-plane confinement', () => {
             expect(a[1].replaceAll('prod_prefix', 'app_name')).toBe(b[1]);
             if (a[2] !== undefined) expect(a[2], `${pattern} cap`).toBe(b[2]);
         }
+        // Both sides trim hyphen-cut stems (RDS forbids --); a trim on
+        // one side only would uncarve hyphen-cut workers.
+        expect(carve).toContain('trimsuffix(substr(');
+        expect(rendered).toContain('trimsuffix(substr(');
     });
 
     it('denies prod DB lifecycle verbs with no carve-out (both twins)', () => {
@@ -607,9 +631,99 @@ describe('Preview data-plane confinement', () => {
             expect(chunk, `${label} must stay carve-free`).not.toContain('aws:PrincipalArn');
         }
         const local = tf.slice(tf.indexOf('guardrail_db_lifecycle_resources'), tf.indexOf(']', tf.indexOf('guardrail_db_lifecycle_resources')));
-        expect(local).toContain('db:${local.prod_prefix}-db*');
-        expect(local).toContain('cluster:${local.prod_prefix}-db-cluster');
+        // Suffix-anchored like the queues: hashed identifiers keep
+        // their tails. Preview DBs match too — safe, because no
+        // preview workflow stops/starts/reboots/restores (proven
+        // below) and Terraform's Modify calls live in the anchored
+        // destruction statements, not here.
+        expect(local).toContain('db:*-db*');
+        expect(local).toContain('cluster:*-db-cluster');
+        expect(local).not.toContain('${local.prod_prefix}-db');
         expect(local).not.toContain('pr-');
+    });
+});
+
+describe('Suffix-loosened denies stay safe for preview traffic', () => {
+    function readWorkflow(name) {
+        return fs.readFileSync(path.join(process.cwd(), 'templates', 'github', name), 'utf-8');
+    }
+
+    it('no preview workflow sends/receives SQS (AppData loosening is safe)', () => {
+        for (const file of ['preview.yml', 'preview-lambda.yml', 'teardown.yml', 'plan.yml', 'drift.yml']) {
+            const content = readWorkflow(file);
+            for (const verb of ['send-message', 'receive-message', 'SendMessage', 'ReceiveMessage', 'sqs:']) {
+                expect(content, `${file} calls ${verb}`).not.toContain(verb);
+            }
+        }
+    });
+
+    it('no preview workflow stops/starts/reboots/restores RDS (lifecycle loosening is safe)', () => {
+        for (const file of ['preview.yml', 'preview-lambda.yml', 'teardown.yml', 'plan.yml']) {
+            const content = readWorkflow(file);
+            for (const verb of ['stop-db-', 'start-db-', 'reboot-db-', 'restore-db-', 'StopDB', 'StartDB', 'RebootDB', 'RestoreDB']) {
+                expect(content, `${file} calls ${verb}`).not.toContain(verb);
+            }
+        }
+    });
+
+    // IAM wildcard evaluation over the rendered deny patterns: prefix
+    // anchoring misses hashed names, so every loosened pattern must
+    // HIT prod-plain, prod-hashed, AND preview (intended over-deny),
+    // while anchored statements keep HIT-ing plain and MISS-ing
+    // preview. A pattern that misses plain prod fails closed here.
+    function iamMatches(pattern, arn) {
+        const regex = new RegExp(`^${pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+        return regex.test(arn);
+    }
+
+    function renderPattern(raw, prodPrefix) {
+        return raw
+            .split('${data.aws_region.current.name}').join('us-east-2')
+            .split('${data.aws_caller_identity.current.account_id}').join('710596603276')
+            .split('${local.prod_prefix}').join(prodPrefix);
+    }
+
+    it('deny patterns HIT prod names and MISS preview names per statement contract', async () => {
+        const { safeSuffixedName } = await import('../src/utils/resolvers.js');
+        const { tf } = twinSlices();
+        const prod = 'myapp-a1b2c3';
+        const longBase = 'a-very-long-project-name-that-definitely-blows-every-cap-wide-open-here';
+        const hashedQueue = safeSuffixedName(longBase, '-queue', 80);
+        const hashedDb = safeSuffixedName(longBase, '-db', 63);
+        const arn = (service, resource) => `arn:aws:${service}:us-east-2:710596603276:${resource}`;
+        const localList = (name) => {
+            const start = tf.indexOf(`${name} = [`) + `${name} = [`.length;
+            const end = tf.indexOf(']', start);
+            return tf.slice(start, end).split('\n').map((line) => line.trim().replace(/^"|",?$/g, '').replace(/"$/, '')).filter((line) => line.startsWith('arn:')).map((entry) => renderPattern(entry, prod));
+        };
+        const hits = (local, resource) => localList(local).some((pattern) => iamMatches(pattern, resource));
+        // Loosened statements: plain, hashed, and preview all HIT.
+        expect(hits('guardrail_app_data_resources', arn('sqs', `${prod}-queue`))).toBe(true);
+        expect(hits('guardrail_app_data_resources', arn('sqs', hashedQueue))).toBe(true);
+        expect(hits('guardrail_app_data_resources', arn('sqs', 'myapp-pr-12-a1b2c3-queue'))).toBe(true);
+        expect(hits('guardrail_db_lifecycle_resources', arn('rds', `db:${prod}-db`))).toBe(true);
+        expect(hits('guardrail_db_lifecycle_resources', arn('rds', `db:${hashedDb}`))).toBe(true);
+        expect(hits('guardrail_db_lifecycle_resources', arn('rds', 'db:myapp-pr-12-a1b2c3-db'))).toBe(true);
+        // Anchored statements: plain HITs, preview MISSES (teardown/terraform).
+        expect(hits('guardrail_queue_destruction_resources', arn('sqs', `${prod}-queue`))).toBe(true);
+        expect(hits('guardrail_queue_destruction_resources', arn('sqs', 'myapp-pr-12-a1b2c3-queue'))).toBe(false);
+        expect(hits('guardrail_database_destruction_resources', arn('rds', `db:${prod}-db`))).toBe(true);
+        expect(hits('guardrail_database_destruction_resources', arn('rds', `db:myapp-pr-12-a1b2c3-db`))).toBe(false);
+        expect(hits('guardrail_lambda_rewrite_resources', arn('lambda', `function:${prod}-fn`))).toBe(true);
+        expect(hits('guardrail_lambda_rewrite_resources', arn('lambda', 'function:myapp-pr-12-a1b2c3-fn'))).toBe(false);
+        // Snapshots: manual + `rds:`-prefixed automated HIT, preview MISSES.
+        expect(hits('guardrail_snapshot_data_resources', arn('rds', `snapshot:${prod}-db-pre-deploy-abc1234`))).toBe(true);
+        expect(hits('guardrail_snapshot_data_resources', arn('rds', `snapshot:rds:${prod}-db-2026-11-23-03-44`))).toBe(true);
+        expect(hits('guardrail_snapshot_data_resources', arn('rds', `cluster-snapshot:rds:${prod}-db-cluster-2026-11-23-03-44`))).toBe(true);
+        expect(hits('guardrail_snapshot_data_resources', arn('rds', 'snapshot:myapp-pr-12-a1b2c3-db-pre-deploy-abc1234'))).toBe(false);
+        expect(hits('guardrail_snapshot_data_resources', arn('rds', 'snapshot:rds:myapp-pr-12-a1b2c3-db-2026-11-23-03-44'))).toBe(false);
+        expect(hits('guardrail_snapshot_data_resources', arn('rds', 'snapshot:pre-deploy-abc1234'))).toBe(true);
+        // Table backups: prod HITs (restore/delete authorize the backup
+        // ARN, not the table), preview MISSES.
+        expect(hits('guardrail_table_data_resources', arn('dynamodb', `table/${prod}-table`))).toBe(true);
+        expect(hits('guardrail_table_data_resources', arn('dynamodb', `table/${prod}-table/backup/01680822138000-abcdef12`))).toBe(true);
+        expect(hits('guardrail_table_data_resources', arn('dynamodb', 'table/myapp-pr-12-a1b2c3-table'))).toBe(false);
+        expect(hits('guardrail_table_data_resources', arn('dynamodb', 'table/myapp-pr-12-a1b2c3-table/backup/01680822138000-abcdef12'))).toBe(false);
     });
 });
 
@@ -643,11 +757,16 @@ describe('Scheduler survives the boundary', () => {
 describe('Snapshot guardrails cover pre-deploy names', () => {
     it('denies legacy bare pre-deploy snapshot deletion on both twins', () => {
         const { tf, guardrails, boundary } = twinSlices();
-        expect(sidChunk(guardrails, 'DenyProdSnapshotData')).toContain('local.guardrail_snapshot_deletion_resources');
-        expect(sidChunk(boundary, 'BoundaryDenySnapshotData')).toContain('local.guardrail_snapshot_deletion_resources');
-        const local = tf.slice(tf.indexOf('guardrail_snapshot_deletion_resources'));
-        expect(local).toContain('snapshot:${local.prod_prefix}-db-*');
-        expect(local).toContain('cluster-snapshot:${local.prod_prefix}-db-cluster-*');
+        expect(sidChunk(guardrails, 'DenyProdSnapshotData')).toContain('local.guardrail_snapshot_data_resources');
+        expect(sidChunk(boundary, 'BoundaryDenySnapshotData')).toContain('local.guardrail_snapshot_data_resources');
+        const local = tf.slice(tf.indexOf('guardrail_snapshot_data_resources'));
+        // Middle-wildcard on purpose: automated snapshots carry an
+        // `rds:` name prefix, so prefix anchoring would miss them while
+        // the infix catches manual + automated alike. Preview names
+        // carry `-pr-<n>-` where prod carries the bare id, so the
+        // infix can never match them (pinned by the matrix test).
+        expect(local).toContain('snapshot:*${local.prod_prefix}-db*');
+        expect(local).toContain('cluster-snapshot:*${local.prod_prefix}-db-cluster*');
         expect(local).toContain('snapshot:pre-deploy-*');
         expect(local).toContain('cluster-snapshot:pre-deploy-*');
     });
@@ -656,8 +775,9 @@ describe('Snapshot guardrails cover pre-deploy names', () => {
         const { guardrails, boundary } = twinSlices();
         for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdSnapshotData')], ['boundary', sidChunk(boundary, 'BoundaryDenySnapshotData')]]) {
             expect(chunk, `${label} statement missing`).not.toBe('');
-            expect(chunk, label).toContain('rds:DeleteDBSnapshot');
-            expect(chunk, label).toContain('rds:DeleteDBClusterSnapshot');
+            expect(chunk, label).toContain('rds:DeleteDB*Snapshot');
+            expect(chunk, label).not.toContain('rds:DeleteDBSnapshot');
+            expect(chunk, label).not.toContain('rds:DeleteDBClusterSnapshot');
             // Exfil half: copies and snapshot-based restores authorize
             // the source snapshot, exports authorize it too (AWS service
             // authorization reference) — denying here closes the
@@ -694,15 +814,30 @@ describe('Table guardrails deny item data, not just the table', () => {
         'dynamodb:Transact*',
     ];
 
+    // PITR/backup verbs: export and point-in-time restore authorize
+    // the table; backup create/delete/restore-from authorize the
+    // backup ARN (separate entry below). UpdateTable closes
+    // PITR-disablement (safety-feature destruction).
+    const TABLE_BACKUP_VERBS = [
+        'dynamodb:Export*',
+        'dynamodb:Restore*',
+        'dynamodb:CreateBackup',
+        'dynamodb:DeleteBackup',
+        'dynamodb:UpdateTable',
+    ];
+
     it('denies prod table item reads and writes with no carve-out (both twins)', () => {
         const { tf, guardrails, boundary } = twinSlices();
         for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdTableData')], ['boundary', sidChunk(boundary, 'BoundaryDenyTableData')]]) {
             expect(chunk, `${label} statement missing`).not.toBe('');
-            expect(chunk, label).toContain('dynamodb:DeleteTable');
-            for (const action of TABLE_DATA_VERBS) {
+            // DeleteTable folds into Delete* (exact here: DeleteItem
+            // was already denied via *Item).
+            expect(chunk, label).toContain('dynamodb:Delete*');
+            expect(chunk, label).not.toContain('dynamodb:DeleteTable');
+            for (const action of [...TABLE_DATA_VERBS, ...TABLE_BACKUP_VERBS]) {
                 expect(chunk, `${label} missing ${action}`).toContain(action);
             }
-            expect(chunk, label).toContain('local.guardrail_table_deletion_resources');
+            expect(chunk, label).toContain('local.guardrail_table_data_resources');
             // Preview apps use preview tables (pr-* names never match
             // the prod pattern), so unlike the shared vault this needs
             // no task-role carve-out — and stays carve-free for quota.
@@ -711,8 +846,9 @@ describe('Table guardrails deny item data, not just the table', () => {
             // match describes, and none may be added here.
             expect(chunk, `${label} must not deny describes`).not.toContain('Describe');
         }
-        const local = tf.slice(tf.indexOf('guardrail_table_deletion_resources'), tf.indexOf(']', tf.indexOf('guardrail_table_deletion_resources')));
+        const local = tf.slice(tf.indexOf('guardrail_table_data_resources'), tf.indexOf(']', tf.indexOf('guardrail_table_data_resources')));
         expect(local).toContain('table/${local.prod_prefix}-table');
+        expect(local).toContain('table/${local.prod_prefix}-table/backup/*');
         expect(local).not.toContain('pr-');
     });
 });
@@ -759,9 +895,9 @@ function boundaryPolicySize(prodPrefix) {
     slice = subst(slice);
     // Length conditionals (task-role carve-out): both test prefixes take
     // the plain branch — evaluate the literal form Terraform would. The
-    // taken branch carries no function calls, so textual evaluation is
-    // exact here.
-    slice = slice.replace(/length\("([^"]*)"\)\s*>\s*(\d+)\s*\?\s*"([^"]*)"\s*:\s*"([^"]*)"/g, (_, text, cap, over, under) =>
+    // over branch may nest one quoted string (trimsuffix's "-"), so the
+    // pattern allows a single quoted span inside it.
+    slice = slice.replace(/length\("([^"]*)"\)\s*>\s*(\d+)\s*\?\s*"((?:[^"]|"[^"]*")*)"\s*:\s*"([^"]*)"/g, (_, text, cap, over, under) =>
         JSON.stringify(text.length > Number(cap) ? over : under));
     // HCL -> JSON: quote keys, comma-separate newline fields/items.
     let json = slice
@@ -789,9 +925,14 @@ describe('Boundary IAM deny is scoped to IAM writes (tier2 E2E)', () => {
     it('denies role/policy/user backdoors while carving out PassRole', () => {
         const { boundary } = twinSlices();
         const chunk = sidChunk(boundary, 'BoundaryDenyIAM');
-        for (const action of ['iam:CreateRole', 'iam:DeleteRole', 'iam:UpdateAssumeRolePolicy', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:PutRolePermissionsBoundary', 'iam:DeleteRolePermissionsBoundary', 'iam:CreatePolicy', 'iam:DeletePolicy', 'iam:CreatePolicyVersion', 'iam:DeletePolicyVersion', 'iam:CreateUser', 'iam:DeleteUser', 'iam:CreateAccessKey', 'iam:DeleteAccessKey']) {
+        for (const action of ['iam:CreateRole', 'iam:DeleteRole', 'iam:UpdateAssumeRolePolicy', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:*PermissionsBoundary', 'iam:CreatePolicy', 'iam:DeletePolicy', 'iam:*PolicyVersion', 'iam:CreateUser', 'iam:DeleteUser', 'iam:CreateAccessKey', 'iam:DeleteAccessKey']) {
             expect(chunk).toContain(action);
         }
+        // *PolicyVersion additionally matches ListPolicyVersions: safe,
+        // because no bounded role ever lists policy versions (preview
+        // Terraform runs as the preview role, not under the boundary).
+        expect(chunk).not.toContain('iam:CreatePolicyVersion');
+        expect(chunk).not.toContain('iam:DeletePolicyVersion');
         // PassRole stays carved out (re-gated on service + target below).
         expect(chunk).not.toContain('iam:PassRole');
     });

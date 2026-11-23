@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames, safeSuffixedName } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames, safeSuffixedName, MAX_CONFINED_PROJECT_LENGTH, exceedsConfinementBound, resolveFunctionName } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -457,9 +457,36 @@ describe('safeSuffixedName', () => {
         expect(b.length).toBeLessThanOrEqual(32);
     });
 
-    it('leaves cut-point hyphens alone (valid mid-name, identical both sides)', () => {
+    it('keeps precomputed stems stable (trim only touches hyphen cuts)', () => {
+        // Non-hyphen cuts render exactly as before the trim landed.
+        expect(safeSuffixedName('averylongprojectnamethatexceeds', '-alb', 32)).toBe('averylongprojectnameth-1335c-alb');
         expect(safeSuffixedName('myapp-abcdefghij---klm', '-alb', 24)).toBe('myapp-abcdefgh-9bd55-alb');
-        expect(safeSuffixedName('myapp-abcdefg-hijklmnop', '-alb', 24)).toBe('myapp-abcdefg--f8e88-alb');
+    });
+
+    it('trims cut-point hyphens so the join never emits -- (RDS forbids them)', () => {
+        expect(safeSuffixedName('myapp-abcdefghij---klm', '-alb', 24)).toBe('myapp-abcdefgh-9bd55-alb');
+        // Stem cut lands on a hyphen: trimmed, hash unchanged (input untouched).
+        expect(safeSuffixedName('myapp-abcdefg-hijklmnop', '-alb', 24)).toBe('myapp-abcdefg-f8e88-alb');
+    });
+
+    it('never emits consecutive hyphens on hyphen-heavy cuts', () => {
+        for (const base of ['a'.repeat(53) + '-tail-that-keeps-going-past-every-cap', 'x'.repeat(60) + '---']) {
+            for (const [suffix, cap] of [['-db', 63], ['-alb', 32], ['-task-role', 64], ['', 48]]) {
+                const out = safeSuffixedName(base, suffix, cap);
+                expect(out, `${base.slice(0, 20)}… ${suffix} ${cap}`).not.toContain('--');
+                expect(out.length).toBeLessThanOrEqual(cap);
+            }
+        }
+    });
+
+    it('trims only the cut point, preserving interior hyphens verbatim', async () => {
+        const { createHash } = await import('node:crypto');
+        const base = 'myapp---with---many---hyphens-in-a-much-longer-base-name-here';
+        const hash = createHash('md5').update(base, 'utf8').digest('hex').slice(0, 5);
+        // Interior --- preserved verbatim; the pin is the exact
+        // shape, hash included (neither cut lands on a hyphen here).
+        expect(safeSuffixedName(base, '-db', 63)).toBe(`${base.slice(0, 54)}-${hash}-db`);
+        expect(safeSuffixedName(base, '-alb', 32)).toBe(`${base.slice(0, 22).replace(/-+$/, '')}-${hash}-alb`);
     });
 
     it('supports empty suffixes for fully-derived names', () => {
@@ -467,6 +494,26 @@ describe('safeSuffixedName', () => {
         const safe = safeSuffixedName(full, '', 48);
         expect(safe.length).toBeLessThanOrEqual(48);
         expect(safe).toMatch(/^[a-z0-9-]+$/);
+    });
+});
+
+describe('exceedsConfinementBound', () => {
+    it('admits 26 chars and refuses 27 (worst-case app stays plain)', () => {
+        expect(exceedsConfinementBound('a'.repeat(26))).toBe(false);
+        expect(exceedsConfinementBound('a'.repeat(27))).toBe(true);
+        expect(exceedsConfinementBound('myapp')).toBe(false);
+        expect(exceedsConfinementBound('')).toBe(false);
+        expect(exceedsConfinementBound(null)).toBe(false);
+    });
+});
+
+describe('resolveFunctionName', () => {
+    it('renders plain names verbatim and hashes over-cap like fn_safe_name', async () => {
+        const { createHash } = await import('node:crypto');
+        expect(resolveFunctionName('myapp-a1b2c3')).toBe('myapp-a1b2c3-fn');
+        const long = 'a-very-long-project-name-that-definitely-blows-every-cap-wide-open-here';
+        const md5 = createHash('md5').update(long, 'utf8').digest('hex').slice(0, 5);
+        expect(resolveFunctionName(long)).toBe(`${long.slice(0, 55)}-${md5}-fn`);
     });
 });
 

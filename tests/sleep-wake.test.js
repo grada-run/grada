@@ -834,6 +834,68 @@ describe('sleep-targets: cron schedule discovery', () => {
         expect(readCronScheduleName(dir, 'myapp-staging')).toBe('myapp-staging-a1b2c3-cron-nightly-cleanup');
     });
 
+    it('resolves the slug from schedule_full_name on hashed-shape trees', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            [
+                'locals {',
+                '  schedule_full_name       = "${local.app_name}-cron-nightly-cleanup"',
+                '  schedule_safe_name       = length(local.schedule_full_name) > 64 ? "hashed" : local.schedule_full_name',
+                '}',
+                'resource "aws_scheduler_schedule" "cron" {',
+                '  name                         = local.schedule_safe_name',
+                '  state = var.asleep ? "DISABLED" : "ENABLED"',
+                '}',
+                '',
+            ].join('\n')
+        );
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        expect(readCronScheduleName(dir, 'myapp-staging')).toBe('myapp-staging-a1b2c3-cron-nightly-cleanup');
+    });
+
+    it('hashes over-cap schedule names exactly like schedule_safe_name', async () => {
+        const { createHash } = await import('node:crypto');
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'cron.tf'),
+            [
+                'locals {',
+                '  schedule_full_name       = "${local.app_name}-cron-nightly-cleanup"',
+                '  schedule_safe_name       = length(local.schedule_full_name) > 64 ? "hashed" : local.schedule_full_name',
+                '}',
+                'resource "aws_scheduler_schedule" "cron" {',
+                '  name                         = local.schedule_safe_name',
+                '}',
+                '',
+            ].join('\n')
+        );
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        const full = 'a-very-long-project-name-here-with-more-words-a1b2c3-cron-nightly-cleanup';
+        const md5 = createHash('md5').update(full, 'utf8').digest('hex').slice(0, 5);
+        expect(readCronScheduleName(dir, 'a-very-long-project-name-here-with-more-words')).toBe(`${full.slice(0, 58).replace(/-+$/, '')}-${md5}`);
+    });
+
+    it('resolves against the real cron template shape', () => {
+        const dir = makeTmp();
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        const template = fs.readFileSync(path.join(process.cwd(), 'templates', 'terraform', 'addons', 'cron.tf'), 'utf8');
+        fs.writeFileSync(path.join(dir, 'terraform', 'cron.tf'), template.replace('{{CRON_NAME}}', 'nightly-cleanup'));
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            'locals {\n  grada_resource_suffix = "-a1b2c3"\n}\n'
+        );
+        expect(readCronScheduleName(dir, 'myapp')).toBe('myapp-a1b2c3-cron-nightly-cleanup');
+    });
+
     it('ignores the IAM role/policy names that precede the schedule block', () => {
         const dir = makeTmp();
         fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });

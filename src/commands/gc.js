@@ -11,7 +11,7 @@ import color from 'picocolors';
 import { intro, outro, confirm, spinner, cancel } from '@clack/prompts';
 import { trackEvent, flushTelemetry, trackSuccess, trackFailure, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
 import { parseFlags, normalizeOptions, normalizeArgv } from '../utils/args.js';
-import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix, safeSuffixedName } from '../utils/resolvers.js';
+import { resolveRegion, resolveProjectName, resolveCwd, isComputeTarget, readResourceSuffix, resolveFunctionName } from '../utils/resolvers.js';
 import { resolveClient } from '../utils/aws.js';
 import { failCommand, failProjectNotInitialized, isProgrammaticCall, refuseIfNonInteractive, refuseUnknownFlags, shouldAutoApprove } from '../utils/command.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
@@ -73,6 +73,13 @@ function escapeRegExp(text) {
     return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Anchored snapshot-name matchers for a set of db ids and a tail
+// pattern: manual safety checkpoints and per-commit pre-deploy
+// snapshots share the shape, only the tail differs.
+function snapshotNamePatterns(dbIds, tail) {
+    return dbIds.map((id) => new RegExp(`^${escapeRegExp(id)}-${tail}$`));
+}
+
 // Grada renders exactly one ECR repo per tree: `<project><suffix>-repo`
 // (previews push tags; they never mint repos). Anything else sharing
 // the prefix is foreign — never propose it.
@@ -80,11 +87,17 @@ function projectRepoName(projectName, resourceSuffix = '') {
     return `${projectName}${resourceSuffix}-repo`;
 }
 
+// Shared preview-workspace infix (`<project>-pr-<n><suffix>`), escaped
+// for embedding: log-group and function liveness both match on it.
+function previewPrInfix(projectName, resourceSuffix = '') {
+    return `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
+}
+
 // Preview log groups carry the `-pr-<n>` workspace infix at a fixed
 // position (`<project>-pr-<n><suffix>`); anchor both ends so foreign
 // lookalikes (`myapp-evil-pr-2`) never match.
 function previewLogGroupPattern({ projectName, resourceSuffix = '', isLambda = false }) {
-    const base = `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
+    const base = previewPrInfix(projectName, resourceSuffix);
     // Plain-form only by design: over-cap preview names hash-suffix in
     // Terraform, so they never match here — fail closed (never proposed)
     // and the 30-day group retention self-cleans them instead.
@@ -200,7 +213,7 @@ export async function discoverLivePreviewLogGroups({
 } = {}) {
     const live = new Set();
     try {
-        const base = `${escapeRegExp(projectName)}-pr-\\d+${escapeRegExp(resourceSuffix)}`;
+        const base = previewPrInfix(projectName, resourceSuffix);
         if (isLambda) {
             // Plain-form only (see previewLogGroupPattern): hashed
             // over-cap functions are invisible here, and invisible to
@@ -291,12 +304,10 @@ async function discoverOldManualSnapshots({ rdsClient, dbIdentifier, dbClusterId
     const dbIds = [dbIdentifier, dbClusterIdentifier]
         .filter((id) => typeof id === 'string' && id.trim())
         .map((id) => id.trim().toLowerCase());
-    const patterns = dbIds
-        .map((id) => new RegExp(`^${escapeRegExp(id)}-manual-\\d{8}-\\d{6}$`));
+    const patterns = snapshotNamePatterns(dbIds, 'manual-\\d{8}-\\d{6}');
     // The gate's pre-deploy snapshots are per-commit, so without
     // a discovery rule they accumulate into the region snapshot quota.
-    const predeployPatterns = dbIds
-        .map((id) => new RegExp(`^${escapeRegExp(id)}-pre-deploy-[0-9a-f]{7,40}$`));
+    const predeployPatterns = snapshotNamePatterns(dbIds, 'pre-deploy-[0-9a-f]{7,40}');
     // Legacy bare pre-deploy-<sha> ids carry no db scope: retire them
     // only with a matching source-db attribute, never by name alone.
     const legacyPredeployPattern = /^pre-deploy-[0-9a-f]{7,40}$/;
@@ -746,7 +757,7 @@ async function runGcMain(input = {}) {
             // Exact match: the live group carries the suffix on suffixed
             // trees, and proposing it for deletion would be catastrophic.
             excludeLogGroup: isLambda
-                ? `/aws/lambda/${safeSuffixedName(`${projectName}${suffix}`, '-fn', 64)}`
+                ? `/aws/lambda/${resolveFunctionName(`${projectName}${suffix}`)}`
                 : `/ecs/${projectName}${suffix}`,
             livePreviewGroups: liveness.groups,
             previewLivenessUnknown: liveness.unknown,

@@ -136,9 +136,12 @@ function assertEngineFiles(dir, engine, marker) {
 }
 
 function engineProject(engine, marker) {
+    // Short engine slug: scaffold dirs derive the project name, which must
+    // stay within the 26-char confinement bound (`aurora-postgresql` doesn't).
+    const slug = engine === 'aurora-postgresql' ? 'aurora' : engine;
     return {
         name: `engine: ${engine}`,
-        dirName: `test-app-engine-${engine}`,
+        dirName: `test-app-engine-${slug}`,
         steps() {
             return [
                 ['scaffold', () => run('node', [CLI, 'init', '--headless', '--framework=node', '--needsDatabase', '--db-engine', engine], { cwd: this.dir, env: baseEnv })],

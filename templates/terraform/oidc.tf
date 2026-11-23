@@ -49,11 +49,11 @@ locals {
   # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
   # the boundary under the 6144-char managed-policy quota that broke
   # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
-  # several exact ARNs when adding entries. Headroom is 78 chars
-  # at 32-char prefixes (316 at 24): the shutdown-into-execution
-  # merger paid for the lifecycle/snapshot/table data verbs, so
-  # additions still fit — but the next one re-runs the quota probe
-  # before extending.
+  # several exact ARNs when adding entries. Headroom is 64 chars
+  # at 32-char prefixes (286 at 24): the PITR/backup verbs plus
+  # their backup-ARN entry spent the suffix-loosening payback, with
+  # the verb-collapse battery covering the rest — the next addition
+  # re-runs the quota probe before extending.
   guardrail_compute_abuse_resources    = ["*"]
   guardrail_snapshot_sharing_resources = ["*"]
   guardrail_state_destruction_resources = [
@@ -74,12 +74,18 @@ locals {
   guardrail_aurora_destruction_resources = [
     "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
   ]
-  guardrail_table_deletion_resources = [
+  guardrail_table_data_resources = [
     "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table",
+    # Backup ARNs authorize backup create/delete/restore-from; the table
+    # entry alone can't match them.
+    "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.prod_prefix}-table/backup/*",
   ]
-  guardrail_snapshot_deletion_resources = [
-    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:${local.prod_prefix}-db-*",
-    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:${local.prod_prefix}-db-cluster-*",
+  guardrail_snapshot_data_resources = [
+    # Middle-wildcard: automated snapshots carry an `rds:` name prefix
+    # (AWS CopyDBSnapshot API reference), so prefix anchoring would
+    # miss them. The infix still can't match `-pr-<n>-` names.
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:snapshot:*${local.prod_prefix}-db*",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster-snapshot:*${local.prod_prefix}-db-cluster*",
     # Legacy bare pre-deploy-<sha> ids carry no db prefix, so
     # they match no prod pattern above — deny them outright. gc never
     # runs under preview credentials, so nothing legitimate needs them.
@@ -111,20 +117,29 @@ locals {
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-*-role",
   ]
   # Data-plane confinement: prod data ARNs shared by the
-  # DenyProdAppData twins. One statement is exact here, not
-  # lazy — every denied action only ever matches its own service's
-  # ARNs in a real call, so the cross-product cannot over-match.
+  # DenyProdAppData twins. Queue entries are suffix-anchored on
+  # purpose: hashed names keep their tails, so prefix anchoring
+  # would miss them. Preview queues match too — safe, because the
+  # preview role never sends/receives (pinned by test) and tasks
+  # stay carved out. Every denied action only ever matches its own
+  # service's ARNs in a real call, so the cross-product cannot
+  # over-match.
   guardrail_app_data_resources = [
     "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.prod_prefix}-secrets-*",
-    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.prod_prefix}-*",
+    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*-queue",
+    "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*-dlq",
   ]
   # Lifecycle twin of the above, deliberately carve-free: no bounded
-  # role ever stops or reboots a database (sleep/wake and db commands
-  # run on user credentials), and one fewer condition keeps the pair
-  # under the 6144-char boundary quota.
+  # role ever stops, starts, reboots, or restores a database
+  # (sleep/wake and db commands run on user credentials), and one
+  # fewer condition keeps the pair under the 6144-char boundary
+  # quota. Suffix-anchored like the queues (hashed identifiers keep
+  # their tails); preview DBs match too, safe because no preview
+  # workflow calls these verbs (pinned by test) and Terraform's
+  # Modify calls live in the anchored destruction statements.
   guardrail_db_lifecycle_resources = [
-    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:${local.prod_prefix}-db*",
-    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:${local.prod_prefix}-db-cluster",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:db:*-db*",
+    "arn:aws:rds:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster:*-db-cluster",
   ]
   # Carve-out principal for the app-data twins: the exact prod task
   # role ARN (workers send/receive prod queues). Singular on purpose:
@@ -139,7 +154,7 @@ locals {
   # task name, and the carve-out must track the rendered name exactly
   # (a stale plain ARN would silently uncarve workers).
   guardrail_task_role_principals = [
-    length("${local.prod_prefix}-task-role") > 64 ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${substr(local.prod_prefix, 0, 64 - 1 - 5 - 10)}-${substr(md5(local.prod_prefix), 0, 5)}-task-role" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
+    length("${local.prod_prefix}-task-role") > 64 ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${trimsuffix(substr(local.prod_prefix, 0, 64 - 1 - 5 - 10), "-")}-${substr(md5(local.prod_prefix), 0, 5)}-task-role" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
   ]
 }
 
@@ -322,7 +337,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
       {
         Sid      = "DenyProdLambdaRewrite"
         Effect   = "Deny"
-        Action   = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
+        Action   = ["lambda:UpdateFunctionCode", "lambda:Delete*"]
         Resource = local.guardrail_lambda_rewrite_resources
       },
       {
@@ -352,8 +367,8 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # iterator dance is narrow and unactionable without table reads.
         Sid      = "DenyProdTableData"
         Effect   = "Deny"
-        Action   = ["dynamodb:DeleteTable", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*"]
-        Resource = local.guardrail_table_deletion_resources
+        Action   = ["dynamodb:Delete*", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*", "dynamodb:Export*", "dynamodb:Restore*", "dynamodb:CreateBackup", "dynamodb:DeleteBackup", "dynamodb:UpdateTable"]
+        Resource = local.guardrail_table_data_resources
       },
       {
         # Manual snapshots (grada names them
@@ -367,8 +382,8 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # export-to-attacker-bucket paths. Deletion keeps its verbs.
         Sid      = "DenyProdSnapshotData"
         Effect   = "Deny"
-        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot", "rds:Copy*", "rds:Restore*", "rds:StartExportTask"]
-        Resource = local.guardrail_snapshot_deletion_resources
+        Action   = ["rds:DeleteDB*Snapshot", "rds:Copy*", "rds:Restore*", "rds:StartExportTask"]
+        Resource = local.guardrail_snapshot_data_resources
       },
       {
         # The vault ARN carries a random suffix and static trees have no
@@ -434,7 +449,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # Update/DeleteService or DeleteCluster.
         Sid      = "DenyProdTaskExecution"
         Effect   = "Deny"
-        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService", "ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService", "ecs:UpdateService", "ecs:Delete*"]
         Resource = local.guardrail_task_execution_resources
         # The bounded scheduler role must RunTask its task
         # definition at trigger time. A no-op on this side (the preview
@@ -449,7 +464,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
       {
         # RegisterTaskDefinition is likely resource-*-only (void half);
         # the cluster-scoped RunTask deny above is the real choke.
-        Sid      = "DenyProdTaskDefinitionRegistration"
+        Sid      = "DenyProdTaskDefRegistration"
         Effect   = "Deny"
         Action   = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"]
         Resource = local.guardrail_task_definition_resources
@@ -551,7 +566,7 @@ resource "aws_iam_policy" "preview_boundary" {
         # weaken security instead of breaking prod tasks.
         Sid      = "BoundaryDenyIAM"
         Effect   = "Deny"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary", "iam:CreatePolicy", "iam:DeletePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:CreateUser", "iam:DeleteUser", "iam:CreateAccessKey", "iam:DeleteAccessKey"]
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:*PermissionsBoundary", "iam:CreatePolicy", "iam:DeletePolicy", "iam:*PolicyVersion", "iam:CreateUser", "iam:DeleteUser", "iam:CreateAccessKey", "iam:DeleteAccessKey"]
         Resource = "*"
       },
       {
@@ -587,7 +602,7 @@ resource "aws_iam_policy" "preview_boundary" {
       {
         Sid      = "BoundaryDenyLambdaRewrite"
         Effect   = "Deny"
-        Action   = ["lambda:UpdateFunctionCode", "lambda:DeleteFunction"]
+        Action   = ["lambda:UpdateFunctionCode", "lambda:Delete*"]
         Resource = local.guardrail_lambda_rewrite_resources
       },
       {
@@ -611,14 +626,14 @@ resource "aws_iam_policy" "preview_boundary" {
       {
         Sid      = "BoundaryDenyTableData"
         Effect   = "Deny"
-        Action   = ["dynamodb:DeleteTable", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*"]
-        Resource = local.guardrail_table_deletion_resources
+        Action   = ["dynamodb:Delete*", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*", "dynamodb:Export*", "dynamodb:Restore*", "dynamodb:CreateBackup", "dynamodb:DeleteBackup", "dynamodb:UpdateTable"]
+        Resource = local.guardrail_table_data_resources
       },
       {
         Sid      = "BoundaryDenySnapshotData"
         Effect   = "Deny"
-        Action   = ["rds:DeleteDBSnapshot", "rds:DeleteDBClusterSnapshot", "rds:Copy*", "rds:Restore*", "rds:StartExportTask"]
-        Resource = local.guardrail_snapshot_deletion_resources
+        Action   = ["rds:DeleteDB*Snapshot", "rds:Copy*", "rds:Restore*", "rds:StartExportTask"]
+        Resource = local.guardrail_snapshot_data_resources
       },
       {
         Sid      = "BoundaryDenySecretsDeletion"
@@ -637,7 +652,7 @@ resource "aws_iam_policy" "preview_boundary" {
         # economy — a separate pair would re-inline the ARNs below).
         Sid      = "BoundaryDenyTaskExecution"
         Effect   = "Deny"
-        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService", "ecs:UpdateService", "ecs:DeleteService", "ecs:DeleteCluster"]
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:ExecuteCommand", "ecs:CreateService", "ecs:UpdateService", "ecs:Delete*"]
         Resource = local.guardrail_task_execution_resources
         # The bounded scheduler role must RunTask its task
         # definition at trigger time; every other capped caller stays
@@ -649,7 +664,7 @@ resource "aws_iam_policy" "preview_boundary" {
         }
       },
       {
-        Sid      = "BoundaryDenyTaskDefinitionRegistration"
+        Sid      = "BoundaryDenyTaskDefRegistration"
         Effect   = "Deny"
         Action   = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"]
         Resource = local.guardrail_task_definition_resources

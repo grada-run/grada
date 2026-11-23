@@ -72,7 +72,7 @@ describe('Tier 0: scaffold (Static)', () => {
     });
 
     it('rejects --target static for container frameworks', async () => {
-        await withTmpDir('tier0-static-mismatch', async (dir) => {
+        await withTmpDir('tier0-static-mism', async (dir) => {
             fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', dependencies: { express: '1.0.0' } }));
             const result = runCli(['init', '--target', 'static', '--headless'], { cwd: dir, env, capture: true });
             expect(result.status).toBe(1);
@@ -97,7 +97,7 @@ describe('Tier 0: addon matrix', () => {
 
     for (const { capability, file, extraArgs } of ADDON_MATRIX) {
         it(`scaffolds valid Terraform for ${capability}`, async () => {
-            await withTmpDir(`tier0-add-${capability.replace(':', '-')}`, async (dir) => {
+            await withTmpDir(`t0a-${capability.replace(':', '-')}`, async (dir) => {
                 const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env });
                 expect(init.status).toBe(0);
 
@@ -170,7 +170,7 @@ describe('Tier 0: failure paths', () => {
     });
 
     it('bare init with closed stdin refuses instead of abandoning the wizard', async () => {
-        await withTmpDir('tier0-fail-init-stdin', async (dir) => {
+        await withTmpDir('tier0-fail-istdin', async (dir) => {
             // e2e stdin is closed: the CLI must not pass an explicit
             // isHeadless:false that would defeat TTY inference. CI is
             // dropped so closed stdin alone drives the refusal.
@@ -184,7 +184,7 @@ describe('Tier 0: failure paths', () => {
     });
 
     it('secrets push with closed stdin and no .env refuses instead of prompting', async () => {
-        await withTmpDir('tier0-fail-push-stdin', async (dir) => {
+        await withTmpDir('tier0-fail-pstdin', async (dir) => {
             const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env });
             expect(init.status).toBe(0);
             expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);

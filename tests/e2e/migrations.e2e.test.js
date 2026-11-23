@@ -90,7 +90,7 @@ describe('Migrations: Vercel Next.js redirects', () => {
     });
 
     it('warns when output standalone is missing', async () => {
-        await withTmpDir('mig-nextjs-standalone', async (dir) => {
+        await withTmpDir('mig-njs-standalone', async (dir) => {
             nextFixture(dir, { standalone: false });
             const init = runCli(['init', '--target', 'ecs', '--headless'], { cwd: dir, env, capture: true });
             expect(init.status).toBe(0);
@@ -274,7 +274,7 @@ describe('Migrations: static export gating', () => {
 
 describe('Migrations: static-export admission', () => {
     it("admits Next.js output:'export' on --target static with BUILD_DIR out", async () => {
-        await withTmpDir('mig-static-nextexport', async (dir) => {
+        await withTmpDir('mig-static-nxexp', async (dir) => {
             fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', dependencies: { next: '15.0.0' } }));
             fs.writeFileSync(path.join(dir, 'next.config.js'), "module.exports = { output: 'export' };\n");
             const init = runCli(['init', '--target', 'static', '--headless'], { cwd: dir, env, capture: true });

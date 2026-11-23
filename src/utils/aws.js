@@ -112,10 +112,17 @@ export async function checkAwsCredentials(region) {
 export function formatStateBucketName(projectName, accountId) {
     const suffix = `-tfstate-${accountId}`;
     const room = Math.max(63 - suffix.length, 1);
-    let project = sanitizeProjectName(projectName);
-    if (project.length > room) project = project.substring(0, room).replace(/-+$/, '');
-    if (project === '') project = 'app';
-    return `${project}${suffix}`;
+    const project = sanitizeProjectName(projectName);
+    // Preserve a trailing resource suffix (`-a1b2c3`): truncating the
+    // combined string could sever it, collapsing two trees onto one
+    // bucket. Truncate the project part to fit around it instead.
+    const suffixMatch = project.match(/-[a-f0-9]{6}$/);
+    const resourceSuffix = suffixMatch ? suffixMatch[0] : '';
+    const stemRoom = Math.max(room - resourceSuffix.length, 1);
+    let stem = resourceSuffix ? project.slice(0, -resourceSuffix.length) : project;
+    if (stem.length > stemRoom) stem = stem.substring(0, stemRoom).replace(/-+$/, '');
+    if (stem === '') stem = 'app';
+    return `${stem}${resourceSuffix}${suffix}`;
 }
 
 export async function provisionStateBucket(region, projectName) {
