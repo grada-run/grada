@@ -189,7 +189,13 @@ jobs:
       DO_NOT_TRACK: '1'
     strategy:
       matrix:
-        db-engine: [mysql, aurora-postgresql]
+        # Scaffold dirs derive the project name, which must stay within
+        # the 26-char confinement bound — hence the short aurora slug.
+        include:
+          - db-engine: mysql
+            dir: test-app-engine-mysql
+          - db-engine: aurora-postgresql
+            dir: test-app-engine-aurora
     steps:
       - uses: actions/checkout@v4
 
@@ -214,7 +220,7 @@ jobs:
           CI_MOCK_AWS: 'true'
         run: |
           TMPROOT=$(mktemp -d)
-          APP_DIR="$TMPROOT/test-app-engine-${{ matrix.db-engine }}"
+          APP_DIR="$TMPROOT/${{ matrix.dir }}"
           mkdir -p "$APP_DIR"
           echo "GENERATED_DIR=$APP_DIR" >> "$GITHUB_ENV"
           cd "$APP_DIR"
@@ -245,7 +251,7 @@ jobs:
           - name: base
             scaffold: node "$GITHUB_WORKSPACE/bin/cli.js" --headless --preconfigured --framework=node --target lambda
             assert: test -f terraform/main.tf
-          - name: aurora-addons-domain
+          - name: addons
             scaffold: |
               printf '{"scripts":{"db:migrate":"prisma migrate deploy"}}' > package.json
               printf 'web: node index.js\n' > Procfile

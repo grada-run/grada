@@ -193,6 +193,45 @@ describe('Shift-left: local test:iac matches blocking CI scans', () => {
         const yml = readRepo('.github/workflows/iac-validation.yml');
         expect(yml).toContain('aquasec/trivy config --exit-code 1 --severity HIGH,CRITICAL');
     });
+
+    it('iac-validation scaffold dirs fit the 26-char confinement bound', async () => {
+        const { load } = await import('js-yaml');
+        const { MAX_CONFINED_PROJECT_LENGTH } = await import('../src/utils/resolvers.js');
+        const doc = load(readRepo('.github/workflows/iac-validation.yml'));
+        const over = [];
+        for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
+            const matrix = job?.strategy?.matrix ?? {};
+            const values = {};
+            for (const [key, list] of Object.entries(matrix)) {
+                if (key === 'include') continue;
+                values[key] = Array.isArray(list) ? list.map(String) : [String(list)];
+            }
+            if (Array.isArray(matrix.include)) {
+                for (const entry of matrix.include) {
+                    for (const [key, value] of Object.entries(entry ?? {})) {
+                        if (typeof value === 'string' && !value.includes('\n')) {
+                            (values[key] ??= []).push(value);
+                        }
+                    }
+                }
+            }
+            for (const step of job.steps ?? []) {
+                const run = typeof step?.run === 'string' ? step.run : '';
+                for (const match of run.matchAll(/APP_DIR="\$TMPROOT\/([^"]+)"/g)) {
+                    const pattern = match[1];
+                    let expanded = [pattern];
+                    for (const [, key] of pattern.matchAll(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g)) {
+                        const options = values[key] ?? [];
+                        expanded = expanded.flatMap((text) => options.map((v) => text.replace(new RegExp(`\\$\\{\\{\\s*matrix\\.${key}\\s*\\}\\}`), v)));
+                    }
+                    for (const dir of expanded) {
+                        if (dir.length > MAX_CONFINED_PROJECT_LENGTH) over.push(`${jobName}: ${dir} (${dir.length})`);
+                    }
+                }
+            }
+        }
+        expect(over, `scaffold dirs past the bound:\n${over.join('\n')}`).toEqual([]);
+    });
 });
 
 describe('Preview guardrails are self-protecting', () => {
