@@ -644,10 +644,14 @@ describe('Preview data-plane confinement', () => {
             expect(a[1].replaceAll('prod_prefix', 'app_name')).toBe(b[1]);
             if (a[2] !== undefined) expect(a[2], `${pattern} cap`).toBe(b[2]);
         }
-        // Both sides trim hyphen-cut stems (RDS forbids --); a trim on
-        // one side only would uncarve hyphen-cut workers.
-        expect(carve).toContain('trimsuffix(substr(');
-        expect(rendered).toContain('trimsuffix(substr(');
+        // Both sides strip ALL hyphen-cut stems (anchored-regex
+        // replace mirrors JS `.replace(/-+$/, '')`); a trim on one
+        // side only would uncarve hyphen-cut workers.
+        for (const [label, text] of [['carve', carve], ['rendered', rendered]]) {
+            expect(text, label).toContain('replace(substr(');
+            expect(text, label).toContain('"/-+$/", ""');
+            expect(text, label).not.toContain('trimsuffix(substr(');
+        }
     });
 
     it('denies prod DB lifecycle verbs with no carve-out (both twins)', () => {
@@ -856,12 +860,12 @@ describe('Table guardrails deny item data, not just the table', () => {
     // PITR/backup verbs: export and point-in-time restore authorize
     // the table; backup create/delete/restore-from authorize the
     // backup ARN (separate entry below). UpdateTable closes
-    // PITR-disablement (safety-feature destruction).
+    // PITR-disablement (safety-feature destruction). DeleteBackup is
+    // covered by Delete* and stays out for quota economy.
     const TABLE_BACKUP_VERBS = [
         'dynamodb:Export*',
         'dynamodb:Restore*',
         'dynamodb:CreateBackup',
-        'dynamodb:DeleteBackup',
         'dynamodb:UpdateTable',
     ];
 
@@ -869,10 +873,11 @@ describe('Table guardrails deny item data, not just the table', () => {
         const { tf, guardrails, boundary } = twinSlices();
         for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyProdTableData')], ['boundary', sidChunk(boundary, 'BoundaryDenyTableData')]]) {
             expect(chunk, `${label} statement missing`).not.toBe('');
-            // DeleteTable folds into Delete* (exact here: DeleteItem
-            // was already denied via *Item).
+            // DeleteTable/DeleteBackup fold into Delete* (exact
+            // here: DeleteItem was already denied via *Item).
             expect(chunk, label).toContain('dynamodb:Delete*');
             expect(chunk, label).not.toContain('dynamodb:DeleteTable');
+            expect(chunk, label).not.toContain('dynamodb:DeleteBackup');
             for (const action of [...TABLE_DATA_VERBS, ...TABLE_BACKUP_VERBS]) {
                 expect(chunk, `${label} missing ${action}`).toContain(action);
             }
@@ -897,10 +902,9 @@ describe('Table guardrails deny item data, not just the table', () => {
 // Statement array only, locals inlined, interpolations substituted — what
 // Terraform's jsonencode ships. Guards the 6144-char managed-policy quota
 // that broke tier1 E2E at a 24-char prefix.
-function boundaryPolicySize(prodPrefix) {
+function boundaryPolicySize(prodPrefix, region = 'us-east-2') {
     const tf = readRepo('templates/terraform/oidc.tf');
     const project = prodPrefix.replace(/-[a-f0-9]{6}$/, '');
-    const region = 'us-east-2';
     const account = '710596603276';
     const bucket = `${prodPrefix}-tfstate-${account}`.slice(0, 63);
     const stripComments = (src) => src.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
@@ -934,8 +938,8 @@ function boundaryPolicySize(prodPrefix) {
     slice = subst(slice);
     // Length conditionals (task-role carve-out): both test prefixes take
     // the plain branch — evaluate the literal form Terraform would. The
-    // over branch may nest one quoted string (trimsuffix's "-"), so the
-    // pattern allows a single quoted span inside it.
+    // over branch nests quoted strings (the strip-all replace's
+    // "/-+$/", ""), so the pattern allows quoted spans inside it.
     slice = slice.replace(/length\("([^"]*)"\)\s*>\s*(\d+)\s*\?\s*"((?:[^"]|"[^"]*")*)"\s*:\s*"([^"]*)"/g, (_, text, cap, over, under) =>
         JSON.stringify(text.length > Number(cap) ? over : under));
     // HCL -> JSON: quote keys, comma-separate newline fields/items.
@@ -984,6 +988,14 @@ describe('Boundary policy fits the 6144-char managed-policy quota (tier1 E2E)', 
 
     it('renders under quota for a 32-char prod prefix', () => {
         expect(boundaryPolicySize('abcdefghijklmnopqrstuvwxyz123456')).toBeLessThan(6144);
+    });
+
+    it('renders under quota in long-region names (ap-southeast-2, 24-char project)', () => {
+        // Region length counts per interpolated ARN: ap-southeast-2 adds
+        // 5 chars over us-east-2 on every regional ARN, which pushed an
+        // in-bound 24-char project (31-char prod prefix with the resource
+        // suffix) over quota on first apply.
+        expect(boundaryPolicySize('abcdefghijklmnopqrstuvwx-a1b2c3', 'ap-southeast-2')).toBeLessThan(6144);
     });
 
     it('folds exact ARNs into prod_prefix-anchored wildcards', () => {

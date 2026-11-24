@@ -51,6 +51,14 @@ npx grada-run exec --command "./scripts/check.sh"    # one-shot, exits with the 
 
 If the tooling itself is suspect (missing Terraform, broken AWS CLI, stuck state lock), [`doctor`](/grada/cli/doctor/) runs the pre-flight checks — `--deep` adds state-lock holder details.
 
+## After a CLI upgrade: unexpected replacements
+
+Upgrading grada can rename hashed AWS resource names when the pre-hash stem was cut on a hyphen — the double-hyphen fix means those stems hash differently, and an invalid name cannot be fixed without renaming. Only over-long project names are affected (short names render byte-identically); `terraform plan` shows exactly which resources want replacing, and the rename happens once.
+
+- **Queues (SQS):** replacement drops in-flight messages. Let workers drain first (watch `ApproximateNumberOfMessagesVisible` reach zero) or accept the loss for retryable workloads.
+- **Databases (RDS/Aurora):** identifier replacement is blocked by deletion protection, so `apply` fails loud instead of destroying data. Snapshot first (`db backup`), then decide: allow the replacement in a maintenance window and restore the snapshot into the renamed instance, or stay on the older CLI until a window opens.
+- **Roles, policies, alarms:** replaced cleanly with no data at stake — review the plan and apply.
+
 ## See also
 
 - [status](/grada/cli/status/), [diagnose](/grada/cli/diagnose/), [logs](/grada/cli/logs/), [exec](/grada/cli/exec/)

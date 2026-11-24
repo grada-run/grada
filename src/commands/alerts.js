@@ -502,7 +502,7 @@ ${aliasLine}  topic_arn = aws_sns_topic.alerts.arn
 locals {
   # Length-safe forwarder name (role + function both cap at 64):
   # short names render byte-identically, over-cap hash-suffixes.
-  forwarder_safe_name = length("${namePrefix}-alerts-forwarder") > 64 ? "\${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 17), "-")}-\${substr(md5(local.app_name), 0, 5)}-alerts-forwarder" : "${namePrefix}-alerts-forwarder"
+  forwarder_safe_name = length("${namePrefix}-alerts-forwarder") > 64 ? "\${replace(substr(local.app_name, 0, 64 - 1 - 5 - 17), "/-+$/", "")}-\${substr(md5(local.app_name), 0, 5)}-alerts-forwarder" : "${namePrefix}-alerts-forwarder"
 }
 
 variable "alerts_webhook_url" {

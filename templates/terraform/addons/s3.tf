@@ -11,6 +11,10 @@ resource "aws_s3_bucket" "storage" {
   # Truncate and sanitize the prefix so the full account ID suffix always fits
   # within S3's 63-character limit. Underscores are replaced because S3 names
   # must be DNS-compatible (lowercase, hyphens only).
+  # Deliberate single-strip trimsuffix (NOT the strip-all safe-name
+  # idiom): this bucket has no JS twin to diverge from, S3 tolerates
+  # `--`, and re-stripping would rename buckets — replacing them,
+  # which destroys stored objects. Do not "fix".
   bucket = "${trimsuffix(substr(replace(lower(local.app_name), "_", "-"), 0, 42), "-")}-storage-${data.aws_caller_identity.current.account_id}"
   # Preview teardowns destroy raw (no CLI drain step runs there), so
   # preview buckets self-clean — versions and lone delete markers

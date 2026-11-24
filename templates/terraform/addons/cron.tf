@@ -10,9 +10,9 @@ locals {
   # names hash-suffix instead of failing validation. Mirrors
   # safeSuffixedName in resolvers.js.
   schedule_full_name         = "${local.app_name}-cron-{{CRON_NAME}}"
-  schedule_safe_name         = length(local.schedule_full_name) > 64 ? "${trimsuffix(substr(local.schedule_full_name, 0, 64 - 1 - 5), "-")}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
-  schedule_group_safe_name   = length("${local.app_name}-crons") > 64 ? "${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 6), "-")}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
-  scheduler_policy_safe_name = length("${local.app_name}-cron-scheduler-policy") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 22), "-")}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-policy" : "${local.app_name}-cron-scheduler-policy"
+  schedule_safe_name         = length(local.schedule_full_name) > 64 ? "${replace(substr(local.schedule_full_name, 0, 64 - 1 - 5), "/-+$/", "")}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name
+  schedule_group_safe_name   = length("${local.app_name}-crons") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 6), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-crons" : "${local.app_name}-crons"
+  scheduler_policy_safe_name = length("${local.app_name}-cron-scheduler-policy") > 128 ? "${replace(substr(local.app_name, 0, 128 - 1 - 5 - 22), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-cron-scheduler-policy" : "${local.app_name}-cron-scheduler-policy"
 }
 
 # --- IAM Role assumed by EventBridge Scheduler ---

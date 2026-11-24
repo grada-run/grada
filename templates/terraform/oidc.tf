@@ -49,11 +49,13 @@ locals {
   # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
   # the boundary under the 6144-char managed-policy quota that broke
   # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
-  # several exact ARNs when adding entries. Headroom is 64 chars
-  # at 32-char prefixes (286 at 24): the PITR/backup verbs plus
-  # their backup-ARN entry spent the suffix-loosening payback, with
-  # the verb-collapse battery covering the rest — the next addition
-  # re-runs the quota probe before extending.
+  # several exact ARNs when adding entries. Headroom is 88 chars
+  # at 32-char prefixes (310 at 24) in us-east-2; the long-region
+  # probe (ap-southeast-2, 24-char project) holds 13. Region length
+  # counts per interpolated ARN, so 25-26-char projects in
+  # long-region names stay over quota (pre-existing, loud at
+  # apply) — the next addition re-runs the quota probe in BOTH
+  # regions before extending.
   guardrail_compute_abuse_resources    = ["*"]
   guardrail_snapshot_sharing_resources = ["*"]
   guardrail_state_destruction_resources = [
@@ -154,7 +156,7 @@ locals {
   # task name, and the carve-out must track the rendered name exactly
   # (a stale plain ARN would silently uncarve workers).
   guardrail_task_role_principals = [
-    length("${local.prod_prefix}-task-role") > 64 ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${trimsuffix(substr(local.prod_prefix, 0, 64 - 1 - 5 - 10), "-")}-${substr(md5(local.prod_prefix), 0, 5)}-task-role" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
+    length("${local.prod_prefix}-task-role") > 64 ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${replace(substr(local.prod_prefix, 0, 64 - 1 - 5 - 10), "/-+$/", "")}-${substr(md5(local.prod_prefix), 0, 5)}-task-role" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.prod_prefix}-task-role",
   ]
 }
 
@@ -365,9 +367,11 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         # control verbs alone. Streams stay out of reach of this
         # pattern (stream ARNs carry a /stream suffix): accepted, the
         # iterator dance is narrow and unactionable without table reads.
+        # Delete* already covers DeleteTable/DeleteBackup (quota economy:
+        # every literal counts against the 6144-char boundary quota).
         Sid      = "DenyProdTableData"
         Effect   = "Deny"
-        Action   = ["dynamodb:Delete*", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*", "dynamodb:Export*", "dynamodb:Restore*", "dynamodb:CreateBackup", "dynamodb:DeleteBackup", "dynamodb:UpdateTable"]
+        Action   = ["dynamodb:Delete*", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*", "dynamodb:Export*", "dynamodb:Restore*", "dynamodb:CreateBackup", "dynamodb:UpdateTable"]
         Resource = local.guardrail_table_data_resources
       },
       {
@@ -626,7 +630,7 @@ resource "aws_iam_policy" "preview_boundary" {
       {
         Sid      = "BoundaryDenyTableData"
         Effect   = "Deny"
-        Action   = ["dynamodb:Delete*", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*", "dynamodb:Export*", "dynamodb:Restore*", "dynamodb:CreateBackup", "dynamodb:DeleteBackup", "dynamodb:UpdateTable"]
+        Action   = ["dynamodb:Delete*", "dynamodb:Batch*", "dynamodb:*Item", "dynamodb:Query", "dynamodb:Scan", "dynamodb:Execute*", "dynamodb:Transact*", "dynamodb:Export*", "dynamodb:Restore*", "dynamodb:CreateBackup", "dynamodb:UpdateTable"]
         Resource = local.guardrail_table_data_resources
       },
       {

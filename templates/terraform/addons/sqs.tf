@@ -9,9 +9,9 @@ locals {
   # Length-safe names: short names render byte-identically; over-cap
   # names hash-suffix instead of failing validation (queues cap at
   # 80, policies at 128). Mirrors safeSuffixedName in resolvers.js.
-  queue_safe_name        = length("${local.app_name}-queue") > 80 ? "${trimsuffix(substr(local.app_name, 0, 80 - 1 - 5 - 6), "-")}-${substr(md5(local.app_name), 0, 5)}-queue" : "${local.app_name}-queue"
-  dlq_safe_name          = length("${local.app_name}-dlq") > 80 ? "${trimsuffix(substr(local.app_name, 0, 80 - 1 - 5 - 4), "-")}-${substr(md5(local.app_name), 0, 5)}-dlq" : "${local.app_name}-dlq"
-  queue_policy_safe_name = length("${local.app_name}-queue-sqs-access") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 17), "-")}-${substr(md5(local.app_name), 0, 5)}-queue-sqs-access" : "${local.app_name}-queue-sqs-access"
+  queue_safe_name        = length("${local.app_name}-queue") > 80 ? "${replace(substr(local.app_name, 0, 80 - 1 - 5 - 6), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-queue" : "${local.app_name}-queue"
+  dlq_safe_name          = length("${local.app_name}-dlq") > 80 ? "${replace(substr(local.app_name, 0, 80 - 1 - 5 - 4), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-dlq" : "${local.app_name}-dlq"
+  queue_policy_safe_name = length("${local.app_name}-queue-sqs-access") > 128 ? "${replace(substr(local.app_name, 0, 128 - 1 - 5 - 17), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-queue-sqs-access" : "${local.app_name}-queue-sqs-access"
 }
 
 # --- Dead-Letter Queue ---

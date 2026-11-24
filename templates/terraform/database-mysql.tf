@@ -3,10 +3,10 @@
 # at 63, database names at 64, policies at 128). Mirrors
 # safeSuffixedName in resolvers.js.
 locals {
-  identifier_safe_name    = length("${local.app_name}-db") > 63 ? "${trimsuffix(substr(local.app_name, 0, 63 - 1 - 5 - 3), "-")}-${substr(md5(local.app_name), 0, 5)}-db" : "${local.app_name}-db"
+  identifier_safe_name    = length("${local.app_name}-db") > 63 ? "${replace(substr(local.app_name, 0, 63 - 1 - 5 - 3), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-db" : "${local.app_name}-db"
   db_name_base            = replace(local.app_name, "-", "")
   db_name_safe_name       = length(local.db_name_base) > 64 ? "${substr(local.db_name_base, 0, 59)}${substr(md5(local.db_name_base), 0, 5)}" : local.db_name_base
-  secret_policy_safe_name = length("${local.app_name}-rds-secret-policy") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 18), "-")}-${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "${local.app_name}-rds-secret-policy"
+  secret_policy_safe_name = length("${local.app_name}-rds-secret-policy") > 128 ? "${replace(substr(local.app_name, 0, 128 - 1 - 5 - 18), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-rds-secret-policy" : "${local.app_name}-rds-secret-policy"
 }
 
 # 1. Database Subnet Group (isolated subnets live in network.tf, shared

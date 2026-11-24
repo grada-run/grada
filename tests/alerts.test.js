@@ -275,7 +275,8 @@ describe('buildAlertsTf', () => {
         // Short names render byte-identically: the plain form survives
         // as the under-cap branch.
         expect(tf).toContain('"${local.app_name}-alerts-forwarder"');
-        expect(tf).toContain('trimsuffix(substr(');
+        expect(tf).toContain('replace(substr(');
+        expect(tf).toContain('"/-+$/", ""');
     });
 
     it('pins the static forwarder to us-east-1 alongside the alarm', () => {

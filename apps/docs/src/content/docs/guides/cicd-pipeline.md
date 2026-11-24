@@ -39,7 +39,7 @@ Trust is scoped to your repo at scaffold time — from `--github-repo`, your git
 
 ### Preview name confinement bound
 
-Over-long project names hash-suffix their derived AWS resource names — and prefix-anchored guardrail patterns can't match a hashed name, so confinement degrades past a point. New scaffolds are refused past **26 chars** (worst-case preview infix and resource suffix included, so every derived name stays plain). Trees scaffolded before the bound keep deploying exactly as today; `doctor` flags them with the remediation path: re-scaffold into a ≤26-char name and migrate state, or switch off over-long manual workspaces. Suffix-anchored statements (queue traffic, database lifecycle) and compute/vault confinement hold at any length regardless.
+Over-long project names hash-suffix their derived AWS resource names — and prefix-anchored guardrail patterns can't match a hashed name, so confinement degrades past a point: on hashed grandfathered trees the destruction-pattern denies (database, snapshot, queue, lambda, app-role patterns) no longer match, while the suffix-anchored data legs (queue traffic, database lifecycle) and compute/vault confinement hold at any length regardless. New scaffolds are refused past **26 chars** (worst-case preview infix and resource suffix included, so every derived name stays plain). Trees scaffolded before the bound keep deploying exactly as today; `doctor` flags them with the remediation path: re-scaffold into a ≤26-char name and migrate state, or switch off over-long manual workspaces.
 
 ## The six stages
 

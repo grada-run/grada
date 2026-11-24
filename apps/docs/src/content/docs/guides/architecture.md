@@ -87,7 +87,7 @@ Idle environments cost nothing in compute: [`sleep` / `wake`](/grada/cli/sleep/)
 
 ## Baseline limits (single points)
 
-The scaffolded baseline favors cost over redundancy: RDS runs single-AZ (no standby), the app service starts at one task (`desiredCount`, raise it when traffic needs it), and the ALB carries no deletion protection or access logging. These are explicit limits, not oversights — multi-AZ and hardened edge handling are future work, not silent gaps.
+The scaffolded baseline favors cost over redundancy: RDS runs single-AZ (no standby, one Aurora instance when you pick Aurora), the app service starts at one task (`desiredCount`, raise it when traffic needs it), the background worker is a single replica, Valkey is one node with no failover or snapshots (cache, not storage), and the ALB carries no deletion protection or access logging. These are explicit limits, not oversights — multi-AZ and hardened edge handling are future work, not silent gaps.
 
 ## Preview workspaces
 

@@ -1791,7 +1791,12 @@ describe('terraform template safety nets (carried P4s)', () => {
             const lines = content.split('\n').filter((line) => /_safe_name\s*=\s*length\(/.test(line) && line.includes('}-${substr(md5'));
             expect(lines.length, `${file} has no hyphen-joined safe names`).toBeGreaterThan(0);
             for (const line of lines) {
-                expect(line, `${file}: ${line.slice(0, 70)}`).toContain('trimsuffix(substr(');
+                // Strip-ALL (anchored-regex replace mirrors JS
+                // `.replace(/-+$/, '')`); single-strip trimsuffix kept a
+                // trailing hyphen on multi-hyphen cuts, emitting `--`.
+                expect(line, `${file}: ${line.slice(0, 70)}`).toContain('replace(substr(');
+                expect(line, `${file}: ${line.slice(0, 70)}`).toContain('"/-+$/", ""');
+                expect(line, `${file}: ${line.slice(0, 70)}`).not.toContain('trimsuffix(substr(');
             }
         }
     });

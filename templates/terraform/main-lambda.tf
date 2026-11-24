@@ -44,10 +44,10 @@ locals {
   # Length-safe names: short names render byte-identically; over-cap
   # names hash-suffix instead of failing IAM validation. Mirrors
   # safeSuffixedName in resolvers.js.
-  task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 10), "-")}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"
-  execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 16), "-")}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"
-  fn_safe_name             = length("${local.app_name}-fn") > 64 ? "${trimsuffix(substr(local.app_name, 0, 64 - 1 - 5 - 3), "-")}-${substr(md5(local.app_name), 0, 5)}-fn" : "${local.app_name}-fn"
-  secrets_policy_safe_name = length("${local.app_name}-app-secrets-policy") > 128 ? "${trimsuffix(substr(local.app_name, 0, 128 - 1 - 5 - 19), "-")}-${substr(md5(local.app_name), 0, 5)}-app-secrets-policy" : "${local.app_name}-app-secrets-policy"
+  task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 10), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"
+  execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 15), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"
+  fn_safe_name             = length("${local.app_name}-fn") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 3), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-fn" : "${local.app_name}-fn"
+  secrets_policy_safe_name = length("${local.app_name}-app-secrets-policy") > 128 ? "${replace(substr(local.app_name, 0, 128 - 1 - 5 - 19), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-app-secrets-policy" : "${local.app_name}-app-secrets-policy"
 }
 
 # --- CloudWatch Logs ---
