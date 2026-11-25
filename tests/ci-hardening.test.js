@@ -518,13 +518,13 @@ describe('Preview task-role confinement', () => {
         const { guardrails, boundary } = twinSlices();
         const guardrailStmts = statementsBySid(guardrails);
         const boundaryStmts = statementsBySid(boundary);
-        // Exact enumeration: 17 identical + 1 asymmetric + 4 no-twin by
+        // Exact enumeration: 16 identical + 1 asymmetric + 4 no-twin by
         // design + 1 trio-subsumed. A new Sid without a twin fails here.
-        // (Shutdown merged into TaskExecution for quota; Table/Snapshot
-        // Deletion renamed to Table/SnapshotData when data verbs joined.)
+        // (Shutdown merged into TaskExecution and snapshot sharing into
+        // ComputeAbuse for quota; Table/Snapshot Deletion renamed to
+        // Table/SnapshotData when data verbs joined.)
         const identicalTwins = [
             'DenyComputeAbuse',
-            'DenySnapshotSharing',
             'DenyProdStateDestruction',
             'DenyProdImageDeletion',
             'DenyProdLambdaRewrite',
@@ -834,8 +834,11 @@ describe('Snapshot guardrails cover pre-deploy names', () => {
 
     it('denies snapshot sharing for instance and cluster snapshots (both twins)', () => {
         const { guardrails, boundary } = twinSlices();
-        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenySnapshotSharing')], ['boundary', sidChunk(boundary, 'BoundaryDenySnapshotSharing')]]) {
+        // Merged into ComputeAbuse for quota (one shared envelope);
+        // both verbs must survive on both twins.
+        for (const [label, chunk] of [['guardrail', sidChunk(guardrails, 'DenyComputeAbuse')], ['boundary', sidChunk(boundary, 'BoundaryDenyComputeAbuse')]]) {
             expect(chunk, `${label} statement missing`).not.toBe('');
+            expect(chunk, label).toContain('ec2:RunInstances');
             // One wildcard covers ModifyDBSnapshotAttribute and
             // ModifyDBClusterSnapshotAttribute (the only two verbs that
             // match) — the cluster form was previously uncovered.
@@ -996,6 +999,14 @@ describe('Boundary policy fits the 6144-char managed-policy quota (tier1 E2E)', 
         // in-bound 24-char project (31-char prod prefix with the resource
         // suffix) over quota on first apply.
         expect(boundaryPolicySize('abcdefghijklmnopqrstuvwx-a1b2c3', 'ap-southeast-2')).toBeLessThan(6144);
+    });
+
+    it('renders under quota for suffixless pre-suffix trees (31-char, ap-southeast-2)', () => {
+        // Pre-suffix trees stay suffixless forever (resolveInitSuffix
+        // never mints for them), so a 31-char project there is a
+        // 31-char prefix — no resource suffix to blame. This window
+        // fit on 0.50.1 and overflowed after the boundary growth.
+        expect(boundaryPolicySize('abcdefghijklmnopqrstuvwx1234567', 'ap-southeast-2')).toBeLessThan(6144);
     });
 
     it('folds exact ARNs into prod_prefix-anchored wildcards', () => {

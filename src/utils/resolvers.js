@@ -392,6 +392,15 @@ export function resolveAppName(projectName, workspace, cwd = process.cwd()) {
     return `${projectName}${resolveWorkspaceSuffix({ workspace, cwd }, cwd)}`;
 }
 
+// Live application name for the current tree and workspace: project +
+// workspace suffix + resource suffix, exactly what the next render
+// addresses. Null when no project name resolves (not a grada tree).
+export function resolveLiveAppName(cwd = process.cwd()) {
+    const project = readTerraformProjectName(cwd);
+    if (!project) return null;
+    return `${project}${resolveWorkspaceSuffix({}, cwd)}${readResourceSuffix(cwd) || ''}`;
+}
+
 // Workspace-namespaced project name for resource derivation: --workspace
 // (or the local .terraform/environment) targets a preview stack. Telemetry
 // keeps the raw project name; explicit --cluster/--service/--log-group

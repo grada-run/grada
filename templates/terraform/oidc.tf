@@ -49,15 +49,14 @@ locals {
   # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
   # the boundary under the 6144-char managed-policy quota that broke
   # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
-  # several exact ARNs when adding entries. Headroom is 88 chars
-  # at 32-char prefixes (310 at 24) in us-east-2; the long-region
-  # probe (ap-southeast-2, 24-char project) holds 13. Region length
-  # counts per interpolated ARN, so 25-26-char projects in
-  # long-region names stay over quota (pre-existing, loud at
-  # apply) — the next addition re-runs the quota probe in BOTH
-  # regions before extending.
-  guardrail_compute_abuse_resources    = ["*"]
-  guardrail_snapshot_sharing_resources = ["*"]
+  # several exact ARNs when adding entries. Headroom is 170 chars
+  # at 32-char prefixes (392 at 24) in us-east-2; the long-region
+  # probe (ap-southeast-2, 24-char project) holds 95. Region
+  # length counts per interpolated ARN — every in-bound name now
+  # fits in every region, and only out-of-bound grandfathered
+  # trees can still overflow (loud at apply). The next addition
+  # re-runs the quota probe in BOTH regions before extending.
+  guardrail_compute_abuse_resources = ["*"]
   guardrail_state_destruction_resources = [
     "arn:aws:s3:::{{STATE_BUCKET}}*",
   ]
@@ -291,9 +290,11 @@ resource "aws_iam_role_policy" "preview_guardrails" {
     Version = "2012-10-17"
     Statement = [
       {
+        # Snapshot sharing merged here; see the twin's comment (quota
+        # economy — a separate pair would re-inline its own envelope).
         Sid      = "DenyComputeAbuse"
         Effect   = "Deny"
-        Action   = ["ec2:RunInstances"]
+        Action   = ["ec2:RunInstances", "rds:Modify*SnapshotAttribute"]
         Resource = local.guardrail_compute_abuse_resources
       },
       {
@@ -317,12 +318,6 @@ resource "aws_iam_role_policy" "preview_guardrails" {
           aws_iam_role.github_actions_deploy[0].arn,
           aws_iam_role.github_actions_preview[0].arn,
         ]
-      },
-      {
-        Sid      = "DenySnapshotSharing"
-        Effect   = "Deny"
-        Action   = ["rds:Modify*SnapshotAttribute"]
-        Resource = local.guardrail_snapshot_sharing_resources
       },
       {
         Sid      = "DenyProdStateDestruction"
@@ -580,16 +575,12 @@ resource "aws_iam_policy" "preview_boundary" {
         Resource = "*"
       },
       {
+        # Snapshot sharing merged here (quota economy — a separate
+        # pair would re-inline its own envelope for one verb).
         Sid      = "BoundaryDenyComputeAbuse"
         Effect   = "Deny"
-        Action   = ["ec2:RunInstances"]
+        Action   = ["ec2:RunInstances", "rds:Modify*SnapshotAttribute"]
         Resource = local.guardrail_compute_abuse_resources
-      },
-      {
-        Sid      = "BoundaryDenySnapshotSharing"
-        Effect   = "Deny"
-        Action   = ["rds:Modify*SnapshotAttribute"]
-        Resource = local.guardrail_snapshot_sharing_resources
       },
       {
         Sid      = "BoundaryDenyStateDestruction"

@@ -3,7 +3,7 @@ import { createTmpDirTracker } from './helpers/tmpdir.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames, safeSuffixedName, MAX_CONFINED_PROJECT_LENGTH, exceedsConfinementBound, resolveFunctionName } from '../src/utils/resolvers.js';
+import { readFileSafe, readTerraformProjectName, readTerraformOidcTrust, readTerraformRegion, resolveProjectName, resolveRegion, resolveLogGroup, resolveHeadless, resolveAppName, resolveNamespacedProject, withWorkspaceNamespace, resolveCwd, resolveCluster, resolveService, resolveWorkspaceSuffix, detectComputeTargetFromMainTf, readTerraformComputeTarget, readTerraformDbKind, readResourceSuffix, readRenderedContainerEnvNames, safeSuffixedName, MAX_CONFINED_PROJECT_LENGTH, exceedsConfinementBound, resolveFunctionName, resolveLiveAppName } from '../src/utils/resolvers.js';
 
 const tmp = createTmpDirTracker();
 
@@ -430,8 +430,36 @@ describe('resolveAppName', () => {
     });
 });
 
+describe('resolveLiveAppName', () => {
+    function writeMainTf(dir, project, suffixLine = '') {
+        fs.mkdirSync(path.join(dir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'terraform', 'main.tf'),
+            `locals {\n  app_name = "${project}\${local.env_suffix}"\n${suffixLine}}\n`
+        );
+    }
+
+    it('composes project plus live workspace and resource suffixes', () => {
+        const dir = makeTmp();
+        writeMainTf(dir, 'myapp', '  grada_resource_suffix = "-a1b2c3"\n');
+        fs.mkdirSync(path.join(dir, '.terraform'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.terraform', 'environment'), 'pr-7\n');
+        expect(resolveLiveAppName(dir)).toBe('myapp-pr-7-a1b2c3');
+    });
+
+    it('returns the bare project without workspace or suffix', () => {
+        const dir = makeTmp();
+        writeMainTf(dir, 'myapp');
+        expect(resolveLiveAppName(dir)).toBe('myapp');
+    });
+
+    it('returns null outside a grada tree', () => {
+        expect(resolveLiveAppName(makeTmp())).toBeNull();
+    });
+});
+
 describe('safeSuffixedName', () => {
-    it('renders short names byte-identically (existing trees never rename)', () => {
+    it('renders short names byte-identically (short names never rename)', () => {
         expect(safeSuffixedName('myapp', '-alb', 32)).toBe('myapp-alb');
         expect(safeSuffixedName('myapp-pr-7-a1b2c3', '-task-role', 64)).toBe('myapp-pr-7-a1b2c3-task-role');
     });

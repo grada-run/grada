@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'node:crypto';
 import { intro, outro, spinner } from '@clack/prompts';
 import color from 'picocolors';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
@@ -7,10 +8,14 @@ import { checkDependency } from '../utils/system.js';
 import { checkAwsCredentials, TROUBLESHOOTING_URL } from '../utils/aws.js';
 import { readLastRunMarker, isInterruptedMarker } from '../utils/terraform.js';
 import { refuseUnknownFlags } from '../utils/command.js';
-import { readTerraformOidcTrust, readTerraformProjectName, readResourceSuffix, resolveWorkspaceSuffix, MAX_CONFINED_PROJECT_LENGTH, MAX_CONFINED_APP_LENGTH, exceedsConfinementBound } from '../utils/resolvers.js';
+import { readTerraformOidcTrust, readTerraformProjectName, MAX_CONFINED_PROJECT_LENGTH, MAX_CONFINED_APP_LENGTH, exceedsConfinementBound, safeSuffixedName, resolveLiveAppName } from '../utils/resolvers.js';
 import { parseStateBucketBackend } from '../utils/terraform-metadata.js';
 import { normalizeOptions, parseFlags, normalizeArgv } from '../utils/args.js';
 import { trackEvent, flushTelemetry, detectCiProvider, setActiveCommandName, resetActiveCommandName } from '../core/telemetry.js';
+
+// Anchor into the troubleshooting guide's post-upgrade runbook (same
+// github-blob shape the DLQ alarm uses for its runbook link).
+const UPGRADE_RUNBOOK_URL = 'https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/troubleshooting.md#after-a-cli-upgrade-unexpected-replacements';
 
 // Checks are data: `{ id, label, scope, severity, run, hint }`.
 // - scope `toolchain` always runs; scope `project` runs only inside a
@@ -36,6 +41,7 @@ export const PROJECT_CHECKS = [
     { id: 'oidc_immutable_claims', label: 'OIDC trust formats', scope: 'project', severity: 'warn', run: checkOidcImmutableClaims, hint: () => 'Re-run npx grada-run init to upgrade the trust, or add a repo:<owner>@*/<name>@*:* entry to terraform/oidc.tf.' },
     { id: 'origin_restriction', label: 'ALB origin restriction', scope: 'project', severity: 'warn', run: checkOriginRestriction, hint: () => 'Re-run npx grada-run init to add the CloudFront origin-secret wiring, then apply.' },
     { id: 'name_confinement_bound', label: 'Project name confinement bound', scope: 'project', severity: 'warn', run: checkNameConfinementBound, hint: () => 'Shorten the project name (re-scaffold into a fresh tree and migrate state) or switch to a shorter workspace; the residual and its bounds are documented in the CI/CD pipeline guide.' },
+    { id: 'upgrade_renames', label: 'Upgrade resource renames', scope: 'project', severity: 'warn', run: checkUpgradeRenames, hint: () => `Review the plan before applying, then follow the upgrade section of the troubleshooting guide: ${UPGRADE_RUNBOOK_URL}` },
 ];
 
 const INSTALL_HINTS = {
@@ -222,7 +228,7 @@ function workspaceSuffix(lockKey) {
 function checkNameConfinementBound({ cwd }) {
     const project = readTerraformProjectName(cwd);
     if (!project) return { ok: true, skipped: 'no project name found' };
-    const appLen = project.length + resolveWorkspaceSuffix({}, cwd).length + (readResourceSuffix(cwd) || '').length;
+    const appLen = resolveLiveAppName(cwd).length;
     if (!exceedsConfinementBound(project) && appLen <= MAX_CONFINED_APP_LENGTH) return { ok: true };
     const reasons = [];
     if (exceedsConfinementBound(project)) {
@@ -232,6 +238,96 @@ function checkNameConfinementBound({ cwd }) {
         reasons.push(`current app name resolves to ${appLen} chars (bound: ${MAX_CONFINED_APP_LENGTH}): the active workspace lengthens it past confinement`);
     }
     return { ok: false, detailLines: reasons };
+}
+
+// Renders one hashed name the way a tree's own formula line does:
+// explicit stem length plus the line's own strip variant (single-
+// strip trimsuffix vs strip-all replace). Under-cap names render
+// plain. Lets the check compare what the tree renders today against
+// the current formula without reimplementing either branch.
+function legacyHashedName(base, suffix, cap, stemLength, singleStrip) {
+    const full = `${base}${suffix}`;
+    if (full.length <= cap) return full;
+    const cut = base.slice(0, Math.max(stemLength, 1));
+    const stem = singleStrip ? cut.replace(/-$/, '') : cut.replace(/-+$/, '');
+    return `${stem}-${createHash('md5').update(base, 'utf8').digest('hex').slice(0, 5)}${suffix}`;
+}
+
+// Parses one safe-name ternary from a tree's own .tf text: the local
+// name, cap, over-branch suffix (`''` for suffix-less joins), stem
+// length, strip variant, and whether it hashes schedule_full_name.
+// Anything unparseable (hand edits, the deliberate s3.tf bucket
+// line, non-ternary lines) returns null and is skipped, never
+// flagged — the check only names renames it can prove.
+function parseSafeNameLine(line) {
+    const localMatch = /^\s*([\w]+)\s*=/.exec(line);
+    const capMatch = /length\([^)]*\)\s*>\s*(\d+)/.exec(line);
+    const stemMatch = /,\s*0,\s*\d+\s*-\s*1\s*-\s*5(?:\s*-\s*(\d+))?\)/.exec(line);
+    const tailMatch = /\$\{substr\(md5\((local\.[\w]+)\)[^}]*\}([^"]*)"/.exec(line);
+    if (!localMatch || !capMatch || !stemMatch || !tailMatch) return null;
+    const cap = Number(capMatch[1]);
+    const suffix = tailMatch[2];
+    const stemLength = stemMatch[1] === undefined ? cap - 1 - 5 : cap - 1 - 5 - Number(stemMatch[1]);
+    return {
+        local: localMatch[1],
+        cap,
+        suffix,
+        stemLength,
+        singleStrip: line.includes('trimsuffix(substr('),
+        scheduleBase: tailMatch[1] === 'local.schedule_full_name',
+    };
+}
+
+// Project check: trees rendered before the hyphen-cut and exec-stem
+// fixes carry safe-name formulas that render differently from the
+// current ones — refreshing templates renames those resources.
+// Compares each old-idiom line in the live tree against the current
+// formula on the live app name and names what would move. Warn-grade
+// (short names and refreshed trees pass silently); unparseable lines
+// and missing files skip honestly instead of failing.
+function checkUpgradeRenames({ cwd }) {
+    const appName = resolveLiveAppName(cwd);
+    if (!appName) return { ok: true, skipped: 'no project name found' };
+    const tfDir = path.join(cwd, 'terraform');
+    let entries;
+    try {
+        entries = fs.readdirSync(tfDir, { withFileTypes: true });
+    } catch {
+        return { ok: true, skipped: 'no terraform directory found' };
+    }
+    const tfFiles = entries.filter((e) => e.isFile() && e.name.endsWith('.tf')).map((e) => e.name);
+    try {
+        for (const e of fs.readdirSync(path.join(tfDir, 'addons'), { withFileTypes: true })) {
+            if (e.isFile() && e.name.endsWith('.tf')) tfFiles.push(`addons/${e.name}`);
+        }
+    } catch {
+        // No addons dir — top-level files still checked.
+    }
+    const renames = [];
+    for (const rel of tfFiles) {
+        let content;
+        try {
+            content = fs.readFileSync(path.join(tfDir, rel), 'utf8');
+        } catch {
+            continue;
+        }
+        // Suffix-less schedule lines hash schedule_full_name (app name
+        // plus the rendered `-cron-<name>` tail), not the bare app name.
+        const scheduleTail = /schedule_full_name\s*=\s*"\$\{local\.app_name\}([^"{}]*)"/.exec(content)?.[1];
+        for (const line of content.split('\n')) {
+            const parsed = parseSafeNameLine(line);
+            if (!parsed) continue;
+            const base = parsed.scheduleBase
+                ? (scheduleTail === undefined ? null : `${appName}${scheduleTail}`)
+                : appName;
+            if (base === null || `${base}${parsed.suffix}`.length <= parsed.cap) continue;
+            const oldName = legacyHashedName(base, parsed.suffix, parsed.cap, parsed.stemLength, parsed.singleStrip);
+            const newName = safeSuffixedName(base, parsed.suffix, parsed.cap);
+            if (oldName !== newName) renames.push(`${parsed.local} (${rel}): ${oldName} → ${newName}`);
+        }
+    }
+    if (renames.length === 0) return { ok: true };
+    return { ok: false, detailLines: renames };
 }
 
 function checkOriginRestriction({ cwd }) {

@@ -55,7 +55,9 @@ locals {
   # names hash-suffix (deterministic md5 stem) instead of truncating
   # into collisions (ALB/TG) or failing validation (IAM). Mirrors
   # safeSuffixedName in resolvers.js — stem is always
-  # cap - 1 - 5 - len(suffix). Existing trees never rename.
+  # cap - 1 - 5 - len(suffix). Short names render byte-identically
+  # forever; hyphen-cut hashed names and over-cap exec roles rename
+  # once when templates refresh (doctor flags them first).
   alb_safe_name            = length("${local.app_name}-alb") > 32 ? "${replace(substr(local.app_name, 0, 32 - 1 - 5 - 4), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-alb" : "${local.app_name}-alb"
   tg_safe_name             = length("${local.app_name}-tg") > 32 ? "${replace(substr(local.app_name, 0, 32 - 1 - 5 - 3), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-tg" : "${local.app_name}-tg"
   task_role_safe_name      = length("${local.app_name}-task-role") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 10), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-task-role" : "${local.app_name}-task-role"

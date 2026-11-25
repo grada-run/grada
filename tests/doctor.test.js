@@ -922,6 +922,137 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('warns when hyphen-cut hashed names would rename on template refresh', async () => {
+        const cutBase = `${'a'.repeat(20)}---${'b'.repeat(20)}`;
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            `  app_name = "${cutBase}\${local.env_suffix}"\n` +
+            '  alb_safe_name = length("${local.app_name}-alb") > 32 ? "${trimsuffix(substr(local.app_name, 0, 32 - 1 - 5 - 4), "-")}-${substr(md5(local.app_name), 0, 5)}-alb" : "${local.app_name}-alb"\n' +
+            '}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/rename/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes short names even with the old single-strip idiom', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            '  app_name = "myapp${local.env_suffix}"\n' +
+            '  alb_safe_name = length("${local.app_name}-alb") > 32 ? "${trimsuffix(substr(local.app_name, 0, 32 - 1 - 5 - 4), "-")}-${substr(md5(local.app_name), 0, 5)}-alb" : "${local.app_name}-alb"\n' +
+            '}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes hyphen-cut names once templates carry the new idiom', async () => {
+        const cutBase = `${'a'.repeat(20)}---${'b'.repeat(20)}`;
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            `  app_name = "${cutBase}\${local.env_suffix}"\n` +
+            '  alb_safe_name = length("${local.app_name}-alb") > 32 ? "${replace(substr(local.app_name, 0, 32 - 1 - 5 - 4), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-alb" : "${local.app_name}-alb"\n' +
+            '}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('warns when an over-cap execution role carries the old stem', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            `  app_name = "${'p'.repeat(50)}\${local.env_suffix}"\n` +
+            '  execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 16), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"\n' +
+            '}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/execution-role/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes under-cap execution roles on the old stem', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            '  app_name = "myapp${local.env_suffix}"\n' +
+            '  execution_role_safe_name = length("${local.app_name}-execution-role") > 64 ? "${replace(substr(local.app_name, 0, 64 - 1 - 5 - 16), "/-+$/", "")}-${substr(md5(local.app_name), 0, 5)}-execution-role" : "${local.app_name}-execution-role"\n' +
+            '}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('warns on suffix-less schedule names cut on hyphens', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform', 'addons'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            `  app_name = "${'x'.repeat(55)}---\${local.env_suffix}"\n` +
+            '}\n'
+        );
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'addons', 'cron.tf'),
+            'locals {\n' +
+            '  schedule_full_name = "${local.app_name}-cron-n"\n' +
+            '  schedule_safe_name = length(local.schedule_full_name) > 64 ? "${trimsuffix(substr(local.schedule_full_name, 0, 64 - 1 - 5), "-")}-${substr(md5(local.schedule_full_name), 0, 5)}" : local.schedule_full_name\n' +
+            '}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/schedule_safe_name/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
     it('warns on list trusts containing an open repo:* entry', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

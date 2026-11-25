@@ -53,7 +53,7 @@ If the tooling itself is suspect (missing Terraform, broken AWS CLI, stuck state
 
 ## After a CLI upgrade: unexpected replacements
 
-Upgrading grada can rename hashed AWS resource names when the pre-hash stem was cut on a hyphen — the double-hyphen fix means those stems hash differently, and an invalid name cannot be fixed without renaming. Only over-long project names are affected (short names render byte-identically); `terraform plan` shows exactly which resources want replacing, and the rename happens once.
+Upgrading grada can rename hashed AWS resource names when the pre-hash stem was cut on a hyphen — the double-hyphen fix means those stems hash differently, and an invalid name cannot be fixed without renaming. Only over-long project names are affected (short names render byte-identically); `terraform plan` shows exactly which resources want replacing, and the rename happens once. Run `doctor` first: it compares your tree's formulas against the current ones and names every resource that would move before you refresh anything.
 
 - **Queues (SQS):** replacement drops in-flight messages. Let workers drain first (watch `ApproximateNumberOfMessagesVisible` reach zero) or accept the loss for retryable workloads.
 - **Databases (RDS/Aurora):** identifier replacement is blocked by deletion protection, so `apply` fails loud instead of destroying data. Snapshot first (`db backup`), then decide: allow the replacement in a maintenance window and restore the snapshot into the renamed instance, or stay on the older CLI until a window opens.
