@@ -60,6 +60,7 @@ export default defineConfig({
             { label: 'exec', slug: 'cli/exec' },
             { label: 'run', slug: 'cli/run' },
             { label: 'db', slug: 'cli/db' },
+            { label: 'queue', slug: 'cli/queue' },
             { label: 'gc', slug: 'cli/gc' },
             { label: 'doctor', slug: 'cli/doctor' },
             { label: 'eject', slug: 'cli/eject' },

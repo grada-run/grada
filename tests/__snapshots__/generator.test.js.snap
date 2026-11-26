@@ -64,12 +64,14 @@ resource "aws_security_group" "rds" {
 }
 
 # 2b. TLS enforcement: the cluster floats its engine version by
-# design, so resolve the regional default at plan time and derive
-# the matching family — no pin, no mismatch, ever. (default_only
-# spans every major's default, so latest pins the lookup down to
-# one; if AWS ever defaults new clusters elsewhere, the family
-# mismatch fails loud at apply instead of enforcing silently
-# wrong.) Pending reboot like the instance groups.
+# design, so resolve the regional default at creation time and
+# derive the matching family. (default_only spans every major's
+# default, so latest pins the lookup down to one.) The group name
+# carries no major and later family rollovers are ignored — when
+# AWS rolls the default major, applies stay clean instead of
+# failing on the mismatch; the enforced family stays correct
+# until a manual major upgrade, which re-taints the group (see
+# the database runbook). Pending reboot like the instance groups.
 data "aws_rds_engine_version" "default" {
   engine       = "aurora-postgresql"
   default_only = true
@@ -91,13 +93,21 @@ locals {
 }
 
 resource "aws_rds_cluster_parameter_group" "ssl" {
-  name   = "\${local.app_name}-aurorapg\${local.aurora_major}"
+  name   = "\${local.app_name}-aurorapg"
   family = "aurora-postgresql\${local.aurora_major}"
 
   parameter {
     name         = "rds.force_ssl"
     value        = "1"
     apply_method = "pending-reboot"
+  }
+
+  lifecycle {
+    # Rollover-stable: the lookup above feeds creation only. Later
+    # default-major rollovers change nothing (same name, family
+    # ignored), so applies stay clean; re-taint after a manual
+    # major upgrade so the family follows the new engine.
+    ignore_changes = [family]
   }
 }
 

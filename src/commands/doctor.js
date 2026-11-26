@@ -278,6 +278,20 @@ function parseSafeNameLine(line) {
     };
 }
 
+// Parses a pre-0.50 bare-truncation name (`substr("...-suffix", 0,
+// CAP)`): refresh replaces truncation with hash-suffixing, so any
+// over-cap base renames. Only app_name-rooted inners parse (anything
+// else cannot be attributed to the live tree); hash-ternary lines
+// never match (their substr calls take no quoted string).
+function parseTruncationLine(line) {
+    const localMatch = /^\s*([\w]+)\s*=/.exec(line);
+    const truncMatch = /substr\("([^"]+)",\s*0,\s*(\d+)\)/.exec(line);
+    if (!localMatch || !truncMatch) return null;
+    const appSuffix = /^\$\{local\.app_name\}([^"{}]*)$/.exec(truncMatch[1]);
+    if (!appSuffix) return null;
+    return { local: localMatch[1], cap: Number(truncMatch[2]), suffix: appSuffix[1] };
+}
+
 // Project check: trees rendered before the hyphen-cut and exec-stem
 // fixes carry safe-name formulas that render differently from the
 // current ones — refreshing templates renames those resources.
@@ -315,6 +329,16 @@ function checkUpgradeRenames({ cwd }) {
         // plus the rendered `-cron-<name>` tail), not the bare app name.
         const scheduleTail = /schedule_full_name\s*=\s*"\$\{local\.app_name\}([^"{}]*)"/.exec(content)?.[1];
         for (const line of content.split('\n')) {
+            const trunc = parseTruncationLine(line);
+            if (trunc) {
+                const full = `${appName}${trunc.suffix}`;
+                if (full.length > trunc.cap) {
+                    const oldName = full.slice(0, trunc.cap);
+                    const newName = safeSuffixedName(appName, trunc.suffix, trunc.cap);
+                    if (oldName !== newName) renames.push(`${trunc.local} (${rel}): ${oldName} → ${newName}`);
+                }
+                continue;
+            }
             const parsed = parseSafeNameLine(line);
             if (!parsed) continue;
             const base = parsed.scheduleBase

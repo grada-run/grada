@@ -279,7 +279,7 @@ const ADDON_NOTIFY_ALARMS = [
         threshold: 1,
         evaluationPeriods: 1,
         period: 300,
-        describe: () => 'the dead-letter queue holds failed messages (redrive or inspect them). Runbook: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/alert-notifications.md#redriving-the-dlq',
+        describe: () => 'the dead-letter queue holds failed messages (redrive with grada queue redrive, or inspect them first). Runbook: https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/alert-notifications.md#redriving-the-dlq',
         dimensions: { QueueName: 'aws_sqs_queue.dlq.name' },
     },
     {

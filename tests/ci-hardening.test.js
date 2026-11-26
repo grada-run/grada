@@ -984,6 +984,22 @@ describe('Boundary IAM deny is scoped to IAM writes (tier2 E2E)', () => {
     });
 });
 
+describe('Accepted guardrail residuals stay explicit', () => {
+    it('leaves Bedrock/SES spend undenied by decision, not by omission', () => {
+        const { guardrails, boundary } = twinSlices();
+        // Denying preview spend would gut preview fidelity for AI/email
+        // apps (previews are full copies); same-repo guard + PR review
+        // are the controls. Pinned so a future edit either keeps the
+        // residual deliberate or closes it knowingly.
+        for (const [label, slice] of [['guardrail', guardrails], ['boundary', boundary]]) {
+            for (const action of (slice.match(/"([a-z0-9-]+:[^"]+)"/g) || [])) {
+                expect(action, `${label} spend deny`).not.toMatch(/"(bedrock|ses):/);
+            }
+        }
+        expect(guardrails).toContain('Accepted residual');
+    });
+});
+
 describe('Boundary policy fits the 6144-char managed-policy quota (tier1 E2E)', () => {
     it('renders under quota for a 24-char prod prefix (tier1-live shape)', () => {
         expect(boundaryPolicySize('tier1-live-p64qpk-c5228d')).toBeLessThan(6144);

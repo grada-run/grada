@@ -14,6 +14,7 @@ import { runStatus, parseStatusArgs } from '../src/commands/status.js';
 import { runExec, parseExecArgs } from '../src/commands/exec.js';
 import { runRun, parseRunArgs } from '../src/commands/run.js';
 import { runDb } from '../src/commands/db.js';
+import { runQueue } from '../src/commands/queue.js';
 import { runRollback, parseRollbackArgs } from '../src/commands/rollback.js';
 import { runGc, parseGcArgs } from '../src/commands/gc.js';
 import { runAdd, parseAddArgs } from '../src/commands/add.js';
@@ -50,6 +51,7 @@ const HELP_TEXT = [
     '  db migrate           Run database migrations in a one-off ECS task (--cmd, --task-def, --timeout, --setup-ci)',
     '  db backup            Create an RDS snapshot checkpoint (--id, --timeout, --no-wait)',
     '  db restore           Restore the database from a snapshot ([snapshot-id], --yes)',
+    '  queue redrive        Move DLQ messages back to the primary queue (--workspace, --region, --yes)',
     '  gc                   Discover and delete orphaned ECR images, log groups, Elastic IPs, and old manual DB snapshots (--region, --deep, --yes, --snapshot-max-age-days)',
     '  sleep [env]          Scale ECS services to zero and stop RDS to save costs (--skip-db, --yes, --strict)',
     '  wake [env]           Start RDS and restore ECS desired counts (--skip-db, --no-wait, --strict)',
@@ -131,16 +133,17 @@ function runCommand(promise) {
 }
 
 // Help wins over every subcommand: no flow — destructive or otherwise —
-// may execute from a help invocation. `db` keeps its own usage path
-// inside runDb (db usage for `db --help` and every `db <leaf> --help`,
-// exit 0; bare `db` prints usage the same untracked way).
+// may execute from a help invocation. `db` and `queue` keep their own
+// usage paths inside runDb/runQueue (usage for `--help` and every
+// `<leaf> --help`, exit 0; bare invocations print usage the same
+// untracked way).
 const wantsHelp = positionalArgs[0] === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h');
 // Version wins over every subcommand like help does — but unlike help it
 // needs no `db` exemption: the version is global, identical everywhere.
 const wantsVersion = rawArgs.includes('--version') || rawArgs.includes('-v');
 if (wantsVersion) {
     console.log(`grada ${getCliVersion()}`);
-} else if (wantsHelp && positionalArgs[0] !== 'db') {
+} else if (wantsHelp && positionalArgs[0] !== 'db' && positionalArgs[0] !== 'queue') {
     console.log(HELP_TEXT.join('\n'));
 } else if (positionalArgs[0] === 'secrets' && positionalArgs[1] === 'push') {
     const envFile = positionalArgs[2] || '.env';
@@ -178,6 +181,8 @@ if (wantsVersion) {
     runCommand(runRun({ ...parseRunArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'db') {
     runCommand(runDb(commandArgs, { ...(isHeadless ? { isHeadless: true } : {}) }));
+} else if (positionalArgs[0] === 'queue') {
+    runCommand(runQueue(commandArgs, { ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'gc') {
     runCommand(runGc({ ...parseGcArgs(commandArgs), ...(isHeadless ? { isHeadless: true } : {}) }));
 } else if (positionalArgs[0] === 'add') {

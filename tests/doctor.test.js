@@ -1053,6 +1053,58 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('warns on pre-0.50 truncation names that refresh would re-hash', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            '  app_name = "averylongprojectnamethatexceeds${local.env_suffix}"\n' +
+            '}\n' +
+            'resource "aws_lb" "app" {\n' +
+            '  name = substr("${local.app_name}-alb", 0, 32)\n' +
+            '}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/alb/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes short truncation names (nothing to re-hash)', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n' +
+            '  app_name = "myapp${local.env_suffix}"\n' +
+            '}\n' +
+            'resource "aws_lb" "app" {\n' +
+            '  name = substr("${local.app_name}-alb", 0, 32)\n' +
+            '}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('points the upgrade-renames hint at a live runbook anchor', () => {
+        const check = PROJECT_CHECKS.find((entry) => entry.id === 'upgrade_renames');
+        expect(check.hint()).toContain('troubleshooting.md#after-a-cli-upgrade-unexpected-replacements');
+        const guide = fs.readFileSync('apps/docs/src/content/docs/guides/troubleshooting.md', 'utf8');
+        expect(guide).toContain('## After a CLI upgrade: unexpected replacements');
+    });
+
     it('warns on list trusts containing an open repo:* entry', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

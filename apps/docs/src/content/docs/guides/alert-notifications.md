@@ -32,7 +32,7 @@ When the tree carries addons, `alerts` also scaffolds their alarms: DLQ depth (a
 #### Redriving the DLQ
 
 1. Inspect the poison messages first (console, or `aws sqs receive-message` against the DLQ).
-2. Fix the consumer, then redrive: the console's "Start DLQ redrive" on the DLQ, or `aws sqs start-message-move-task --source-arn <dlq-arn> --destination-arn <queue-arn>`.
+2. Fix the consumer, then redrive: `npx grada-run queue redrive` resolves the queue pair and asks before moving (`--yes` in scripts) — or the console's "Start DLQ redrive" on the DLQ, or `aws sqs start-message-move-task --source-arn <dlq-arn> --destination-arn <queue-arn>`.
 3. The alarm clears once the DLQ drains. If it refires immediately, the consumer still rejects the messages — fix forward instead of redriving again.
 
 ### Email delivery

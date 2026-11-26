@@ -189,6 +189,7 @@ describe('buildAlertsTf', () => {
         expect(tf).toContain('alarm_actions = [aws_sns_topic.alerts.arn]');
         // The paged engineer gets the runbook, not just the symptom.
         expect(tf).toContain('alert-notifications.md#redriving-the-dlq');
+        expect(tf).toContain('grada queue redrive');
     });
 
     it('keeps --threshold on the primary alarm (addon alarms use baked defaults)', () => {
