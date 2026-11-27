@@ -578,6 +578,11 @@ describe('Preview data-plane confinement', () => {
         'secretsmanager:Update*',
         'sqs:Send*',
         'sqs:Receive*',
+        // Move-task shuffles DLQ traffic without sending or receiving,
+        // so the wildcards above miss it; unreachable from grada-driven
+        // preview paths today (redrive runs on user credentials), but
+        // the twin means queue traffic, and this is queue traffic.
+        'sqs:StartMessageMoveTask',
     ];
 
     it('denies prod app-data verbs with a task-role carve-out (both twins)', () => {

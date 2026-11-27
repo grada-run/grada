@@ -329,6 +329,14 @@ function checkUpgradeRenames({ cwd }) {
         // plus the rendered `-cron-<name>` tail), not the bare app name.
         const scheduleTail = /schedule_full_name\s*=\s*"\$\{local\.app_name\}([^"{}]*)"/.exec(content)?.[1];
         for (const line of content.split('\n')) {
+            // Pre-stamp TLS groups (major-keyed name) replace once on
+            // refresh: the rename forces replacement, and
+            // create-before-destroy makes it apply (destroy-first
+            // faults on the attached group).
+            if (rel === 'database-aurora-postgresql.tf' && line.includes('aurorapg${')) {
+                renames.push(`aws_rds_cluster_parameter_group.ssl (${rel}): one-time TLS parameter group replacement on refresh (pending-reboot; see the database runbook)`);
+                continue;
+            }
             const trunc = parseTruncationLine(line);
             if (trunc) {
                 const full = `${appName}${trunc.suffix}`;

@@ -1098,6 +1098,53 @@ describe('S27: project-aware doctor checks (R2)', () => {
         }
     });
 
+    it('flags old-pattern aurora TLS groups pending one-time replacement', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'database-aurora-postgresql.tf'),
+            'resource "aws_rds_cluster_parameter_group" "ssl" {\n' +
+            '  name   = "${local.app_name}-aurorapg${local.aurora_major}"\n' +
+            '}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/parameter group/i);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('stays silent on the static aurora group name', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'database-aurora-postgresql.tf'),
+            'resource "aws_rds_cluster_parameter_group" "ssl" {\n' +
+            '  name   = var.aurora_param_group_stamp == "" ? "${local.app_name}-aurorapg" : "${local.app_name}-aurorapg-${var.aurora_param_group_stamp}"\n' +
+            '}\n'
+        );
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_upgrade_renames: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
     it('points the upgrade-renames hint at a live runbook anchor', () => {
         const check = PROJECT_CHECKS.find((entry) => entry.id === 'upgrade_renames');
         expect(check.hint()).toContain('troubleshooting.md#after-a-cli-upgrade-unexpected-replacements');

@@ -1681,9 +1681,14 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(content).toMatch(/family\s*=\s*"aurora-postgresql\$\{local\.aurora_major\}"/);
         // Rollover-stable identity: the group name carries no major, and
         // later family rollovers are ignored — applies stay clean when
-        // AWS rolls the default; a major upgrade re-taints the group.
-        expect(content).toMatch(/name\s*=\s*"\$\{local\.app_name\}-aurorapg"/);
+        // AWS rolls the default. Replacements create before destroying
+        // (the group is attached; destroy-first faults), and a stamp
+        // variable forces a same-name-impossible family follow after a
+        // manual major upgrade.
+        expect(content).toMatch(/name\s*=\s*var\.aurora_param_group_stamp\s*==\s*""\s*\?/);
+        expect(content).toContain('variable "aurora_param_group_stamp"');
         expect(content).toMatch(/ignore_changes\s*=\s*\[family\]/);
+        expect(content).toContain('create_before_destroy');
         expect(content).toMatch(/name\s*=\s*"rds\.force_ssl"/);
         expect(content).toMatch(/value\s*=\s*"1"/);
         expect(content).toMatch(/apply_method\s*=\s*"pending-reboot"/);

@@ -49,9 +49,9 @@ locals {
   # ${prod_prefix}-* pattern matches prod only. Anchoring also keeps
   # the boundary under the 6144-char managed-policy quota that broke
   # tier1 E2E at a 24-char prefix — prefer one anchored wildcard over
-  # several exact ARNs when adding entries. Headroom is 170 chars
-  # at 32-char prefixes (392 at 24) in us-east-2; the long-region
-  # probe (ap-southeast-2, 24-char project) holds 95. Region
+  # several exact ARNs when adding entries. Headroom is 143 chars
+  # at 32-char prefixes (365 at 24) in us-east-2; the long-region
+  # probe (ap-southeast-2, 24-char project) holds 68. Region
   # length counts per interpolated ARN — every in-bound name now
   # fits in every region, and only out-of-bound grandfathered
   # trees can still overflow (loud at apply). The next addition
@@ -509,7 +509,7 @@ resource "aws_iam_role_policy" "preview_guardrails" {
         Effect = "Deny"
         Action = [
           "secretsmanager:Put*", "secretsmanager:Update*",
-          "sqs:Send*", "sqs:Receive*",
+          "sqs:Send*", "sqs:Receive*", "sqs:StartMessageMoveTask",
         ]
         Resource = local.guardrail_app_data_resources
         Condition = {
@@ -682,7 +682,7 @@ resource "aws_iam_policy" "preview_boundary" {
         Effect = "Deny"
         Action = [
           "secretsmanager:Put*", "secretsmanager:Update*",
-          "sqs:Send*", "sqs:Receive*",
+          "sqs:Send*", "sqs:Receive*", "sqs:StartMessageMoveTask",
         ]
         Resource = local.guardrail_app_data_resources
         Condition = {

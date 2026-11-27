@@ -25,13 +25,13 @@ Trees scaffolded before TLS enforcement pick it up on the next `apply`, but enfo
 
 ## Aurora major-version rollovers
 
-The Aurora TLS group takes its family from the regional default engine at creation; later default-major rollovers (years apart) change nothing, so `apply` stays clean and the group keeps enforcing TLS on your still-current major. Only a manual major upgrade needs the group to follow. Recover:
+The Aurora TLS group takes its family from the regional default engine at creation; later default-major rollovers (years apart) change nothing, so `apply` stays clean and the group keeps enforcing TLS on your still-current major. Only a manual major upgrade needs the group to follow — and because the group is attached, the follow is a rename, never a taint (same-name replacement cannot apply while attached). Recover:
 
 1. Snapshot first: `npx grada-run db backup` (cluster snapshots).
 2. Major-upgrade the cluster in your maintenance window (RDS console or `aws rds modify-db-cluster` with major upgrade enabled), after the usual compat homework — extensions, parameter changes, and a tested rollback snapshot. Major upgrades always need this care; the manual step is inherent, not grada overhead.
-3. Re-taint the TLS group so its family follows the new engine, then re-apply: `terraform -chdir=terraform taint aws_rds_cluster_parameter_group.ssl && npx grada-run apply`. The group is replaced (pending-reboot, TLS already enforced — no behavior change) and the cluster points at the matching family.
+3. Bump the group stamp to the new major in `terraform/grada.auto.tfvars` (`aurora_param_group_stamp = "17"`), then re-apply. The group is replaced create-before-destroy (pending-reboot, TLS already enforced — no behavior change) and the cluster points at the matching family. Leave the stamp set — the next major bumps it again.
 
-Upgrading to this grada version replaces the group once (its name no longer carries the major) — same pending-reboot mechanics, safe to apply. If you are mid-rollover-failure on the old naming (apply failing on a family mismatch), do the major upgrade first, then upgrade grada.
+Upgrading to this grada version replaces the group once (its name no longer carries the major) — create-before-destroy applies it cleanly. If you are mid-rollover-failure on the old naming (apply failing on a family mismatch), do the major upgrade first, then upgrade grada.
 
 ## Auto-Injected Environment Variables
 

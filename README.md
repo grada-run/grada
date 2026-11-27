@@ -108,6 +108,7 @@ The interactive wizard will analyze your codebase, detect your framework, estima
 | [`db enable-vector`](./apps/docs/src/content/docs/cli/db.md) | Enables `pgvector` for AI embeddings with a one-off VPC task. |
 | [`db import`](./apps/docs/src/content/docs/cli/db.md) | Streams a local dump or remote database into your private instance over an SSM tunnel. |
 | [`db backup` / `db restore`](./apps/docs/src/content/docs/cli/db.md) | Snapshot checkpoints and Terraform-pinned restores (cluster-aware for Aurora). |
+| [`queue redrive`](./apps/docs/src/content/docs/cli/queue.md) | Moves DLQ messages back to the primary queue after fixing the consumer (`--workspace`, `--region`, `--yes`). |
 | [`gc`](./apps/docs/src/content/docs/cli/gc.md) | Deletes orphaned ECR images, log groups, and EIPs — dry-run first, explicit confirmation (or `--yes`); `--deep` audits VPCs, secrets, and the state bucket report-only. |
 | [`sleep` / `wake`](./apps/docs/src/content/docs/cli/sleep.md) | Pauses an environment to $0 compute and restores exact replica counts (`--skip-db`, `--no-wait`, `--strict`). |
 | [`drift`](./apps/docs/src/content/docs/cli/drift.md) | Flags out-of-band AWS changes locally or daily in CI (`--setup`). |

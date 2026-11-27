@@ -49,6 +49,23 @@ describe('CLI Executable', () => {
         expect(content).toContain('Fargate vs Lambda');
     });
 
+    it('documents queue redrive in the README command table', () => {
+        const readme = fs.readFileSync(path.resolve(__dirname, '../README.md'), 'utf8');
+
+        expect(readme).toContain('queue redrive');
+    });
+
+    it('queue help lists every flag the redrive parser accepts', () => {
+        const cliPath = path.resolve(__dirname, '../bin/cli.js');
+        const content = fs.readFileSync(cliPath, 'utf8');
+        const line = content.split('\n').find((l) => l.includes('queue redrive'));
+
+        expect(line).toBeDefined();
+        for (const flag of ['--workspace', '--region', '--yes', '--project-name']) {
+            expect(line).toContain(flag);
+        }
+    });
+
     it.each(['destroy', 'sleep', 'gc', 'logs', 'status', 'rollback', 'exec', 'run'])(
         '%s --help prints usage instead of executing',
         (cmd) => {

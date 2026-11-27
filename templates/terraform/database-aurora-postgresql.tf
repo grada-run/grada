@@ -26,8 +26,9 @@ resource "aws_security_group" "rds" {
 # carries no major and later family rollovers are ignored — when
 # AWS rolls the default major, applies stay clean instead of
 # failing on the mismatch; the enforced family stays correct
-# until a manual major upgrade, which re-taints the group (see
-# the database runbook). Pending reboot like the instance groups.
+# until a manual major upgrade, which bumps the stamp variable
+# below so the group is replaced with the new family (see the
+# database runbook). Pending reboot like the instance groups.
 data "aws_rds_engine_version" "default" {
   engine       = "aurora-postgresql"
   default_only = true
@@ -49,7 +50,7 @@ locals {
 }
 
 resource "aws_rds_cluster_parameter_group" "ssl" {
-  name   = "${local.app_name}-aurorapg"
+  name   = var.aurora_param_group_stamp == "" ? "${local.app_name}-aurorapg" : "${local.app_name}-aurorapg-${var.aurora_param_group_stamp}"
   family = "aurora-postgresql${local.aurora_major}"
 
   parameter {
@@ -61,10 +62,21 @@ resource "aws_rds_cluster_parameter_group" "ssl" {
   lifecycle {
     # Rollover-stable: the lookup above feeds creation only. Later
     # default-major rollovers change nothing (same name, family
-    # ignored), so applies stay clean; re-taint after a manual
-    # major upgrade so the family follows the new engine.
-    ignore_changes = [family]
+    # ignored), so applies stay clean. Replacements create before
+    # destroying — the group is attached, so destroy-first faults
+    # on InvalidDBParameterGroupState. A manual major upgrade
+    # bumps the stamp variable below (same-name replacement is
+    # impossible while attached), which renames the group so the
+    # family follows the new engine; see the database runbook.
+    ignore_changes        = [family]
+    create_before_destroy = true
   }
+}
+
+variable "aurora_param_group_stamp" {
+  type        = string
+  default     = ""
+  description = "Bump to the new major (e.g. 17) after a manual Aurora major upgrade so the TLS group is replaced with the matching family. Leave empty otherwise — see the database runbook."
 }
 
 # 3. The Aurora PostgreSQL Serverless v2 Cluster (scale-to-zero)
