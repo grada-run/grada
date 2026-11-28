@@ -16,6 +16,7 @@ import { trackEvent, flushTelemetry, detectCiProvider, setActiveCommandName, res
 // Anchor into the troubleshooting guide's post-upgrade runbook (same
 // github-blob shape the DLQ alarm uses for its runbook link).
 const UPGRADE_RUNBOOK_URL = 'https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/troubleshooting.md#after-a-cli-upgrade-unexpected-replacements';
+const DATABASE_ROLLOVER_URL = 'https://github.com/grada-run/grada/blob/main/apps/docs/src/content/docs/guides/database-connections.md#aurora-major-version-rollovers';
 
 // Checks are data: `{ id, label, scope, severity, run, hint }`.
 // - scope `toolchain` always runs; scope `project` runs only inside a
@@ -42,6 +43,7 @@ export const PROJECT_CHECKS = [
     { id: 'origin_restriction', label: 'ALB origin restriction', scope: 'project', severity: 'warn', run: checkOriginRestriction, hint: () => 'Re-run npx grada-run init to add the CloudFront origin-secret wiring, then apply.' },
     { id: 'name_confinement_bound', label: 'Project name confinement bound', scope: 'project', severity: 'warn', run: checkNameConfinementBound, hint: () => 'Shorten the project name (re-scaffold into a fresh tree and migrate state) or switch to a shorter workspace; the residual and its bounds are documented in the CI/CD pipeline guide.' },
     { id: 'upgrade_renames', label: 'Upgrade resource renames', scope: 'project', severity: 'warn', run: checkUpgradeRenames, hint: () => `Review the plan before applying, then follow the upgrade section of the troubleshooting guide: ${UPGRADE_RUNBOOK_URL}` },
+    { id: 'aurora_stamp_location', label: 'Aurora stamp location', scope: 'project', severity: 'warn', run: checkAuroraStampLocation, hint: () => `Move the stamp to terraform/terraform.tfvars, then follow the rollover section: ${DATABASE_ROLLOVER_URL}` },
 ];
 
 const INSTALL_HINTS = {
@@ -334,7 +336,7 @@ function checkUpgradeRenames({ cwd }) {
             // create-before-destroy makes it apply (destroy-first
             // faults on the attached group).
             if (rel === 'database-aurora-postgresql.tf' && line.includes('aurorapg${')) {
-                renames.push(`aws_rds_cluster_parameter_group.ssl (${rel}): one-time TLS parameter group replacement on refresh (pending-reboot; see the database runbook)`);
+                renames.push(`aws_rds_cluster_parameter_group.ssl (${rel}): one-time TLS parameter group replacement on refresh (pending-reboot). Follow the Aurora rollovers section: ${DATABASE_ROLLOVER_URL}`);
                 continue;
             }
             const trunc = parseTruncationLine(line);
@@ -360,6 +362,28 @@ function checkUpgradeRenames({ cwd }) {
     }
     if (renames.length === 0) return { ok: true };
     return { ok: false, detailLines: renames };
+}
+
+// Project check: the aurora stamp must live in tracked
+// terraform.tfvars — grada.auto.tfvars is gitignored, so a stamp
+// there is invisible to fresh clones and CI while shared state
+// holds the stamped name (phantom replacement on every fresh
+// plan). Flags the move; never edits user files. Fires whenever
+// the ignored file sets it, even alongside the tracked one —
+// auto.tfvars wins conflicts, so duplication still flaps.
+function checkAuroraStampLocation({ cwd }) {
+    let content;
+    try {
+        content = fs.readFileSync(path.join(cwd, 'terraform', 'grada.auto.tfvars'), 'utf8');
+    } catch {
+        return { ok: true, skipped: 'no grada.auto.tfvars found' };
+    }
+    const stranded = content.split('\n').some((line) => /^\s*aurora_param_group_stamp\s*=/.test(line));
+    if (!stranded) return { ok: true };
+    return {
+        ok: false,
+        detailLines: ['aurora_param_group_stamp is set in terraform/grada.auto.tfvars (gitignored — fresh clones and CI cannot see it). Move the line to terraform/terraform.tfvars (tracked) and delete it here.'],
+    };
 }
 
 function checkOriginRestriction({ cwd }) {

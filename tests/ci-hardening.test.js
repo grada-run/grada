@@ -1003,6 +1003,22 @@ describe('Accepted guardrail residuals stay explicit', () => {
         }
         expect(guardrails).toContain('Accepted residual');
     });
+
+    it('keeps queue-admin verbs out of grada-driven preview paths (292 tripwire)', () => {
+        // The uncovered sqs verbs stay uncovered ONLY while no preview
+        // path calls them — if this fails, the TERMINAL call must be
+        // revisited (suffix-anchored cover would over-deny preview's
+        // own queue management, same wall as 274).
+        const surfaces = [
+            ...['deploy.yml', 'deploy-lambda.yml', 'deploy-static.yml', 'drift.yml', 'plan.yml', 'preview.yml', 'preview-lambda.yml', 'teardown.yml'].map((f) => readRepo(`templates/github/${f}`)),
+            readRepo('src/commands/mcp.js'),
+        ];
+        for (const verb of ['StartMessageMoveTask', 'CancelMessageMoveTask', 'SetQueueAttributes', 'AddPermission', 'RemovePermission', 'TagQueue', 'UntagQueue', 'CreateQueue', 'queue redrive']) {
+            for (const text of surfaces) {
+                expect(text, `preview surface calls ${verb}`).not.toContain(verb);
+            }
+        }
+    });
 });
 
 describe('Boundary policy fits the 6144-char managed-policy quota (tier1 E2E)', () => {

@@ -51,8 +51,21 @@ describe('CLI Executable', () => {
 
     it('documents queue redrive in the README command table', () => {
         const readme = fs.readFileSync(path.resolve(__dirname, '../README.md'), 'utf8');
+        const row = readme.split('\n').find((line) => line.includes('queue redrive'));
 
-        expect(readme).toContain('queue redrive');
+        expect(row).toBeDefined();
+        for (const flag of ['--workspace', '--region', '--yes', '--project-name']) {
+            expect(row).toContain(flag);
+        }
+    });
+
+    it('documents every redrive flag in the queue command page', () => {
+        const page = fs.readFileSync(path.resolve(__dirname, '../apps/docs/src/content/docs/cli/queue.md'), 'utf8');
+
+        expect(page).toContain('## Flags');
+        for (const flag of ['--project-name', '--workspace', '--region', '--yes']) {
+            expect(page).toContain(flag);
+        }
     });
 
     it('queue help lists every flag the redrive parser accepts', () => {

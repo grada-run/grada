@@ -21,14 +21,16 @@ resource "aws_security_group" "rds" {
 
 # 2b. TLS enforcement: the cluster floats its engine version by
 # design, so resolve the regional default at creation time and
-# derive the matching family. (default_only spans every major's
-# default, so latest pins the lookup down to one.) The group name
-# carries no major and later family rollovers are ignored — when
-# AWS rolls the default major, applies stay clean instead of
-# failing on the mismatch; the enforced family stays correct
-# until a manual major upgrade, which bumps the stamp variable
-# below so the group is replaced with the new family (see the
-# database runbook). Pending reboot like the instance groups.
+# derive the matching family — unless the stamp below names one.
+# (default_only spans every major's default, so latest pins the
+# lookup down to one.) The group name carries no major and later
+# family rollovers are ignored — when AWS rolls the default major,
+# applies stay clean instead of failing on the mismatch; the
+# enforced family stays correct until a manual major upgrade,
+# which bumps the stamp variable below so the group is replaced
+# with the new family (see the database runbook). A set stamp
+# also selects the family, so upgrading ahead of the rollover
+# attaches validly. Pending reboot like the instance groups.
 data "aws_rds_engine_version" "default" {
   engine       = "aurora-postgresql"
   default_only = true
@@ -51,7 +53,7 @@ locals {
 
 resource "aws_rds_cluster_parameter_group" "ssl" {
   name   = var.aurora_param_group_stamp == "" ? "${local.app_name}-aurorapg" : "${local.app_name}-aurorapg-${var.aurora_param_group_stamp}"
-  family = "aurora-postgresql${local.aurora_major}"
+  family = var.aurora_param_group_stamp == "" ? "aurora-postgresql${local.aurora_major}" : "aurora-postgresql${var.aurora_param_group_stamp}"
 
   parameter {
     name         = "rds.force_ssl"
@@ -76,7 +78,12 @@ resource "aws_rds_cluster_parameter_group" "ssl" {
 variable "aurora_param_group_stamp" {
   type        = string
   default     = ""
-  description = "Bump to the new major (e.g. 17) after a manual Aurora major upgrade so the TLS group is replaced with the matching family. Leave empty otherwise — see the database runbook."
+  description = "Bump to the new major (e.g. 17) in terraform.tfvars after a manual Aurora major upgrade so the TLS group is replaced with the matching family. Leave empty otherwise — see the database runbook."
+
+  validation {
+    condition     = var.aurora_param_group_stamp == "" || can(regex("^[0-9]+$", var.aurora_param_group_stamp))
+    error_message = "aurora_param_group_stamp must be empty or a major version number (e.g. \"17\")."
+  }
 }
 
 # 3. The Aurora PostgreSQL Serverless v2 Cluster (scale-to-zero)

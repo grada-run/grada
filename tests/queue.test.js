@@ -136,6 +136,22 @@ describe('queue redrive args', () => {
 });
 
 describe('Command: queue redrive (mocked SQS)', () => {
+    it('lists every flag in the positionals error', async () => {
+        const dir = makeTmp();
+        writeTree(dir, 'myapp');
+        const { output, restore } = captureLog();
+        try {
+            const result = await runQueueRedrive({ cwd: dir, isHeadless: true, unexpectedPositionals: ['oops'] });
+            expect(result.ok).toBe(false);
+            expect(result.reason).toBe('unexpected-positional-args');
+            for (const flag of ['--project-name', '--workspace', '--region', '--yes']) {
+                expect(output.join('\n')).toContain(flag);
+            }
+        } finally {
+            restore();
+        }
+    });
+
     it('refuses unknown flags', async () => {
         const dir = makeTmp();
         writeTree(dir, 'myapp');

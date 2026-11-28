@@ -1152,6 +1152,112 @@ describe('S27: project-aware doctor checks (R2)', () => {
         expect(guide).toContain('## After a CLI upgrade: unexpected replacements');
     });
 
+    it('flags an aurora stamp stranded in the ignored tfvars file', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'aurora_param_group_stamp = "17"\n');
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toMatch(/terraform\.tfvars/);
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_aurora_stamp_location: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('flags the ignored stamp even when terraform.tfvars also sets it', async () => {
+        // auto.tfvars wins over terraform.tfvars, so a both-set stamp
+        // still flaps — the ignored entry must move, not duplicate.
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'aurora_param_group_stamp = "17"\n');
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'terraform.tfvars'), 'aurora_param_group_stamp = "17"\n');
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_aurora_stamp_location: false,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('passes when the ignored file carries no stamp', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'grada.auto.tfvars'), 'create_oidc_provider = false\n');
+        const { restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(trackEvent).toHaveBeenCalledWith('doctor_run', expect.objectContaining({
+                check_aurora_stamp_location: true,
+            }));
+        } finally {
+            restore();
+        }
+    });
+
+    it('skips honestly with no ignored file to inspect', async () => {
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(path.join(tmpDir, 'terraform', 'terraform.tfvars'), 'aurora_param_group_stamp = "17"\n');
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            // Tracked stamps never flag: with no ignored file there is
+            // nothing stranded to inspect.
+            expect(output.join('\n')).toMatch(/stamp location.*skipped/i);
+        } finally {
+            restore();
+        }
+    });
+
+    it('routes the TLS flag through the upgrade section to the rollover section', async () => {
+        const guide = fs.readFileSync('apps/docs/src/content/docs/guides/troubleshooting.md', 'utf8');
+        expect(guide).toContain('aurora-major-version-rollovers');
+        fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'main.tf'),
+            'locals {\n  app_name = "myapp${local.env_suffix}"\n}\n'
+        );
+        fs.writeFileSync(
+            path.join(tmpDir, 'terraform', 'database-aurora-postgresql.tf'),
+            'resource "aws_rds_cluster_parameter_group" "ssl" {\n' +
+            '  name   = "${local.app_name}-aurorapg${local.aurora_major}"\n' +
+            '}\n'
+        );
+        const { output, restore } = captureLog();
+        try {
+            await runDoctor({ cwd: tmpDir });
+            expect(output.join('\n')).toContain('database-connections.md#aurora-major-version-rollovers');
+        } finally {
+            restore();
+        }
+    });
+
+    it('points the stamp hint at the live rollover section', () => {
+        const check = PROJECT_CHECKS.find((entry) => entry.id === 'aurora_stamp_location');
+        expect(check.hint()).toContain('database-connections.md#aurora-major-version-rollovers');
+        const guide = fs.readFileSync('apps/docs/src/content/docs/guides/database-connections.md', 'utf8');
+        expect(guide).toContain('## Aurora major-version rollovers');
+    });
+
     it('warns on list trusts containing an open repo:* entry', async () => {
         fs.mkdirSync(path.join(tmpDir, 'terraform'), { recursive: true });
         fs.writeFileSync(

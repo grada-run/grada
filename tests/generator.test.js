@@ -1678,7 +1678,13 @@ describe('terraform template safety nets (carried P4s)', () => {
         expect(content).toMatch(/latest\s*=\s*true/);
         expect(content).toContain('version_actual');
         expect(content).toContain('resource "aws_rds_cluster_parameter_group" "ssl"');
-        expect(content).toMatch(/family\s*=\s*"aurora-postgresql\$\{local\.aurora_major\}"/);
+        // Stamp-selected family: empty keeps the lookup (current
+        // behavior); a set stamp names the family, so upgrading
+        // ahead of the default rollover attaches validly. Invalid
+        // stamps fail at plan, never at AWS.
+        expect(content).toMatch(/family\s*=\s*var\.aurora_param_group_stamp\s*==\s*""\s*\?\s*"aurora-postgresql\$\{local\.aurora_major\}"\s*:\s*"aurora-postgresql\$\{var\.aurora_param_group_stamp\}"/);
+        expect(content).toContain('validation {');
+        expect(content).toContain('regex("^[0-9]+$"');
         // Rollover-stable identity: the group name carries no major, and
         // later family rollovers are ignored — applies stay clean when
         // AWS rolls the default. Replacements create before destroying

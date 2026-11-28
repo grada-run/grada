@@ -58,6 +58,7 @@ Upgrading grada can rename hashed AWS resource names when the pre-hash stem was 
 - **Queues (SQS):** replacement drops in-flight messages. Let workers drain first (watch `ApproximateNumberOfMessagesVisible` reach zero) or accept the loss for retryable workloads.
 - **Databases (RDS/Aurora):** identifier replacement is blocked by deletion protection, so `apply` fails loud instead of destroying data. Snapshot first (`db backup`), then decide: allow the replacement in a maintenance window and restore the snapshot into the renamed instance, or stay on the older CLI until a window opens.
 - **Roles, policies, alarms:** replaced cleanly with no data at stake — review the plan and apply.
+- **Aurora TLS group:** a one-time pending-reboot replacement when the group name still carries a major (`doctor` flags it). Major upgrades additionally bump the group stamp — see [Aurora major-version rollovers](/grada/guides/database-connections/#aurora-major-version-rollovers).
 
 ## See also
 

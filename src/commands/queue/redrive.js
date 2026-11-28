@@ -62,7 +62,7 @@ async function runQueueRedriveMain(input = {}) {
     if (Array.isArray(options.unexpectedPositionals) && options.unexpectedPositionals.length > 0) {
         return failCommand({
             noExit,
-            message: `\n✖ Unexpected argument "${options.unexpectedPositionals[0]}". Redrive takes flags only: queue redrive [--workspace <name>] [--region <region>] [--yes].\n`,
+            message: `\n✖ Unexpected argument "${options.unexpectedPositionals[0]}". Redrive takes flags only: queue redrive [--project-name <name>] [--workspace <name>] [--region <region>] [--yes].\n`,
             event: 'queue_redrive_run',
             telemetry: { projectName },
             errorCode: 'UNEXPECTED_POSITIONAL_ARGS',
